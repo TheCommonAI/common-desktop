@@ -8,7 +8,28 @@ This app targets **common-network main at 019a5cac063c53736dd289e34cd29c163f847c
 It makes no network-server changes and does not include the additional security
 and privacy PR currently under review.
 
-## Run
+## Download and install
+
+| Computer | Installer |
+| --- | --- |
+| Windows 64-bit | [Download Common for Windows (.exe)](https://github.com/TheCommonAI/common-desktop/releases/download/v0.1.0-preview.1/Common-0.1.0-win-x64.exe) |
+| Mac with Apple silicon (M-series) | [Download Common for Mac (.dmg)](https://github.com/TheCommonAI/common-desktop/releases/download/v0.1.0-preview.1/Common-0.1.0-mac-arm64.dmg) |
+| Mac with an Intel processor | [Download Common for Intel Mac (.dmg)](https://github.com/TheCommonAI/common-desktop/releases/download/v0.1.0-preview.1/Common-0.1.0-mac-x64.dmg) |
+
+**Windows:** open the installer; Common installs for your user and opens.
+**Mac:** open the disk image and drag Common into Applications, then open it.
+No Node.js, Python, or terminal commands are needed.
+
+On first launch, choose Chat, Contribute, or Both. Common guides contributors
+through Ollama installation and local model downloads. Ollama's installer may
+ask for confirmation; models need an internet connection and disk space.
+
+These are **unsigned preview installers**. Windows SmartScreen or macOS
+Gatekeeper may warn or block initial launch. Publisher signing, Apple
+notarization, and hands-on installation testing remain outstanding.
+See the [release notes and checksums](https://github.com/TheCommonAI/common-desktop/releases/tag/v0.1.0-preview.1).
+
+## Run from source (developers)
 
 Install Node.js 24 LTS, then:
 
@@ -49,10 +70,12 @@ npm run dist:linux     # Experimental Linux AppImage
 Build Windows installers on Windows and Mac disk images on macOS. Outputs are in
 `release/`. The included GitHub Actions workflow builds Windows/macOS by default;
 Linux is a manual opt-in. Signing identities are not configured: workflow builds
-are unsigned development artifacts, not signed public releases.
+are unsigned previews, not signed production releases.
 
 The source repository is [TheCommonAI/common-desktop](https://github.com/TheCommonAI/common-desktop).
-Open its Actions tab to follow the native build jobs and download their artifacts.
+Use the installer links above to install Common. Actions also retains build artifacts.
+The Publish desktop preview workflow can publish a new preview from a successful
+Desktop builds run on main; provide the run ID and a new preview tag.
 
 ## Network and privacy behaviour
 
@@ -98,7 +121,7 @@ npm test
 ```
 
 Tests use local fixtures and synthetic content. See [validation](docs/VALIDATION.md)
-and the [native acceptance checklist](docs/RELEASING.md). The earlier build session
-was lost before its binaries were saved. This deliverable contains recovered,
-rechecked source, not those lost Windows/Mac executables. Native execution,
-installation, tray, battery and real-inference checks are still required.
+and the [native acceptance checklist](docs/RELEASING.md). The released installers
+were built successfully on Windows and macOS from commit
+`6f99c960f18324bdb175bbf0620d9a1506ac7735`; automated checks also passed.
+Interactive installation, tray, battery and real-inference checks are still required.
