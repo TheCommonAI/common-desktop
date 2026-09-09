@@ -1,0 +1,31 @@
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> common-desktop@0.1.0 test
+> node --test tests/*.test.cjs
+
+✔ settings persist and credentials remain gateway-specific (2.857709ms)
+✔ settings reject unsupported model tags, credentials in URLs and invalid concurrency (0.689515ms)
+✔ idle and battery policies pause and resume correctly (0.273847ms)
+✔ SSE preserves split Unicode and routing metadata (31.661983ms)
+✔ incomplete SSE is reported as interrupted (8.083828ms)
+✔ malformed SSE is rejected (4.325801ms)
+✔ worker authentication, allowlist, model pinning and streaming match the baseline (14.067485ms)
+✔ worker concurrency and pause cancel active inference (11.954834ms)
+✔ download checksums and temporary-file cleanup (7.359321ms)
+✔ model pull reports progress and verifies installed inventory (8.07806ms)
+✔ cancelled pulls do not mark a model installed (2.534989ms)
+✔ network credentials are absent from local chat requests (4.610505ms)
+✔ registration, dropped-tunnel recovery and pause clean up the baseline worker (10.050433ms)
+✔ onboarding installs a fixture model and opens chat (347.96087ms)
+✔ three information levels reveal appropriate diagnostics (63.513106ms)
+✔ chat output stays plain text and destination change resets context (51.584927ms)
+✔ live updates preserve unsaved connection inputs (37.90253ms)
+✔ cancelled helper setup cannot enable contribution (75.356937ms)
+ℹ tests 18
+ℹ suites 0
+ℹ pass 18
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1297.862444
