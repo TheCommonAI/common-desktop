@@ -1,0 +1,103 @@
+name: Publish desktop preview
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/publish-preview.yml]
+  workflow_dispatch:
+    inputs:
+      build_run:
+        description: Successful Desktop builds run ID from main
+        required: true
+        default: '34414778207'
+      tag:
+        description: New preview release tag
+        required: true
+        default: v0.1.0-preview.1
+permissions:
+  actions: read
+  contents: write
+concurrency:
+  group: desktop-preview-release
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BUILD_RUN: ${{ inputs.build_run || '34414778207' }}
+      RELEASE_TAG: ${{ inputs.tag || 'v0.1.0-preview.1' }}
+    steps:
+      - name: Validate successful native build
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BUILD_RUN" =~ ^[0-9]+$ ]]
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$ ]]
+          gh api "repos/$GH_REPO/actions/runs/$BUILD_RUN" > run.json
+          jq -e --arg repo "$GH_REPO" '
+            .conclusion == "success" and .status == "completed" and
+            .event == "push" and .head_branch == "main" and
+            .path == ".github/workflows/build.yml" and
+            .repository.full_name == $repo and .head_repository.full_name == $repo
+          ' run.json
+          echo "sha=$(jq -r .head_sha run.json)" >> "$GITHUB_OUTPUT"
+          gh api "repos/$GH_REPO/actions/runs/$BUILD_RUN/jobs" > jobs.json
+          jq -e 'all(["verify", "windows", "macos"][];
+            . as $name | any($jobs[0].jobs[]; .name == $name and .conclusion == "success"))' \
+            --slurpfile jobs jobs.json jobs.json
+      - name: Download tested installers
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh run download "$BUILD_RUN" -n Common-Windows-x64 -D installers
+          gh run download "$BUILD_RUN" -n Common-macOS -D installers
+          python3 - <<'PY'
+          import hashlib, pathlib
+          folder = pathlib.Path("installers")
+          files = sorted(p for p in folder.iterdir() if p.suffix in {".exe", ".dmg"})
+          assert sum(p.suffix == ".exe" for p in files) == 1, "Expected one Windows installer"
+          assert sum(p.suffix == ".dmg" for p in files) == 2, "Expected both Mac architectures"
+          assert any("-arm64.dmg" in p.name for p in files)
+          assert any("-x64.dmg" in p.name for p in files)
+          lines = []
+          for p in files:
+              assert p.stat().st_size > 1_000_000, f"Truncated installer: {p.name}"
+              with p.open("rb") as f:
+                  if p.suffix == ".exe":
+                      assert f.read(2) == b"MZ", "Invalid Windows executable"
+                  else:
+                      f.seek(-512, 2)
+                      assert f.read(4) == b"koly", "Invalid DMG trailer"
+              lines.append(hashlib.sha256(p.read_bytes()).hexdigest() + "  " + p.name)
+          (folder / "SHA256SUMS.txt").write_text("\n".join(lines) + "\n")
+          PY
+      - name: Publish complete preview release
+        env:
+          BUILD_SHA: ${{ steps.source.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<'NOTES'
+          Download the installer for your computer below. No Node.js, Python, or source-code build is needed.
+
+          - **Windows x64:** open the .exe. Common installs for your user and launches automatically.
+          - **Mac with Apple silicon (M-series):** open the arm64 .dmg and drag Common to Applications.
+          - **Mac with an Intel processor:** use the x64 .dmg.
+
+          On first launch, choose Chat, Contribute, or Both. The app guides contributors through installing Ollama and downloading a local model. Ollama's own installer may require confirmation; model downloads require internet access and disk space.
+
+          This is an **unsigned preview**, not a signed production release. Windows SmartScreen and macOS Gatekeeper can warn or block initial launch. Apple notarization and publisher signing remain outstanding. Native packaging and automated tests passed on Windows and macOS; interactive installation and live-network inference still need testing on real PCs.
+
+          Includes the User, Enthusiast, and Developer views, tray controls, and optional launch at login. The separately reviewed common-network security changes are not included.
+
+          SHA256SUMS.txt records the installer checksums.
+          NOTES
+          printf '\nBuilt from commit %s in [native build run](https://github.com/%s/actions/runs/%s).\n' \
+            "$BUILD_SHA" "$GH_REPO" "$BUILD_RUN" >> release-notes.md
+          gh release create "$RELEASE_TAG" installers/*.exe installers/*.dmg installers/SHA256SUMS.txt \
+            --target "$BUILD_SHA" --title "Common 0.1.0 — Desktop preview" \
+            --notes-file release-notes.md --prerelease --draft
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease
