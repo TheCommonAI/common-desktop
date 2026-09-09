@@ -1,20 +1,29 @@
 # Validation record — 9 September 2026
 
-An earlier implementation passed 18 automated tests and was cross-packaged for
-Windows and macOS. That workspace restarted before those artifacts were saved.
-Those binaries and that exact commit are not part of this handoff.
+The 0.1.0 desktop preview installers were built from commit
+`6f99c960f18324bdb175bbf0620d9a1506ac7735` in
+[native build run 34414778207](https://github.com/TheCommonAI/common-desktop/actions/runs/34414778207).
 
-The implementation was recovered from the code in the conversation and checked
-again. See TEST-RESULTS.txt for the test results applying to this actual source
-archive. No live public node was registered during testing.
+- Source checks and automated tests passed on Ubuntu.
+- Automated tests and NSIS installer generation passed on Windows.
+  The build log confirms `oneClick=true` and `perMachine=false`.
+- Automated tests and Apple silicon/Intel DMG and ZIP packaging passed on macOS.
+- The release workflow checked executable/DMG file signatures, required both Mac
+  architectures, calculated SHA-256 checksums, and published the installers.
+- Linux packaging remains experimental and was not run for this release.
+- No live public node was registered during these checks.
 
-Native Electron execution was blocked by the earlier workspace's operating-system
-socket restrictions; browser preview was also blocked by automatic browser policy.
-No fresh visual or native acceptance pass is claimed. The approved design assets
-are retained. Full Windows installer generation requires Windows tooling; Mac
-signing and disk images require a Mac. Native build workflows are included.
+The [preview release](https://github.com/TheCommonAI/common-desktop/releases/tag/v0.1.0-preview.1)
+contains the actual Windows installer and both Mac disk images.
 
-The user subsequently created TheCommonAI/common-desktop and provided connector
-access for publication. The included workflow verifies the source and builds native
-Windows/macOS artifacts. No changes were made to common-network or its pending
-security PR.
+These checks establish automated test and packaging success, not interactive
+acceptance. Installation on a fresh Windows or Mac computer, first-run Ollama
+setup, tray behaviour, battery/idle policies, startup, uninstall and real-network
+inference still need the hands-on checks in [RELEASING.md](RELEASING.md).
+Native UI execution and browser preview were blocked in the earlier workspace;
+no new visual acceptance pass is claimed. The approved design assets are retained.
+
+The installers are unsigned previews. Publisher signing and Apple notarization
+are not configured. Operating-system warnings or launch blocks are possible.
+
+No changes were made to common-network or its pending security PR.
