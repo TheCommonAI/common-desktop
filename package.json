@@ -1,7 +1,71 @@
 {
-  "name":"common-desktop","productName":"Common","version":"0.1.0","description":"Chat and contribute to the Common AI network.","main":"src/main/index.cjs","author":"TheCommonAI","license":"AGPL-3.0-or-later","repository":"https://github.com/TheCommonAI/common-desktop",
-  "engines":{"node":">=24.11.0"},
-  "scripts":{"postinstall":"install-electron","start":"electron .","test":"node --test tests/*.test.cjs","check":"node scripts/check.cjs","dist:win":"electron-builder --win nsis --x64 --publish never","dist:portable":"electron-builder --win portable --x64 --publish never","dist:mac":"electron-builder --mac dmg zip --arm64 --x64 --publish never","dist:linux":"electron-builder --linux AppImage --x64 --publish never"},
-  "devDependencies":{"electron":"44.3.0","electron-builder":"26.15.3","jsdom":"30.0.1"},
-  "build":{"appId":"au.com.commonai.desktop","asar":true,"files":["src/**/*","assets/**/*","LICENSE","THIRD_PARTY_NOTICES.md","package.json"],"directories":{"output":"release"},"artifactName":"Common-${version}-${os}-${arch}.${ext}","win":{"target":"nsis","icon":"assets/icon.ico"},"portable":{"artifactName":"Common-${version}-Windows-${arch}-Portable.exe"},"nsis":{"oneClick":false,"perMachine":false,"allowToChangeInstallationDirectory":true,"createDesktopShortcut":true,"deleteAppDataOnUninstall":false,"include":"scripts/installer.nsh"},"mac":{"target":["dmg","zip"],"category":"public.app-category.productivity","icon":"assets/icon.icns","hardenedRuntime":true},"linux":{"target":"AppImage","category":"Utility","icon":"assets/icon.png"}}
+  "name": "common-desktop",
+  "productName": "Common",
+  "version": "0.1.0",
+  "description": "Chat and contribute to the Common AI network.",
+  "main": "src/main/index.cjs",
+  "author": "TheCommonAI",
+  "license": "AGPL-3.0-or-later",
+  "repository": "https://github.com/TheCommonAI/common-desktop",
+  "engines": {
+    "node": ">=24.11.0"
+  },
+  "scripts": {
+    "postinstall": "install-electron",
+    "start": "electron .",
+    "test": "node --test tests/*.test.cjs",
+    "check": "node scripts/check.cjs",
+    "dist:win": "electron-builder --win nsis --x64 --publish never",
+    "dist:portable": "electron-builder --win portable --x64 --publish never",
+    "dist:mac": "electron-builder --mac dmg zip --arm64 --x64 --publish never",
+    "dist:linux": "electron-builder --linux AppImage --x64 --publish never"
+  },
+  "devDependencies": {
+    "electron": "44.3.0",
+    "electron-builder": "26.15.3",
+    "jsdom": "30.0.1"
+  },
+  "build": {
+    "appId": "au.com.commonai.desktop",
+    "asar": true,
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "LICENSE",
+      "THIRD_PARTY_NOTICES.md",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "artifactName": "Common-${version}-${os}-${arch}.${ext}",
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "portable": {
+      "artifactName": "Common-${version}-Windows-${arch}-Portable.exe"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "deleteAppDataOnUninstall": false,
+      "include": "scripts/installer.nsh"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.productivity",
+      "icon": "assets/icon.icns",
+      "hardenedRuntime": true
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Utility",
+      "icon": "assets/icon.png"
+    }
+  }
 }
