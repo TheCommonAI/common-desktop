@@ -8,11 +8,11 @@ on:
       build_run:
         description: Successful Desktop builds run ID from main
         required: true
-        default: '34414778207'
+        default: '34575986442'
       tag:
         description: New preview release tag
         required: true
-        default: v0.1.0-preview.1
+        default: v0.1.0-preview.2
 permissions:
   actions: read
   contents: write
@@ -26,8 +26,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      BUILD_RUN: ${{ inputs.build_run || '34414778207' }}
-      RELEASE_TAG: ${{ inputs.tag || 'v0.1.0-preview.1' }}
+      BUILD_RUN: ${{ inputs.build_run || '34575986442' }}
+      RELEASE_TAG: ${{ inputs.tag || 'v0.1.0-preview.2' }}
     steps:
       - name: Validate successful native build
         id: source
@@ -36,6 +36,7 @@ jobs:
           set -euo pipefail
           [[ "$BUILD_RUN" =~ ^[0-9]+$ ]]
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$ ]]
+          gh run watch "$BUILD_RUN" --exit-status --interval 10
           gh api "repos/$GH_REPO/actions/runs/$BUILD_RUN" > run.json
           jq -e --arg repo "$GH_REPO" '
             .conclusion == "success" and .status == "completed" and
@@ -89,7 +90,9 @@ jobs:
 
           On first launch, choose Chat, Contribute, or Both. The app guides contributors through installing Ollama and downloading a local model. Ollama's own installer may require confirmation; model downloads require internet access and disk space.
 
-          This is an **unsigned preview**, not a signed production release. Windows SmartScreen and macOS Gatekeeper can warn or block initial launch. Apple notarization and publisher signing remain outstanding. Native packaging and automated tests passed on Windows and macOS; interactive installation and live-network inference still need testing on real PCs.
+          This preview fixes the invalid Mac bundle signature reported in preview.1. Both Mac apps are now ad-hoc signed after packaging, and codesign --verify --deep --strict passes for each app inside its final DMG. Replace the older Common.app in Applications with this build.
+
+          Ad-hoc signing checks bundle integrity; it does not verify Common's publisher. The Mac apps are still not Developer ID signed or Apple notarized, and Windows remains unsigned. Operating-system warnings or launch blocks are still possible. For a trusted test download, macOS may offer Open Anyway in System Settings > Privacy & Security. Do not disable Gatekeeper globally. Native packaging and automated tests passed; interactive installation and live-network inference still need testing on real PCs.
 
           Includes the User, Enthusiast, and Developer views, tray controls, and optional launch at login. The separately reviewed common-network security changes are not included.
 
