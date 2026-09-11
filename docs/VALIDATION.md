@@ -27,3 +27,23 @@ The installers are unsigned previews. Publisher signing and Apple notarization
 are not configured. Operating-system warnings or launch blocks are possible.
 
 No changes were made to common-network or its pending security PR.
+
+## Mac signature repair — 11 September 2026
+
+Miles's installed preview.1 failed codesign verification with
+"code has no resources but signature indicates they must be present".
+The old workflow skipped signing after the Electron bundle was customised.
+
+Build [34575986442](https://github.com/TheCommonAI/common-desktop/actions/runs/34575986442),
+commit `c43b5fb1554c7d5eeffb69a88d52c5e4a4e1492c`, explicitly ad-hoc signs the
+final Mac app bundles. A new required build step mounts each finished DMG
+read-only and runs `codesign --verify --deep --strict --verbose=2` against
+Common.app. Both arm64 and x64 apps reported "valid on disk" and
+"satisfies its Designated Requirement"; both identify their signature as adhoc.
+Automated tests and Windows packaging also passed.
+
+Preview.2 contains these repaired packages. Ad-hoc signing establishes internal
+signature consistency, not an authenticated publisher or Apple notarization.
+Gatekeeper acceptance and interactive application launch on a downloaded,
+quarantined copy still require testing. This does not claim the Mac installation
+experience is production-ready.
