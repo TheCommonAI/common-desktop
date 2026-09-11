@@ -42,7 +42,10 @@ Common.app. Both arm64 and x64 apps reported "valid on disk" and
 "satisfies its Designated Requirement"; both identify their signature as adhoc.
 Automated tests and Windows packaging also passed.
 
-Preview.2 contains these repaired packages. Ad-hoc signing establishes internal
+The repaired packages are available in the Common-macOS artifact of build
+34575986442. Publishing preview.2 failed with GitHub HTTP 403 (Resource not
+accessible by integration), despite contents:write on the workflow token.
+The preview.2 release has not been published. Ad-hoc signing establishes internal
 signature consistency, not an authenticated publisher or Apple notarization.
 Gatekeeper acceptance and interactive application launch on a downloaded,
 quarantined copy still require testing. This does not claim the Mac installation
