@@ -19,7 +19,31 @@ class Service extends EventEmitter{
  async pullModel(){const model=this.settings.value.model;return this.task(model,async({signal,onProgress})=>{const r=await checkedFetch(this.ollama+'/api/pull',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model,stream:true}),signal});for await(const line of lines(r.body)){if(!line)continue;const item=JSON.parse(line);if(item.error)throw new Error('Ollama could not download this model. Check disk space and the model tag, then retry.');onProgress({status:item.status,completed:item.completed||0,total:item.total||null});}await this.refresh();if(!this.state.ollama.models.some(m=>m.name===model||m.name===model+':latest'))throw new Error('Ollama did not finish installing the model. Retry the download.');});}
  update(patch){return this.serial(async()=>{if(('gateway'in patch&&patch.gateway!==this.settings.value.gateway)||('model'in patch&&patch.model!==this.settings.value.model)||('concurrency'in patch&&patch.concurrency!==this.settings.value.concurrency))await this.stopWorker();this.settings.update(patch);this.lastRefresh=0;this.retryAfter=0;await this.reconcileInternal();this.emitState();return this.snapshot();});}
  token(){const s=this.settings.value;return s.chatTokens[s.gateway]||s.identities[s.gateway]?.node_token;}
- async chat({messages,target}){if(this.chatController)throw new Error('Wait for this answer or stop it first.');if(!['local','network'].includes(target))throw new Error('Choose where to send your message.');if(!Array.isArray(messages)||!messages.length||messages.length>100||messages.some(m=>!['user','assistant'].includes(m.role)||typeof m.content!=='string')||JSON.stringify(messages).length>512000)throw new Error('This conversation is too long. Start a new chat.');const c=new AbortController();this.chatController=c;this.state.chatBusy=true;this.emitState();const timer=setTimeout(()=>c.abort(),300000),s=this.settings.value;try{const token=this.token();return await streamChat(target==='local'?this.ollama+'/v1/chat/completions':s.gateway+'/v1/chat/completions',target==='network'&&token?{'X-Common-Node-Token':token}:{},{model:target==='local'?s.model:'auto',messages},c.signal,d=>this.emit('chat-delta',d));}catch(e){if(c.signal.aborted)throw new Error('Answer stopped.');throw e;}finally{clearTimeout(timer);this.chatController=null;this.state.chatBusy=false;this.emitState();}}
+ async chat({messages,target}){
+  if(this.chatController)throw new Error('Wait for this answer or stop it first.');
+  if(!['local','network'].includes(target))throw new Error('Choose where to send your message.');
+  if(!Array.isArray(messages)||!messages.length||messages.length>100||messages.some(m=>!['user','assistant'].includes(m.role)||typeof m.content!=='string')||JSON.stringify(messages).length>512000)throw new Error('This conversation is too long. Start a new chat.');
+  const c=new AbortController();this.chatController=c;this.state.chatBusy=true;this.emitState();
+  const timer=setTimeout(()=>c.abort(),300000),s=this.settings.value,gateway=s.gateway,model=s.model;
+  const send=()=>{const token=this.token();return streamChat(target==='local'?this.ollama+'/v1/chat/completions':gateway+'/v1/chat/completions',target==='network'&&token?{'X-Common-Node-Token':token}:{},{model:target==='local'?model:'auto',messages},c.signal,d=>this.emit('chat-delta',d));};
+  try{
+   try{return await send();}catch(e){
+    // Retry only a recognised gateway rejection BEFORE inference. Never replay
+    // a prompt after a worker rejection or use a different gateway.
+    if(target!=='network'||e.status!==401||e.code!=='registration_expired'||this.settings.value.chatTokens[gateway]||this.registeredGateway!==gateway||policy(this.settings.value,this.power())||c.signal.aborted)throw e;
+    await this.serial(async()=>{
+     if(this.settings.value.gateway!==gateway||c.signal.aborted||policy(this.settings.value,this.power()))throw e;
+     await this.stopWorker();
+     try{await this.startWorker();}catch(reconnectError){await this.stopWorker();throw reconnectError;}
+    });
+    if(this.settings.value.gateway!==gateway||c.signal.aborted)throw e;
+    return await send();
+   }
+  }catch(e){
+   if(target==='network'){this.state.gateway.chatError={status:e.status||null,code:e.code||'connection_error',origin:e.origin||'unknown'};this.emitState();}
+   if(c.signal.aborted)throw new Error('Answer stopped.');throw e;
+  }finally{clearTimeout(timer);this.chatController=null;this.state.chatBusy=false;this.emitState();}
+ }
  cancelChat(){this.chatController?.abort();}
  reconcile(){return this.serial(()=>this.reconcileInternal());}
  async reconcileInternal(){if(this.closed)return;const reason=policy(this.settings.value,this.power());if(reason){if(this.worker)await this.stopWorker();this.state.worker.status=reason;this.emitState();return;}if(this.worker&&this.tunnel&&!this.tunnel.killed&&this.tunnel.exitCode===null&&this.state.ollama.online)return;if(this.worker)await this.stopWorker();if(this.retryAfter&&Date.now()<this.retryAfter)return;try{await this.startWorker();this.retryAfter=0;}catch(e){await this.stopWorker();this.state.worker.status=e.message;this.retryAfter=Date.now()+30000;this.emitState();}}
