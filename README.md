@@ -13,21 +13,30 @@ and privacy PR currently under review.
 | Computer | Installer |
 | --- | --- |
 | Windows 64-bit | [Download Common for Windows (.exe)](https://github.com/TheCommonAI/common-desktop/releases/download/v0.1.0-preview.1/Common-0.1.0-win-x64.exe) |
-| Mac with Apple silicon (M-series) | [Download Common for Mac (.dmg)](https://github.com/TheCommonAI/common-desktop/releases/download/v0.1.0-preview.1/Common-0.1.0-mac-arm64.dmg) |
-| Mac with an Intel processor | [Download Common for Intel Mac (.dmg)](https://github.com/TheCommonAI/common-desktop/releases/download/v0.1.0-preview.1/Common-0.1.0-mac-x64.dmg) |
+| Mac with Apple silicon (M-series) | [Download repaired Mac installers (.zip)](https://github.com/TheCommonAI/common-desktop/actions/runs/34575986442/artifacts/10189700219) |
+| Mac with an Intel processor | [Download repaired Mac installers (.zip)](https://github.com/TheCommonAI/common-desktop/actions/runs/34575986442/artifacts/10189700219) |
 
 **Windows:** open the installer; Common installs for your user and opens.
-**Mac:** open the disk image and drag Common into Applications, then open it.
+**Mac:** download the repaired build artifact (GitHub sign-in required), extract
+it, choose the arm64 DMG for Apple silicon or x64 DMG for Intel, then drag Common
+into Applications, replacing the old copy. Preview.1's Mac release files have an
+invalid signature; use the repaired artifact linked above instead.
 No Node.js, Python, or terminal commands are needed.
 
 On first launch, choose Chat, Contribute, or Both. Common guides contributors
 through Ollama installation and local model downloads. Ollama's installer may
 ask for confirmation; models need an internet connection and disk space.
 
-These are **unsigned preview installers**. Windows SmartScreen or macOS
+These are **preview installers**. Windows is unsigned; the repaired Mac builds
+have ad-hoc signatures checked inside the final DMGs, but are not Developer ID
+signed or Apple-notarized. Windows SmartScreen or macOS
 Gatekeeper may warn or block initial launch. Publisher signing, Apple
 notarization, and hands-on installation testing remain outstanding.
-See the [release notes and checksums](https://github.com/TheCommonAI/common-desktop/releases/tag/v0.1.0-preview.1).
+Publishing the repaired Mac installers as preview.2 was blocked by GitHub's
+release API (HTTP 403, Resource not accessible by integration). They are currently
+available as build artifacts. A repository maintainer needs to resolve release
+tag/publishing permissions before the preview.2 publishing workflow can succeed.
+See the [original release notes and checksums](https://github.com/TheCommonAI/common-desktop/releases/tag/v0.1.0-preview.1).
 
 ## Run from source (developers)
 
