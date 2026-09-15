@@ -12,31 +12,42 @@ and privacy PR currently under review.
 
 | Computer | Installer |
 | --- | --- |
-| Windows 64-bit | [Download Common for Windows (.exe)](https://github.com/TheCommonAI/common-desktop/releases/download/v0.1.0-preview.1/Common-0.1.0-win-x64.exe) |
-| Mac with Apple silicon (M-series) | [Download repaired Mac installers (.zip)](https://github.com/TheCommonAI/common-desktop/actions/runs/34575986442/artifacts/10189700219) |
-| Mac with an Intel processor | [Download repaired Mac installers (.zip)](https://github.com/TheCommonAI/common-desktop/actions/runs/34575986442/artifacts/10189700219) |
+| Windows 64-bit | [Download Common for Windows (.exe)](https://github.com/TheCommonAI/common-desktop/releases/download/v0.1.0-preview.2/Common-0.1.0-win-x64.exe) |
+| Mac with Apple silicon (M-series) | [Download Common for Apple silicon (.dmg)](https://github.com/TheCommonAI/common-desktop/releases/download/v0.1.0-preview.2/Common-0.1.0-mac-arm64.dmg) |
+| Mac with an Intel processor | [Download Common for Intel Mac (.dmg)](https://github.com/TheCommonAI/common-desktop/releases/download/v0.1.0-preview.2/Common-0.1.0-mac-x64.dmg) |
+
+Checksums for all three are published alongside them in
+[SHA256SUMS.txt](https://github.com/TheCommonAI/common-desktop/releases/download/v0.1.0-preview.2/SHA256SUMS.txt).
 
 **Windows:** open the installer; Common installs for your user and opens.
-**Mac:** download the repaired build artifact (GitHub sign-in required), extract
-it, choose the arm64 DMG for Apple silicon or x64 DMG for Intel, then drag Common
-into Applications, replacing the old copy. Preview.1's Mac release files have an
-invalid signature; use the repaired artifact linked above instead.
-No Node.js, Python, or terminal commands are needed.
+**Mac:** open the DMG and drag Common into Applications, replacing any older
+copy. No GitHub sign-in, no extracting a build artifact, and no Node.js, Python
+or terminal commands are needed.
+
+> **Maintainers:** these links name a release tag, so they keep serving that
+> release forever. Preview.1's links pointed at a pinned Actions run and went on
+> serving a build from before the icon changed, which looked like a caching bug
+> on every machine that downloaded it. Update this table in the same change that
+> publishes a preview. The self-updating `/releases/latest/download/<file>` form
+> would avoid this, but it resolves only to the newest *non-prerelease* release
+> and 404s while every release here is marked pre-release.
 
 On first launch, choose Chat, Contribute, or Both. Common guides contributors
 through Ollama installation and local model downloads. Ollama's installer may
 ask for confirmation; models need an internet connection and disk space.
 
-These are **preview installers**. Windows is unsigned; the repaired Mac builds
-have ad-hoc signatures checked inside the final DMGs, but are not Developer ID
-signed or Apple-notarized. Windows SmartScreen or macOS
-Gatekeeper may warn or block initial launch. Publisher signing, Apple
-notarization, and hands-on installation testing remain outstanding.
-Publishing the repaired Mac installers as preview.2 was blocked by GitHub's
-release API (HTTP 403, Resource not accessible by integration). They are currently
-available as build artifacts. A repository maintainer needs to resolve release
-tag/publishing permissions before the preview.2 publishing workflow can succeed.
-See the [original release notes and checksums](https://github.com/TheCommonAI/common-desktop/releases/tag/v0.1.0-preview.1).
+These are **preview installers**. Windows is unsigned; the Mac builds carry
+ad-hoc signatures checked inside the final DMGs, but are not Developer ID
+signed or Apple-notarized. Windows SmartScreen or macOS Gatekeeper may warn or
+block initial launch. Publisher signing, Apple notarization, and hands-on
+installation testing remain outstanding.
+
+Preview.2 is published: the release API permission failure that blocked it has
+been resolved, and the DMGs are attached to the release itself rather than to a
+build artifact behind a sign-in. See the
+[preview.2 release notes and checksums](https://github.com/TheCommonAI/common-desktop/releases/tag/v0.1.0-preview.2),
+or [preview.1](https://github.com/TheCommonAI/common-desktop/releases/tag/v0.1.0-preview.1)
+for the earlier build.
 
 ## Run from source (developers)
 
