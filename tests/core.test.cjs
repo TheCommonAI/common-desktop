@@ -40,3 +40,45 @@ test('every gateway request names the desktop client, and no local one does',asy
  assert.equal(requests[0].body.region,null);
  const local=[],ollama=await server(t,(q,r)=>{local.push(q.headers);r.end(answer);});const s2=new Service(settings,{dataDir:dir,openPath:async()=>'',ollama,identity});t.after(()=>s2.close());await s2.chat({messages:[{role:'user',content:'fixture'}],target:'local'});
  assert.equal(local[0]['x-common-client'],undefined);});
+test('registration waits out a tunnel hostname that is not resolvable yet',async t=>{
+ // Measured against the production gateway: a fresh quick tunnel resolves on
+ // public DNS at ~20s and is accepted at ~80s. Registering at ~5s always lost,
+ // and losing used to discard the tunnel and open a new one -- a contributor
+ // who never appears in the registry. The tunnel must survive the wait.
+ const attempts=[];const url=await server(t,async(q,r)=>{
+  attempts.push(q.url);
+  if(attempts.length<3){r.writeHead(400,{'Content-Type':'application/json'});r.end(JSON.stringify({detail:"endpoint_url host 'x.trycloudflare.com' does not resolve — the gateway health checker would flag this node dead on its first pass anyway."}));return;}
+  r.end('{"id":"late-id","node_token":"late-token"}');
+ });
+ const {settings,dir,identity}=config(t),s=new Service(settings,{dataDir:dir,openPath:async()=>'',identity});t.after(()=>s.close());
+ const slept=[];
+ const out=await s.register(url,{'Content-Type':'application/json'},'{}',{delay:1,sleep:async ms=>{slept.push(ms);}});
+ assert.equal(out.node_token,'late-token');
+ assert.equal(attempts.length,3);
+ assert.equal(slept.length,2);
+ assert.match(s.state.worker.status,/Waiting for the connection address/);
+});
+test('registration does not retry failures that are not the resolve race',async t=>{
+ const attempts=[];const url=await server(t,(q,r)=>{attempts.push(q.url);r.writeHead(409,{'Content-Type':'application/json'});r.end('{"detail":"name taken"}');});
+ const {settings,dir,identity}=config(t),s=new Service(settings,{dataDir:dir,openPath:async()=>'',identity});t.after(()=>s.close());
+ await assert.rejects(s.register(url,{},'{}',{delay:1,sleep:async()=>{}}),/HTTP 409/);
+ assert.equal(attempts.length,1,'a 409 must fail immediately, not be retried for two minutes');
+});
+test('registration gives up rather than retrying forever',async t=>{
+ const attempts=[];const url=await server(t,(q,r)=>{attempts.push(q.url);r.writeHead(400,{'Content-Type':'application/json'});r.end('{"detail":"does not resolve"}');});
+ const {settings,dir,identity}=config(t),s=new Service(settings,{dataDir:dir,openPath:async()=>'',identity});t.after(()=>s.close());
+ await assert.rejects(s.register(url,{},'{}',{attempts:4,delay:1,sleep:async()=>{}}),/HTTP 400/);
+ assert.equal(attempts.length,4);
+});
+test('the tunnel URL pattern ignores cloudflared own api host',async t=>{
+ // cloudflared prints https://api.trycloudflare.com in its startup chatter. The
+ // old pattern matched it, so the app could register Cloudflare's API as its
+ // endpoint -- which resolves, registers cleanly, and serves nothing.
+ const pattern=/https:\/\/(?!api\.)[a-z0-9-]+\.trycloudflare\.com/;
+ assert.equal('https://api.trycloudflare.com'.match(pattern),null);
+ assert.equal('Requesting new quick Tunnel on trycloudflare.com...'.match(pattern),null);
+ assert.equal('https://examine-ooo-allied-memorabilia.trycloudflare.com'.match(pattern)[0],
+   'https://examine-ooo-allied-memorabilia.trycloudflare.com');
+ const chatter='2026-09-15 cloudflared will use https://api.trycloudflare.com\n+-----+\n| https://janet-infringement-showers-judges.trycloudflare.com |\n+-----+';
+ assert.equal(chatter.match(pattern)[0],'https://janet-infringement-showers-judges.trycloudflare.com');
+});
