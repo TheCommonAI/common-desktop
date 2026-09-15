@@ -51,7 +51,10 @@
       "perMachine": false,
       "createDesktopShortcut": true,
       "deleteAppDataOnUninstall": false,
-      "include": "scripts/installer.nsh"
+      "include": "scripts/installer.nsh",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico"
     },
     "mac": {
       "target": [
