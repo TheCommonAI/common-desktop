@@ -1,3 +1,9 @@
+// How this machine identifies itself to the gateway. The terminal client and
+// this app share every URL, endpoint and credential, so the client string is
+// the only thing that separates an app user from a terminal user in the
+// gateway's records -- sent as both a header and a registration field.
+const CLIENT='common-desktop/'+require('../../package.json').version;
+const gatewayHeaders=(extra={})=>({'X-Common-Client':CLIENT,'User-Agent':CLIENT,...extra});
 // Read only a small error envelope. Never display arbitrary upstream text,
 // which can contain credentials, prompts or a proxy's HTML error page.
 async function errorEnvelope(response){
@@ -25,4 +31,4 @@ async function checkedFetch(url,options={}){
 async function json(url,options={}){return(await checkedFetch(url,{signal:AbortSignal.timeout(12000),...options})).json();}
 async function* lines(body){const decoder=new TextDecoder();let buffer='';for await(const chunk of body){buffer+=decoder.decode(chunk,{stream:true});if(buffer.length>4*1024*1024)throw new Error('Oversized response event.');let i;while((i=buffer.indexOf('\n'))>=0){yield buffer.slice(0,i).replace(/\r$/,'');buffer=buffer.slice(i+1);}}buffer+=decoder.decode();if(buffer)yield buffer;}
 async function streamChat(url,headers,payload,signal,onDelta){const r=await checkedFetch(url,{method:'POST',headers:{'Content-Type':'application/json',...headers},body:JSON.stringify({...payload,stream:true}),signal});const receipt={node:r.headers.get('x-common-node'),topology:r.headers.get('x-common-topology')};let content='',event=[],completed=false;function consume(){if(!event.length)return;const data=event.join('\n');event=[];if(data==='[DONE]'){completed=true;return;}const p=JSON.parse(data);if(p.error)throw new Error('The inference service returned an error.');if(p.choices?.some(c=>c.finish_reason!=null))completed=true;const delta=p.choices?.[0]?.delta?.content||'';if(typeof delta!=='string')return;content+=delta;if(content.length>2*1024*1024)throw new Error('The reply exceeded the desktop output limit.');if(delta)onDelta(delta);}try{for await(const line of lines(r.body)){if(line==='')consume();else if(line.startsWith('data:'))event.push(line.slice(5).trimStart());}consume();}finally{if(!r.body.locked)await r.body.cancel().catch(()=>{});}if(!completed)throw new Error('The connection ended before the answer finished. Please retry.');if(!content)throw new Error('The model returned no text. Try another model or a shorter question.');return {content,receipt};}
-module.exports={checkedFetch,json,lines,streamChat};
+module.exports={checkedFetch,json,lines,streamChat,gatewayHeaders,CLIENT};
