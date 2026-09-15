@@ -60,6 +60,10 @@ The explicit `install-electron` postinstall downloads Electron's pinned runtime.
   and existing local model selection.
 - Local or network chat with streaming, cancellation, conversation reset,
   and private-in-memory chat history for the current window.
+- Markdown answers — headings, emphasis, lists, tables, blockquotes, fenced code
+  and links — rendered as they stream. No dependency and no HTML from the model:
+  every answer is escaped before it is parsed, so markup arrives as text. Links
+  are only ever `http`/`https` and open in the system browser, never in-window.
 - Native tray, optional startup at login on Windows/macOS, close-to-tray,
   contribution pause/resume, idle/battery policies, and one/two simultaneous jobs.
 - App-managed cloudflared helper, baseline authenticated worker, registration,
@@ -108,6 +112,26 @@ Settings and gateway-specific credentials are stored in `settings.json` in
 Electron's user-data directory. Credentials are stored locally; protect backups.
 A different profile can be selected with `--user-data-dir=/absolute/path`.
 Chat history is held in renderer memory and cleared on quit or destination change.
+
+## One machine, one node
+
+The node identity is shared with the terminal client rather than kept privately:
+both read and write `~/.common-network/identity.json` in the format `common join`
+writes (`gateway`, `name`, `node_id`, `node_token`, `catalogue_id`, `domain_tags`,
+`joined_at`). A machine that joined from the terminal keeps its name and its
+`node_token` when it opens the app, so `common status` sees the same node, and
+chat from the app is authenticated by the token the terminal already holds.
+The token is only ever read for the gateway that issued it.
+
+One consequence: `common join` and desktop contribution on the *same machine* at
+the same time both register that one name, and each registration overwrites the
+other's `endpoint_url`. Run one at a time.
+
+Every gateway request carries `X-Common-Client: common-desktop/<version>` (also
+sent as the `User-Agent`), and `POST /nodes` includes the same string as a
+`client` field. Local Ollama requests carry neither. This is how an app user is
+told apart from a terminal user; gateway `main` at 019a5ca does not yet record
+it, so the field is accepted and ignored until the gateway stores it.
 
 ## Background operation and uninstall
 
