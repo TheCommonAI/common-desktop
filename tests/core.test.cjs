@@ -26,14 +26,21 @@ async function registrar(t,requests){return server(t,async(q,r)=>{let body='';fo
 // user cannot tell that from a message that names no cause. The rate-limit
 // transcript here is verbatim from cloudflared 2026.9.0 -- note the refusal
 // carries no timestamp and no ERR, which is why the level is not what we match.
-const RATE_LIMITED='2026-09-18T12:04:06Z INF Thank you for trying Cloudflare Tunnel. Doing so, without a Cloudflare account, is a quick way to experiment and try it out.\n2026-09-18T12:04:06Z INF Requesting new quick Tunnel on trycloudflare.com...\nquick tunnel provisioning failed with status 429: error code: 1015\n';
-test('a helper that quits reports the reason it gave',async t=>{const requests=[],url=await registrar(t,requests),{settings,dir,identity}=config(t);settings.update({gateway:url,contributing:true,idleOnly:false});fs.mkdirSync(path.join(dir,'bin'));fs.writeFileSync(path.join(dir,'bin',process.platform==='win32'?'cloudflared.exe':'cloudflared'),'fixture');const spawnTunnel=()=>{const c=new EventEmitter();c.stdout=new PassThrough();c.stderr=new PassThrough();c.exitCode=null;c.killed=false;c.kill=()=>{c.killed=true;c.exitCode=1;};setImmediate(()=>{c.stderr.write(RATE_LIMITED);c.exitCode=1;c.emit('exit',1);});return c;};const s=new Service(settings,{dataDir:dir,openPath:async()=>'',spawnTunnel,identity});t.after(()=>s.close());s.state.ollama={online:true,models:[{name:'llama3.2:3b'}],running:[]};await s.reconcile();assert.match(s.state.worker.status,/rate-limiting/);assert.equal(requests.length,0);});
+const RATE_LIMIT_TRANSCRIPT='2026-09-18T12:04:06Z INF Thank you for trying Cloudflare Tunnel. Doing so, without a Cloudflare account, is a quick way to experiment and try it out.\n2026-09-18T12:04:06Z INF Requesting new quick Tunnel on trycloudflare.com...\nquick tunnel provisioning failed with status 429: error code: 1015\n';
+test('a helper that quits reports the reason it gave',async t=>{const requests=[],url=await registrar(t,requests),{settings,dir,identity}=config(t);settings.update({gateway:url,contributing:true,idleOnly:false});fs.mkdirSync(path.join(dir,'bin'));fs.writeFileSync(path.join(dir,'bin',process.platform==='win32'?'cloudflared.exe':'cloudflared'),'fixture');const children=[],spawnTunnel=()=>{const c=new EventEmitter();c.stdout=new PassThrough();c.stderr=new PassThrough();c.exitCode=null;c.killed=false;c.kill=()=>{c.killed=true;c.exitCode=1;};children.push(c);setImmediate(()=>{c.stderr.write(RATE_LIMIT_TRANSCRIPT);c.exitCode=1;c.emit('exit',1);});return c;};const s=new Service(settings,{dataDir:dir,openPath:async()=>'',spawnTunnel,identity});t.after(()=>s.close());s.state.ollama={online:true,models:[{name:'llama3.2:3b'}],running:[]};await s.reconcile();assert.match(s.state.worker.status,/rate-limiting/);assert.equal(requests.length,0);
+ // The ordinary 30s cadence would spend the whole limit window asking the
+ // API that is refusing, which is what keeps the window open.
+ assert.ok(s.retryAfter-Date.now()>540000,'a rate-limited helper must back off for minutes, not seconds');
+ await s.reconcile();
+ assert.equal(children.length,1,'the backoff must hold the next attempt');});
 test('the helper exit reason survives every shape cloudflared writes it in',()=>{
- assert.match(helperExit(RATE_LIMITED),/Wait a few minutes/);
- assert.equal(helperExit('2026-09-18T12:04:06Z INF Requesting new quick Tunnel on trycloudflare.com...\n2026-09-18T12:04:07Z ERR Couldn\'t start tunnel error="connection refused"\n'),'The connection helper exited: Couldn\'t start tunnel error="connection refused"');
- assert.equal(helperExit('2026-09-18T12:04:06Z INF Requesting new quick Tunnel on trycloudflare.com...\n'),'The connection helper exited. Try again.');
- assert.equal(helperExit(''),'The connection helper exited. Try again.');
- assert.equal(helperExit('2026-09-18T12:04:07Z ERR '+'x'.repeat(400)).length,'The connection helper exited: '.length+201);
+ assert.match(helperExit(RATE_LIMIT_TRANSCRIPT).message,/rate-limiting/);
+ assert.equal(helperExit(RATE_LIMIT_TRANSCRIPT).retryAfter,600000);
+ assert.equal(helperExit('2026-09-18T12:04:06Z INF Requesting new quick Tunnel on trycloudflare.com...\n2026-09-18T12:04:07Z ERR Couldn\'t start tunnel error="connection refused"\n').message,'The connection helper exited: Couldn\'t start tunnel error="connection refused"');
+ assert.equal(helperExit('2026-09-18T12:04:07Z ERR Couldn\'t start tunnel error="connection refused"\n').retryAfter,undefined,'only a rate limit earns the long wait');
+ assert.equal(helperExit('2026-09-18T12:04:06Z INF Requesting new quick Tunnel on trycloudflare.com...\n').message,'The connection helper exited. Try again.');
+ assert.equal(helperExit('').message,'The connection helper exited. Try again.');
+ assert.equal(helperExit('2026-09-18T12:04:07Z ERR '+'x'.repeat(400)).message.length,'The connection helper exited: '.length+201);
 });
 test('the app rejoins as the node this machine registered from the terminal',async t=>{const requests=[],url=await registrar(t,requests),{settings,dir}=config(t);const identity=memoryIdentity({gateway:url,name:'laptop-9f2c',node_id:'terminal-id',node_token:'terminal-token',catalogue_id:null,domain_tags:null,joined_at:1});settings.update({gateway:url,contributing:true,idleOnly:false});fs.mkdirSync(path.join(dir,'bin'));fs.writeFileSync(path.join(dir,'bin',process.platform==='win32'?'cloudflared.exe':'cloudflared'),'fixture');const {spawnTunnel}=tunnelFixture(),s=new Service(settings,{dataDir:dir,openPath:async()=>'',spawnTunnel,identity});t.after(()=>s.close());s.state.ollama={online:true,models:[{name:'llama3.2:3b'}],running:[]};await s.reconcile();assert.equal(s.state.worker.status,'Contributing');
  assert.equal(requests[0].body.name,'laptop-9f2c');
