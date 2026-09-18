@@ -63,7 +63,7 @@ jobs:
           for arch in arm64 x64; do
             mount_dir="$RUNNER_TEMP/common-verify-$arch"
             mkdir -p "$mount_dir"
-            hdiutil attach "release/Common-0.1.0-mac-$arch.dmg" -readonly -nobrowse -mountpoint "$mount_dir"
+            hdiutil attach "release/Common-mac-$arch.dmg" -readonly -nobrowse -mountpoint "$mount_dir"
             trap 'hdiutil detach "$mount_dir" || true' EXIT
             codesign --verify --deep --strict --verbose=2 "$mount_dir/Common.app"
             codesign --display --verbose=2 "$mount_dir/Common.app"

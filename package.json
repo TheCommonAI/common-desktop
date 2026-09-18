@@ -38,13 +38,13 @@
     "directories": {
       "output": "release"
     },
-    "artifactName": "Common-${version}-${os}-${arch}.${ext}",
+    "artifactName": "Common-${os}-${arch}.${ext}",
     "win": {
       "target": "nsis",
       "icon": "assets/icon.ico"
     },
     "portable": {
-      "artifactName": "Common-${version}-Windows-${arch}-Portable.exe"
+      "artifactName": "Common-Windows-${arch}-Portable.exe"
     },
     "nsis": {
       "oneClick": true,
