@@ -1,18 +1,18 @@
 name: Publish desktop preview
+# Dispatch only. Editing this file used to publish a release: the push trigger
+# fired on any change to it and the inputs defaulted to a fixed run ID and tag,
+# so a change to how releases are made shipped one as a side effect, from
+# whatever build that stale ID pointed at. Both inputs are now typed by the
+# person publishing, every time.
 on:
-  push:
-    branches: [main]
-    paths: [.github/workflows/publish-preview.yml]
   workflow_dispatch:
     inputs:
       build_run:
         description: Successful Desktop builds run ID from main
         required: true
-        default: '34575986442'
       tag:
         description: New preview release tag
         required: true
-        default: v0.1.0-preview.2
 permissions:
   actions: read
   contents: write
@@ -26,8 +26,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      BUILD_RUN: ${{ inputs.build_run || '34575986442' }}
-      RELEASE_TAG: ${{ inputs.tag || 'v0.1.0-preview.2' }}
+      BUILD_RUN: ${{ inputs.build_run }}
+      RELEASE_TAG: ${{ inputs.tag }}
     steps:
       - name: Validate successful native build
         id: source
