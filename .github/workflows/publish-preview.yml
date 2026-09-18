@@ -1,18 +1,18 @@
 name: Publish desktop preview
+# Dispatch only. Editing this file used to publish a release: the push trigger
+# fired on any change to it and the inputs defaulted to a fixed run ID and tag,
+# so a change to how releases are made shipped one as a side effect, from
+# whatever build that stale ID pointed at. Both inputs are now typed by the
+# person publishing, every time.
 on:
-  push:
-    branches: [main]
-    paths: [.github/workflows/publish-preview.yml]
   workflow_dispatch:
     inputs:
       build_run:
         description: Successful Desktop builds run ID from main
         required: true
-        default: '34575986442'
       tag:
         description: New preview release tag
         required: true
-        default: v0.1.0-preview.2
 permissions:
   actions: read
   contents: write
@@ -26,8 +26,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      BUILD_RUN: ${{ inputs.build_run || '34575986442' }}
-      RELEASE_TAG: ${{ inputs.tag || 'v0.1.0-preview.2' }}
+      BUILD_RUN: ${{ inputs.build_run }}
+      RELEASE_TAG: ${{ inputs.tag }}
     steps:
       - name: Validate successful native build
         id: source
@@ -90,7 +90,7 @@ jobs:
 
           On first launch, choose Chat, Contribute, or Both. The app guides contributors through installing Ollama and downloading a local model. Ollama's own installer may require confirmation; model downloads require internet access and disk space.
 
-          This preview fixes the invalid Mac bundle signature reported in preview.1. Both Mac apps are now ad-hoc signed after packaging, and codesign --verify --deep --strict passes for each app inside its final DMG. Replace the older Common.app in Applications with this build.
+          This preview stops the connection helper churning tunnels: a contributor used to register a quick-tunnel hostname before public DNS could answer for it, lose that race, tear the tunnel down and open a new one every 30 seconds, until Cloudflare rate-limited the account-less tunnels and the helper quit at startup. Common now waits on the hostname it already has, and reports what the helper said when it does quit. Replace the older Common.app in Applications with this build.
 
           Ad-hoc signing checks bundle integrity; it does not verify Common's publisher. The Mac apps are still not Developer ID signed or Apple notarized, and Windows remains unsigned. Operating-system warnings or launch blocks are still possible. For a trusted test download, macOS may offer Open Anyway in System Settings > Privacy & Security. Do not disable Gatekeeper globally. Native packaging and automated tests passed; interactive installation and live-network inference still need testing on real PCs.
 
@@ -100,7 +100,13 @@ jobs:
           NOTES
           printf '\nBuilt from commit %s in [native build run](https://github.com/%s/actions/runs/%s).\n' \
             "$BUILD_SHA" "$GH_REPO" "$BUILD_RUN" >> release-notes.md
+          # Published as a full release, not a pre-release: GitHub's
+          # /releases/latest/download/<file> form resolves only to the newest
+          # NON-prerelease release, and the website's download links use it so
+          # they never need editing again. The installers are still previews --
+          # unsigned on Windows, ad-hoc signed on Mac -- and the title and notes
+          # say so. Only the badge is gone.
           gh release create "$RELEASE_TAG" installers/*.exe installers/*.dmg installers/SHA256SUMS.txt \
             --target "$BUILD_SHA" --title "Common 0.1.0 — Desktop preview" \
-            --notes-file release-notes.md --prerelease --draft
-          gh release edit "$RELEASE_TAG" --draft=false --prerelease
+            --notes-file release-notes.md --draft
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --latest
