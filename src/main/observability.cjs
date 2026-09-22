@@ -1,0 +1,12 @@
+const {randomBytes}=require('node:crypto');
+const {json,gatewayHeaders}=require('./http.cjs');
+const {sanitise}=require('./diagnostics.cjs');
+const {failure}=require('./errors.cjs');
+class Reporting{
+ constructor(service){this.service=service;this.queue=[];this.next=0;this.failures=0;}
+ enqueue(e){if(this.service.settings.value.telemetry)this.queue.push(sanitise(e));this.queue=this.queue.slice(-200);}
+ clear(){this.queue=[];this.controller?.abort();}
+ async flush(){const s=this.service;if(!s.settings.value.telemetry){this.clear();return;}if(this.sending||!this.queue.length||Date.now()<this.next)return;this.sending=true;this.controller=new AbortController();const batch=this.queue.splice(0,50);try{const r=await json(s.settings.value.gateway+'/client/telemetry',{method:'POST',headers:gatewayHeaders({'Content-Type':'application/json'}),body:JSON.stringify({installationId:s.diagnostics.data.installationId,events:batch}),signal:AbortSignal.any([this.controller.signal,AbortSignal.timeout(10000)])});if(r.accepted!==true)throw new Error('Telemetry not acknowledged');this.failures=0;this.next=Date.now()+60000;}catch{if(s.settings.value.telemetry)this.queue=[...batch,...this.queue].slice(-200);this.next=Date.now()+Math.min(3600000,60000*2**Math.min(6,this.failures++));}finally{this.sending=false;}}
+ async report(input){if(!input||!['feedback','problem'].includes(input.mode)||!['general','setup','chat','contribution','bug'].includes(input.category)||typeof input.text!=='string'||!input.text.trim()||input.text.length>5000||typeof(input.contact??'')!=='string'||(input.contact||'').length>200||!([null,undefined,1,2,3,4,5].includes(input.rating)))throw new Error('Enter feedback (up to 5,000 characters) and a valid category and rating.');const now=new Date(),id='COMMON-'+now.toISOString().slice(0,10).replaceAll('-','')+'-'+now.toISOString().slice(11,16).replace(':','')+'-'+randomBytes(4).toString('hex').toUpperCase();const body={id,mode:input.mode,category:input.category,text:input.text.trim(),rating:input.rating??null,contact:input.contact?.trim()||null,diagnostics:input.mode==='problem'&&input.attach===true?this.service.diagnosticReport():null};try{const result=await json(this.service.settings.value.gateway+'/client/reports',{method:'POST',headers:gatewayHeaders({'Content-Type':'application/json'}),body:JSON.stringify(body)});if(result.accepted!==true||result.id!==id)throw new Error('Report not acknowledged');return {id};}catch(e){throw failure('REPORT_FAILED',e);}}
+}
+module.exports={Reporting};

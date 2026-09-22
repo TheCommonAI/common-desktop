@@ -174,3 +174,10 @@ and the [native acceptance checklist](docs/RELEASING.md). The released installer
 were built successfully on Windows and macOS from commit
 `6f99c960f18324bdb175bbf0620d9a1506ac7735`; automated checks also passed.
 Interactive installation, tray, battery and real-inference checks are still required.
+
+### Testable Network Client (0.2.0)
+
+This pass adds verified setup, connection recovery, privacy controls, feedback,
+persistent contribution statistics and diagnostics. It requires the companion
+gateway observability migration. See [implementation and rollout notes](docs/TESTABLE-NETWORK-CLIENT.md)
+for the complete scope, privacy/retention model and remaining native/signing gates.

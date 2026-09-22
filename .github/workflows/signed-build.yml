@@ -1,0 +1,57 @@
+name: Signed release candidate
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  signed:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    environment: signed-releases
+    env:
+      CSC_LINK: ${{ matrix.os == 'windows-latest' && secrets.WINDOWS_CSC_LINK || secrets.MAC_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ matrix.os == 'windows-latest' && secrets.WINDOWS_CSC_KEY_PASSWORD || secrets.MAC_CSC_KEY_PASSWORD }}
+      COMMON_PUBLISHER: ${{ matrix.os == 'windows-latest' && vars.WINDOWS_PUBLISHER || vars.MAC_PUBLISHER }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: node scripts/build-info.cjs --signed
+      - if: runner.os == 'Windows'
+        run: npm run dist:win
+      - if: runner.os == 'macOS'
+        run: npm run dist:mac
+      - name: Verify Windows Authenticode
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem release/*.exe | ForEach-Object {
+            $signature = Get-AuthenticodeSignature $_.FullName
+            if ($signature.Status -ne 'Valid') { throw 'Installer signature invalid' }
+          }
+      - name: Verify Apple notarisation tickets
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in release/*.dmg; do xcrun stapler validate "$file"; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-${{ runner.os }}
+          path: |
+            release/*.exe
+            release/*.dmg
+            release/*.zip
+            release/*.yml
+            release/*.blockmap

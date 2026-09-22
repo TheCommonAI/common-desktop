@@ -32,3 +32,6 @@
 .dots i:nth-child(3n){transform:translateY(-1.5px)}
 .dots i:nth-child(4n){transform:translateY(1px)}
 .progressblock progress{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+/* Operational views remain readable at every detail level. */
+.test-stages{padding-left:1.3rem;line-height:1.8}.test-stages p{margin:.25rem 0;color:var(--muted)}
+table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.88rem}th,td{text-align:left;padding:.65rem;border-bottom:1px solid #8885}th{font-weight:600}.settings-section pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:.8rem;max-height:22rem;overflow:auto}#reportText{min-height:10rem;width:100%}#reportContact{width:100%}.test-stages small{opacity:.7}

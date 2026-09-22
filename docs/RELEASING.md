@@ -22,3 +22,11 @@ References:
 - [Electron Builder builds](https://www.electron.build/docs/features/github-actions/)
 - [Ollama on Windows](https://docs.ollama.com/windows)
 - [Ollama on macOS](https://docs.ollama.com/macos)
+
+## 0.2.0 testable client
+
+See [TESTABLE-NETWORK-CLIENT.md](TESTABLE-NETWORK-CLIENT.md) for the coordinated
+gateway migration, signing configuration, updater prerequisites and native gates.
+`Signed release candidate` builds verified artifacts but deliberately does not
+publish them. Unsigned `Desktop builds` artifacts have automatic updates disabled.
+Never advertise an unsigned preview as the unattended public release.
