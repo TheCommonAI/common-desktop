@@ -34,6 +34,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - run: node scripts/build-info.cjs
       - run: npm run dist:win
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -53,6 +54,7 @@ jobs:
       - run: npm ci
       - run: npm test
       # Seal the final app bundle for testing; this is not Developer ID signing.
+      - run: node scripts/build-info.cjs
       - run: npm run dist:mac -- -c.mac.identity=-
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -87,6 +89,7 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
+      - run: node scripts/build-info.cjs
       - run: npm run dist:linux
       - uses: actions/upload-artifact@v4
         with:

@@ -1,7 +1,7 @@
 {
   "name": "common-desktop",
   "productName": "Common",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Chat and contribute to the Common AI network.",
   "main": "src/main/index.cjs",
   "author": "TheCommonAI",
@@ -70,5 +70,8 @@
       "category": "Utility",
       "icon": "assets/icon.png"
     }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.3"
   }
 }

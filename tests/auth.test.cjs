@@ -3,6 +3,7 @@ const assert=require('node:assert/strict');
 const http=require('node:http');
 const {once}=require('node:events');
 const {checkedFetch}=require('../src/main/http.cjs');
+const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {Service}=require('../src/main/service.cjs');
 async function server(t,fn){const s=http.createServer(fn);s.listen(0,'127.0.0.1');await once(s,'listening');t.after(()=>{s.closeAllConnections();s.close();});return 'http://127.0.0.1:'+s.address().port;}
 test('401 errors distinguish worker and gateway without echoing response secrets',async t=>{
@@ -17,7 +18,7 @@ for(const kind of ['expired','worker','unknown','manual'])test('network chat rec
  let calls=0,registrations=0;
  const gateway=await server(t,(q,r)=>{calls++;q.resume();if(calls===1||kind!=='expired'){r.statusCode=401;if(kind==='worker')r.setHeader('X-Common-Node','fixture');r.end(JSON.stringify({detail:kind==='unknown'?'Unknown auth':"this token doesn't match any registered node"}));return;}assert.equal(q.headers['x-common-node-token'],'new-token');r.end('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n');});
  const settings={value:{gateway,model:'test',contributing:true,idleOnly:false,pauseBattery:false,chatTokens:kind==='manual'?{[gateway]:'manual-token'}:{},identities:{[gateway]:{node_token:'old-token'}}},public(){return {};}};
- const service=new Service(settings,{dataDir:'.',openPath:()=>{}});service.registeredGateway=gateway;
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'common-auth-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));const service=new Service(settings,{dataDir:dir,openPath:()=>{},identity:{forGateway:()=>null}});service.registeredGateway=gateway;
  service.stopWorker=async()=>{};service.startWorker=async()=>{registrations++;settings.value.identities[gateway].node_token='new-token';};
  const request=service.chat({target:'network',messages:[{role:'user',content:'synthetic'}]});
  if(kind==='expired'){assert.equal((await request).content,'ok');assert.equal(calls,2);assert.equal(registrations,1);}else{await assert.rejects(request);assert.equal(calls,1);assert.equal(registrations,0);}
