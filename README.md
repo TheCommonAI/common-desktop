@@ -8,6 +8,9 @@ This app targets **common-network main at 019a5cac063c53736dd289e34cd29c163f847c
 It makes no network-server changes and does not include the additional security
 and privacy PR currently under review.
 
+Common lets you donate spare computer power to a volunteer-run AI network.
+Free and early, from a small nonprofit in South Australia. [Download it here](https://commonai.com.au/join).
+
 ## Download and install
 
 | Computer | Installer |
