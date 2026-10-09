@@ -12,7 +12,16 @@ if(!app.requestSingleInstanceLock())app.quit();else{
   win.once('ready-to-show',()=>{const loginLaunch=process.argv.includes('--hidden')||(process.platform==='darwin'&&app.getLoginItemSettings().wasOpenedAtLogin);if(!loginLaunch||!settings.value.setupComplete||!tray)win.show();});
   win.on('close',e=>{if(!quitting){e.preventDefault();if(settings.value.closeToTray&&tray)win.hide();else app.quit();}});
   try{tray=new Tray(nativeImage.createFromPath(path.join(__dirname,'../../assets/tray.png')));tray.setToolTip('Common');tray.on('click',()=>win.show());}catch{tray=null;}
-  const normalIcon=nativeImage.createFromPath(path.join(__dirname,'../../assets/tray.png'));const pixels=Buffer.from(normalIcon.toBitmap());for(let i=0;i<pixels.length;i+=4)if(pixels[i+3]){pixels[i]=50;pixels[i+1]=155;pixels[i+2]=235;}const attentionIcon=pixels.length?nativeImage.createFromBitmap(pixels,normalIcon.getSize()):normalIcon;
+  // The menu bar wants a template image: black on transparency, which macOS tints to
+  // suit a light or dark bar. The attention variant carries its signal as a dot in the
+  // mark, because a template image has no colours to change -- and a tint picked here
+  // would only be a guess at the one the bar is already using. `trayTemplateAttention`
+  // does not end in "Template", so unlike its sibling it must be marked by hand.
+  // Windows and Linux keep the drawn badge, and keep recolouring it for attention.
+  const asset=name=>path.join(__dirname,'../../assets/'+name);
+  const template=name=>{const image=nativeImage.createFromPath(asset(name));image.setTemplateImage(true);return image;};
+  const drawnIcon=nativeImage.createFromPath(asset('tray.png')),drawnPixels=Buffer.from(drawnIcon.toBitmap());for(let i=0;i<drawnPixels.length;i+=4)if(drawnPixels[i+3]){drawnPixels[i]=50;drawnPixels[i+1]=155;drawnPixels[i+2]=235;}
+  const [normalIcon,attentionIcon]=process.platform==='darwin'?[template('trayTemplate.png'),template('trayTemplateAttention.png')]:[drawnIcon,drawnPixels.length?nativeImage.createFromBitmap(drawnPixels,drawnIcon.getSize()):drawnIcon];
   const show=tab=>{win.show();win.webContents.send('common:navigate',tab);};
   const menu=()=>{if(!tray)return;const h=service.health(),attention=!!service.lastError;tray.setImage(attention?attentionIcon:normalIcon);tray.setToolTip(attention?'Common needs attention':service.state.worker.status);tray.setContextMenu(Menu.buildFromTemplate([{label:'Common',enabled:false},{label:service.state.worker.status+' · '+settings.value.model,enabled:false},{type:'separator'},{label:'Open Common',click:()=>show('chat')},{label:settings.value.contributing?'Pause contribution':'Resume contribution',enabled:settings.value.setupComplete,click:()=>service.update({contributing:!settings.value.contributing}).catch(e=>dialog.showErrorBox('Contribution',HELP[classify(e)]))},{label:'Test connection',click:()=>{show('diagnostics');service.testSetup().catch(()=>{});}},{label:'Open diagnostics',click:()=>show('diagnostics')},{label:'Retry now',click:()=>service.retryNow().catch(()=>{})},{label:'Settings',click:()=>show('settings')},{label:'Quit',click:()=>app.quit()}]));};
   let notifiedCode=null;service.on('state',()=>{const code=service.lastError?.code;if(code&&code!==notifiedCode&&Notification.isSupported()){notifiedCode=code;new Notification({title:'Common needs attention',body:HELP[code]||HELP.UNKNOWN}).show();}if(!code)notifiedCode=null;});

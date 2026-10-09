@@ -3,9 +3,10 @@
 
     python3 scripts/icons.py
 
-Rewrites assets/icon.png, icon.icns, icon.ico and tray.png. Needs Pillow and,
-for the .icns, macOS `iconutil`; it is a design-time tool, not part of the
-build, so neither is a dependency of the app.
+Rewrites the icons in assets/: icon.png, icon.icns, icon.ico, tray.png and the
+macOS menu-bar templates (trayTemplate*.png). Needs Pillow and, for the .icns,
+macOS `iconutil`; it is a design-time tool, not part of the build, so neither
+is a dependency of the app.
 
 Why draw the mark instead of downscaling it: twenty dots is the right count at
 512px and turns to a solid grey ring at 16px, which is precisely the size
@@ -99,6 +100,48 @@ def square(size):
     return draw(size, INK, PAPER, 0.20, 0.02)
 
 
+# Menu bar: the mark fills more of the canvas than the app icon does, because
+# the bar gives it no plate to sit on. Same dotted ring, its own grid.
+TRAY_RING = [(32, 12, 0.050, 0.34), (0, 9, 0.062, 0.33)]
+TRAY_INSET = 0.04
+
+
+def tray_ring_for(size):
+    for threshold, count, dot, ring in TRAY_RING:
+        if size >= threshold:
+            return count, dot, ring
+    return TRAY_RING[-1][1:]
+
+
+def tray(size, attention=False):
+    """Menu-bar mark: black on transparent, no plate.
+
+    macOS template images read only the alpha and tint the shape to match the
+    menu bar, so this one file is right on a light bar and a dark one. The
+    `attention` variant puts its signal in the shape -- a dot in the corner --
+    instead of recolouring the whole icon, which on the menu bar means guessing
+    at a colour the bar may already be using. Windows and Linux keep tray.png,
+    a drawn badge, which is what a taskbar wants.
+    """
+    big = size * SS
+    layer = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    count, dot_frac, ring_frac = tray_ring_for(size)
+    span = big * (1 - 2 * TRAY_INSET)
+    centre, ring, dot = big / 2, span * ring_frac, span * dot_frac
+    for i, (nudge, scale) in enumerate(wobble(count)):
+        angle = -math.pi / 2 + i * 2 * math.pi / count
+        r = ring * (1 + nudge)
+        cx, cy = centre + r * math.cos(angle), centre + r * math.sin(angle)
+        rr = dot * scale
+        d.ellipse([cx - rr, cy - rr, cx + rr, cy + rr], fill=(0, 0, 0, 255))
+    if attention:
+        rr = big * 0.10
+        cx = cy = big - rr - big * TRAY_INSET
+        d.ellipse([cx - rr, cy - rr, cx + rr, cy + rr], fill=(0, 0, 0, 255))
+    return layer.resize((size, size), Image.LANCZOS)
+
+
 def main():
     square(512).save(ASSETS / "icon.png")
 
@@ -111,8 +154,14 @@ def main():
     # Tray: a dark badge, so it reads against a light menu bar or taskbar.
     draw(32, PAPER, INK, 0.22, 0.0).save(ASSETS / "tray.png")
 
+    # macOS menu bar: the mark alone as a template, plus the attention dot.
+    tray(16).save(ASSETS / "trayTemplate.png")
+    tray(32).save(ASSETS / "trayTemplate@2x.png")
+    tray(16, attention=True).save(ASSETS / "trayTemplateAttention.png")
+    tray(32, attention=True).save(ASSETS / "trayTemplateAttention@2x.png")
+
     if shutil.which("iconutil") is None:
-        print("icon.png, icon.ico and tray.png written. "
+        print("icon.png, icon.ico, tray.png and the menu-bar templates written. "
               "icon.icns needs macOS iconutil -- skipped.")
         return
     work = ASSETS / "Common.iconset"
@@ -127,7 +176,7 @@ def main():
     subprocess.run(["iconutil", "-c", "icns", str(work), "-o", str(ASSETS / "icon.icns")],
                    check=True)
     shutil.rmtree(work)
-    print("icon.png, icon.icns, icon.ico and tray.png written.")
+    print("icon.png, icon.icns, icon.ico, tray.png and the menu-bar templates written.")
 
 
 if __name__ == "__main__":
