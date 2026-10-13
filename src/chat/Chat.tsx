@@ -3,14 +3,26 @@ import Composer from "./Composer";
 import Settings from "./Settings";
 import Sidebar from "./Sidebar";
 import Transcript from "./Transcript";
-import { GREETING, NO_ANSWER, stoppedAfter, type ChatMessage } from "./messages";
+import WhatsNew from "./WhatsNew";
+import {
+  loadConversations,
+  mostRecentlyUsed,
+  newConversation,
+  nextIdAbove,
+  saveConversations,
+  type Conversation,
+} from "./conversations";
+import { promptFor } from "./context";
+import { NO_ANSWER, stoppedAfter, type ChatMessage } from "./messages";
 import { askNetwork, gatewaySeesUs, stopAsk, type NetworkAnswer } from "./backend";
 import {
   lookForUpdate,
   restartIntoUpdate,
   runningVersion,
+  takeUpdate,
   type UpdateOffer,
 } from "./updates";
+import { readSeenVersion, rememberSeenVersion, whatsNewFor } from "./whats-new";
 
 /**
  * What the flow hands over to.
@@ -25,6 +37,13 @@ import {
  * answer says which machine gave it. See `backend.askNetwork` for why the local
  * path was the wrong one, and `messages.GREETING` for the sentence that had to
  * change with it.
+ *
+ * There is more than one conversation now, and they outlive the window: the list
+ * is read off disk on the way in and written back on every change. This component
+ * is where both of those happen, because it is the only thing that knows when a
+ * chat has changed — see `conversations.ts` for the file and `Sidebar` for the
+ * list. What has *not* changed is that a chat is a conversation; there is still
+ * nothing here but the words and the machines that answered them.
  */
 
 /** Which machine answered, in the CLI's own register.
@@ -43,31 +62,58 @@ function provenance(reply: NetworkAnswer): string | undefined {
   return reply.node === null ? undefined : `served by ${reply.node}`;
 }
 
+/** Every chat, and which one is on screen. */
+interface Chats {
+  /** Never empty. Both paths that could empty it — `deleteChat` and the initial
+   *  state — put a fresh conversation in rather than let the rail draw nothing. */
+  list: readonly Conversation[];
+  activeId: string;
+}
+
 export default function Chat() {
   // Ids are a counter rather than a timestamp or an index. A timestamp can
   // repeat inside one millisecond and two messages in a row are exactly that
   // close; an index would be right until the day a message is ever removed.
+  //
+  // A counter for the session, which is why loading a chat has to resume it above
+  // whatever the file got up to — see `nextIdAbove`.
   const nextId = useRef(1);
 
   // A ref, not state: it never renders, and putting it in state would rebuild
   // `send` on every keystroke's worth of change for no visible difference.
   const answering = useRef(false);
 
-  // Which conversation the question belongs to. An answer still out on the
-  // network was asked in the transcript that existed when it was sent, and
-  // starting a new chat while one is out is an ordinary thing to do now that a
-  // routed answer can take a minute — it used to be impossible to hit, because
-  // a local model answered faster than anyone could reach for the button.
-  // Without this the reply lands in the new conversation, under a question that
-  // was never asked in it.
+  // When the question currently out on the network was sent, or zero when none
+  // is. Read by `release` on the way out, which has to write down how long the
+  // user held on and cannot ask `Thinking`, since `Thinking` is being unmounted
+  // in the same breath.
+  const askingSince = useRef(0);
+
+  // Which request a late reply belongs to. A killed request does not stop
+  // existing: `stopAsk` rejects the promise it was waiting on, and that rejection
+  // would otherwise be written into the transcript as an answer from the network.
+  // Bumped by every `release`, which is the one place a question is given up —
+  // stopping it, leaving the chat it was asked in, or starting another.
   const generation = useRef(0);
 
-  const [messages, setMessages] = useState<readonly ChatMessage[]>(() => [
-    { id: 0, role: "assistant", text: GREETING, at: new Date() },
-  ]);
+  const [chats, setChats] = useState<Chats>(() => {
+    const first = newConversation();
+    return { list: [first], activeId: first.id };
+  });
   const [thinking, setThinking] = useState(false);
   const [seen, setSeen] = useState<boolean | null>(null);
   const [settings, setSettings] = useState(false);
+
+  // The notes for a version that has just arrived, or `null` for the ordinary
+  // launch where there is nothing to say. Read once, at launch, off the same
+  // version read the Settings row uses — see `whats-new.ts` for what counts as an
+  // update and why a first run counts as one.
+  const [fresh, setFresh] = useState<{ version: string; notes: readonly string[] } | null>(null);
+
+  // What the file is believed to hold. `null` until it has been read at all, which
+  // is the whole of what keeps the first render from being written over the chats
+  // that have not been loaded yet.
+  const onDisk = useRef<readonly Conversation[] | null>(null);
 
   // Whether there is a newer version of the app, and which one this is.
   //
@@ -78,6 +124,8 @@ export default function Chat() {
   // run.
   const [offer, setOffer] = useState<UpdateOffer>({ kind: "unknown" });
   const [version, setVersion] = useState("");
+
+  const active = chats.list.find((chat) => chat.id === chats.activeId) ?? chats.list[0];
 
   useEffect(() => {
     // The read outlives a fast unmount, so the write is guarded rather than the
@@ -99,7 +147,57 @@ export default function Chat() {
   }, []);
 
   /**
-   * Look for a new version, once, on the way in.
+   * The chats on disk, once, on the way in.
+   *
+   * The seeded conversation above is a real chat rather than a placeholder,
+   * because there is a frame on screen before this promise settles and it has to
+   * be a working screen. Adopting the stored list then replaces it — the read is
+   * one local file, so it lands before a hand could reach the keyboard, and the
+   * alternative is the merge bookkeeping of a race nobody can lose.
+   */
+  useEffect(() => {
+    let live = true;
+    loadConversations().then((stored) => {
+      if (!live) return;
+      // Nothing saved: a first run, or a file that could not be read. What is on
+      // screen stands, and `onDisk` records the state of the world as empty so
+      // that the effect below stops holding writes back.
+      if (stored.length === 0) {
+        onDisk.current = [];
+        return;
+      }
+      nextId.current = nextIdAbove(stored);
+      onDisk.current = stored;
+      setChats({ list: stored, activeId: mostRecentlyUsed(stored).id });
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  /**
+   * Write the chats back whenever they change.
+   *
+   * Guarded on `onDisk`, which is `null` until the file has been read: without
+   * that, the first render — one empty chat — would be written over everything the
+   * user has a few milliseconds before it was going to be loaded.
+   *
+   * The comparison is by reference, which here is exact rather than merely cheap.
+   * Every mutation above builds a new list, so identity is a faithful answer to
+   * "has this changed", and a deep comparison would be a slower way of asking the
+   * same question. It also means a save never fires for a change this session did
+   * not make, so a field some later build adds to the file is not silently dropped
+   * by a version that does not know about it.
+   */
+  useEffect(() => {
+    if (onDisk.current === null) return;
+    if (onDisk.current === chats.list) return;
+    onDisk.current = chats.list;
+    saveConversations(chats.list);
+  }, [chats.list]);
+
+  /**
+   * Look for a new version, on the way in and whenever the window comes back.
    *
    * From here rather than from `App`, which is where a launch-time check would
    * more obviously belong, for two reasons that are both about what else is
@@ -117,13 +215,29 @@ export default function Chat() {
   useEffect(() => {
     let live = true;
     runningVersion().then((found) => {
-      if (live) setVersion(found);
+      if (!live) return;
+      setVersion(found);
+      const notes = whatsNewFor(readSeenVersion(), found);
+      if (notes !== null) setFresh({ version: found, notes });
     });
     lookForUpdate((next) => {
       if (live) setOffer(next);
     });
+
+    // And again when the window comes back, which is the case a launch-time check
+    // cannot cover. This app is built to be left open for weeks and this file
+    // always said so — `updates.INTERVAL_MS` argues that "a laptop that has been
+    // asleep for a week should learn about an update when it wakes and the user
+    // looks at it" — but until now nothing woke it up to look. Unforced, so the
+    // day-throttle still rations the request; this is the moment the answer may
+    // have changed, not a reason to ask more often.
+    const onWake = () => {
+      if (document.visibilityState === "visible") lookForUpdate(setOffer);
+    };
+    document.addEventListener("visibilitychange", onWake);
     return () => {
       live = false;
+      document.removeEventListener("visibilitychange", onWake);
     };
   }, []);
 
@@ -139,6 +253,19 @@ export default function Chat() {
   }, []);
 
   /**
+   * Fetch and stage the version the bar is offering.
+   *
+   * Guarded on the offer rather than on a ref because the click and the state are
+   * never far apart: the first press moves the offer to `downloading`, which draws
+   * the button disabled, and the guard is what holds if a second click lands in the
+   * same frame as the first.
+   */
+  const installUpdate = useCallback(() => {
+    if (offer.kind !== "available") return;
+    takeUpdate(offer.version, setOffer);
+  }, [offer]);
+
+  /**
    * Relaunch into the staged version.
    *
    * The state goes first and the call last, because the call does not come back:
@@ -150,11 +277,28 @@ export default function Chat() {
     restartIntoUpdate();
   }, []);
 
-  const append = useCallback((line: Omit<ChatMessage, "id" | "at">) => {
-    setMessages((previous) => [
-      ...previous,
-      { ...line, id: nextId.current++, at: new Date() },
-    ]);
+  /**
+   * Add a line to one chat.
+   *
+   * The id and the clock are minted out here rather than inside the updater, so
+   * that the updater stays a pure function of the state it is handed: React may
+   * call it twice, and `nextId.current++` run twice would burn an id — and worse,
+   * could put two different lines under one render.
+   *
+   * The chat is named rather than taken from the active one, so that a reply lands
+   * in the chat its question was asked in even if the rail has moved on. A chat
+   * that has been deleted in the meantime simply does not match, and the line goes
+   * nowhere — which is right: there is no conversation left for it to belong to.
+   */
+  const append = useCallback((id: string, line: Omit<ChatMessage, "id" | "at">) => {
+    const message: ChatMessage = { ...line, id: nextId.current++, at: new Date() };
+    const now = Date.now();
+    setChats((current) => ({
+      ...current,
+      list: current.list.map((chat) =>
+        chat.id === id ? { ...chat, updatedAt: now, messages: [...chat.messages, message] } : chat,
+      ),
+    }));
   }, []);
 
   const send = useCallback(
@@ -165,12 +309,18 @@ export default function Chat() {
       if (answering.current) return false;
       answering.current = true;
       const mine = generation.current;
-      append({ role: "user", text: question });
+      const id = active.id;
+      // What actually goes out, which is not what was typed: `common ask` carries
+      // one string and no turns, so the history is rendered into it here. See
+      // `context.ts` for the budget and for what is deliberately left out.
+      const prompt = promptFor(active.messages, question);
+      askingSince.current = Date.now();
+      append(id, { role: "user", text: question });
       setThinking(true);
-      askNetwork(question)
+      askNetwork(prompt)
         .then((reply) => {
           if (generation.current !== mine) return;
-          append({
+          append(id, {
             role: "assistant",
             text: reply.answer,
             servedBy: provenance(reply),
@@ -178,90 +328,149 @@ export default function Chat() {
         })
         .catch(() => {
           if (generation.current !== mine) return;
-          append({ role: "assistant", text: NO_ANSWER, failed: true });
+          append(id, { role: "assistant", text: NO_ANSWER, failed: true });
         })
         .finally(() => {
           // Only the newest conversation owns the composer's busy state. A
           // stale reply must not clear a flag the new chat has already set.
           if (generation.current !== mine) return;
+          askingSince.current = 0;
           answering.current = false;
           setThinking(false);
         });
       return true;
     },
+    [active, append],
+  );
+
+  /**
+   * Let go of whatever question is out on the network, and write down that it was
+   * let go of.
+   *
+   * Four things have to happen together and none of them is enough alone. A line
+   * has to be left under the question, because the chat now outlives the window: a
+   * transcript that ends on a bare question reads as a bug today, and will still
+   * read as one three weeks from now when it is loaded back off disk. The process
+   * has to be killed, or a donated machine goes on being spent on a question nobody
+   * is waiting for — and on a network of a few laptops the node it holds is one the
+   * next question could be routed to. And `generation` has to move, or the
+   * rejection that kill produces is written into a conversation that has already
+   * stopped caring about it.
+   *
+   * Every exit shares this. Starting another chat, opening a different one and
+   * deleting the one you are in all abandon a question as surely as pressing stop
+   * does — leaving a chat was the only way out before `Stop waiting` existed, and it
+   * would be strange for the newer and lighter exits not to give the node back.
+   *
+   * `waitedMs` is passed by `Stop waiting`, which took the number from `Thinking`
+   * — the component that mounted, started a clock and is the only thing that knows
+   * when the last answer was drawn. The other callers do not have it and the
+   * elapsed time is measured from the send instead, which for them is the same
+   * number to within a frame.
+   */
+  const release = useCallback(
+    (id: string, waitedMs?: number) => {
+      if (askingSince.current !== 0) {
+        const since = askingSince.current;
+        askingSince.current = 0;
+        append(id, {
+          role: "assistant",
+          text: stoppedAfter(waitedMs ?? Date.now() - since),
+          stopped: true,
+        });
+      }
+      stopAsk();
+      generation.current += 1;
+      answering.current = false;
+      setThinking(false);
+    },
     [append],
   );
 
-  /**
-   * Let go of whatever question is out on the network.
-   *
-   * Two things have to happen together and neither is enough alone. The process
-   * has to be killed, or a donated machine goes on being spent on a question
-   * nobody is waiting for — and on a network of a few laptops the node it holds
-   * is one the next question could be routed to. And `generation` has to move, or
-   * the rejection that kill produces is written into a conversation that has
-   * already stopped caring about it.
-   *
-   * Both exits share this. Starting a new chat while a question is out abandons
-   * that question as surely as pressing stop does — it was the only way out
-   * before `Stop waiting` existed, and it would be strange for the newer and
-   * lighter exit to be the only one that gives the node back.
-   */
-  const release = useCallback(() => {
-    stopAsk();
-    generation.current += 1;
-    answering.current = false;
-    setThinking(false);
-  }, []);
-
-  /**
-   * Let go of the question, and write down how long it was held.
-   *
-   * The number comes from the caller rather than being measured here, because
-   * here is not where the waiting happened: `Thinking` mounted, started its
-   * clock, and is the only thing that knows when the last answer was rendered.
-   * This callback runs from a click on that component, a moment later.
-   *
-   * It is written into the transcript because there is nowhere else to put it.
-   * See `messages.stoppedAfter` for why the number is worth keeping and why this
-   * is not the same line as `NO_ANSWER`.
-   */
+  /** `Stop waiting`, whose number comes from the clock the user was watching. */
   const stopWaiting = useCallback(
     (waitedMs: number) => {
-      release();
-      append({ role: "assistant", text: stoppedAfter(waitedMs) });
+      release(active.id, waitedMs);
     },
-    [append, release],
+    [active.id, release],
   );
 
+  /**
+   * Open another chat.
+   *
+   * Opening the one you are already in does nothing at all — not merely a render
+   * skipped: leaving a chat is what `release` is for, and re-selecting the current
+   * row must not give up a question the user is still waiting on.
+   */
+  const selectChat = useCallback(
+    (id: string) => {
+      if (id === chats.activeId) return;
+      release(chats.activeId);
+      setChats((current) => ({ ...current, activeId: id }));
+    },
+    [chats.activeId, release],
+  );
+
+  /** Start one. Added to the rail rather than replacing it, which is the whole
+   *  difference from the single-chat version of this: the chat you were in is
+   *  still there when you come back. */
   const newChat = useCallback(() => {
-    release();
-    setMessages([
-      { id: nextId.current++, role: "assistant", text: GREETING, at: new Date() },
-    ]);
-  }, [release]);
+    release(chats.activeId);
+    const chat = newConversation();
+    setChats((current) => ({ list: [chat, ...current.list], activeId: chat.id }));
+  }, [chats.activeId, release]);
+
+  const deleteChat = useCallback(
+    (id: string) => {
+      const mine = id === chats.activeId;
+      // A question still out belongs to the chat going away, and there will be
+      // nowhere left to put its answer — so the node is given back now rather than
+      // spent on a reply with no chat to land in.
+      if (mine) release(id);
+      setChats((current) => {
+        const list = current.list.filter((chat) => chat.id !== id);
+        // The rail is never empty: an empty one would be a screen with no way back
+        // to a conversation, including the one that was just deleted.
+        if (list.length === 0) {
+          const chat = newConversation();
+          return { list: [chat], activeId: chat.id };
+        }
+        // Deleting a chat you are not in leaves you where you were.
+        if (!mine) return { ...current, list };
+        // Otherwise, the row that was under the one removed — or the new last row,
+        // when it was the bottom of the rail.
+        const at = current.list.findIndex((chat) => chat.id === id);
+        return { list, activeId: list[Math.min(at, list.length - 1)].id };
+      });
+    },
+    [chats.activeId, release],
+  );
+
+  /** Close the what's-new card, and remember that it has been read.
+   *
+   *  Recorded here rather than when the card was shown, so that quitting with it
+   *  still open shows it again next launch instead of losing it for good. */
+  const dismissWhatsNew = useCallback(() => {
+    if (fresh !== null) rememberSeenVersion(fresh.version);
+    setFresh(null);
+  }, [fresh]);
 
   return (
     <section className="chat" aria-label="Chat">
-      <Sidebar seen={seen} onNewChat={newChat} onSettings={() => setSettings(true)} />
+      <Sidebar
+        seen={seen}
+        chats={chats.list}
+        activeId={chats.activeId}
+        onSelect={selectChat}
+        onDelete={deleteChat}
+        onNewChat={newChat}
+        onSettings={() => setSettings(true)}
+        offer={offer}
+        onInstall={installUpdate}
+        onRestart={restartForUpdate}
+      />
       <div className="chat__main">
-        <Transcript messages={messages} thinking={thinking} onStop={stopWaiting} />
-        {/* Only ever drawn with something to act on, so it is never a line about
-            nothing. It is a button rather than a line with a control in it because
-            there is exactly one thing to do here and making the sentence itself
-            the target spares the user from aiming at a word inside it. */}
-        {(offer.kind === "staged" || offer.kind === "restarting") && (
-          <button
-            className="chat__notice"
-            type="button"
-            onClick={restartForUpdate}
-            disabled={offer.kind === "restarting"}
-          >
-            {offer.kind === "restarting"
-              ? "Restarting…"
-              : `Version ${offer.version} is ready. Restart to update.`}
-          </button>
-        )}
+        <Transcript messages={active.messages} thinking={thinking} onStop={stopWaiting} />
         <Composer onSend={send} busy={thinking} />
       </div>
       {/* Kept mounted and driven by `open`, rather than mounted on demand. A
@@ -278,7 +487,18 @@ export default function Chat() {
         version={version}
         offer={offer}
         onCheck={checkForUpdate}
+        onInstall={installUpdate}
         onRestart={restartForUpdate}
+      />
+      {/* The other card, and the only one that opens itself. Everything the
+          settings card's comment says about staying mounted applies here too —
+          the difference is only that this one is opened by the app rather than by
+          a click, once, on the first launch after an update. */}
+      <WhatsNew
+        open={fresh !== null}
+        version={fresh === null ? "" : fresh.version}
+        notes={fresh === null ? [] : fresh.notes}
+        onClose={dismissWhatsNew}
       />
     </section>
   );
