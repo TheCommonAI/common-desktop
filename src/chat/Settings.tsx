@@ -49,11 +49,12 @@ export interface SettingsProps {
   seen: boolean | null;
   /** The version running. Always known, whether or not a check ever ran. */
   version: string;
-  /** What is known about a newer version. Owned by the chat, because the notice
-   *  above the composer reads the same value — the card and the notice cannot
-   *  then disagree about whether an update is waiting. */
+  /** What is known about a newer version. Owned by the chat, because the bar in
+   *  the rail reads the same value — the card and the rail cannot then disagree
+   *  about whether an update is waiting. */
   offer: UpdateOffer;
   onCheck: () => void;
+  onInstall: () => void;
   onRestart: () => void;
 }
 
@@ -79,6 +80,8 @@ function updateFact(offer: UpdateOffer, version: string): string {
       return "Looking for a newer version.";
     case "current":
       return `${running} — the newest version.`;
+    case "available":
+      return `Version ${offer.version} is available.`;
     case "downloading":
       return `Version ${offer.version} is downloading.`;
     case "staged":
@@ -97,6 +100,7 @@ export default function Settings({
   version,
   offer,
   onCheck,
+  onInstall,
   onRestart,
 }: SettingsProps) {
   const dialog = useRef<HTMLDialogElement | null>(null);
@@ -425,15 +429,23 @@ export default function Settings({
             machine. It is here because the alternative is a menu item, and the
             menu bar's own menu is three entries long on purpose.
 
-            The button says "Check for updates" and never "You're up to date":
-            which of those is true lives in the sentence above it, and a button that
-            changes its label to report a result is a button that has stopped being
-            an instruction. */}
+            Three controls, and each one names what it does rather than what has
+            happened — which is why none of them says "You're up to date". That
+            belongs in the sentence above, and a button that changes its label to
+            report a result is a button that has stopped being an instruction. The
+            one exception is `Install`, where the label and the action are the same
+            word in both places: the bar in the rail offers exactly this, and the
+            two reaching the same state with different words would read as two
+            different offers. */}
         <div className="settings__row">
           <p className="settings__label">Updates</p>
           <p className="settings__fact">{updateFact(offer, version)}</p>
           <div className="settings__controls">
-            {offer.kind === "staged" || offer.kind === "restarting" ? (
+            {offer.kind === "available" ? (
+              <Control onClick={onInstall} arrow>
+                Install
+              </Control>
+            ) : offer.kind === "staged" || offer.kind === "restarting" ? (
               <Control onClick={onRestart} arrow disabled={offer.kind === "restarting"}>
                 Restart to update
               </Control>

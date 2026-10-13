@@ -20,6 +20,16 @@ export interface ChatMessage {
    */
   failed?: boolean;
   /**
+   * The user stopped waiting, so this line is the app's and not the network's —
+   * see `stoppedAfter`.
+   *
+   * A flag rather than a match on the sentence above, because the sentence is
+   * read by people and this is read by `context.ts`, and the day the wording
+   * changes the second reader must not quietly start replaying "Stopped waiting
+   * after 40s." to a node as though it had said it.
+   */
+  stopped?: boolean;
+  /**
    * Which machine answered — "served by alder-7", "composed by 3 machines".
    *
    * Set on the answers and not on the questions or the greeting, because it is

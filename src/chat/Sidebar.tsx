@@ -1,24 +1,31 @@
+import { titleFor, type Conversation } from "./conversations";
+import type { UpdateOffer } from "./updates";
+
 /**
- * The sidebar: the mark, the one way to start over, and the foot.
+ * The sidebar: the mark, the chats, the update, and the foot.
  *
- * Three things, and the space between them is the point. The mock this follows
- * puts everything else in the conversation itself, which is right — a chat is a
- * conversation, and a rail of folders and history beside it would be an
- * inventory of something the user is not doing.
+ * This was written against a rail of folders, and the argument then was that a
+ * chat is a conversation, so a tree of folders beside it would be an inventory of
+ * something the user is not doing. That still holds. What changed underneath it is
+ * that the conversations now outlive the window — see `conversations.ts` — so the
+ * rail has something to list that is not an inventory. It is the app's memory: one
+ * row per chat, newest first, with the one you are in marked. Below it comes the
+ * one entry that is not a chat at all, an update, as a bar carrying the single
+ * control that acts on it.
  *
- * The foot is the one row that is two things rather than one: a status reading
- * and the way into Settings, side by side. It used to be a single button across
- * the whole row, which meant the control the user pressed was named "Connected"
- * — a status line that did something. Two controls, each doing its own job, is
- * what that row always should have been.
+ * The foot is the one row that is two things rather than one: a status reading and
+ * the way into Settings, side by side. It used to be a single button across the
+ * whole row, which meant the control the user pressed was named "Connected" — a
+ * status line that did something. Two controls, each doing its own job, is what
+ * that row always should have been.
  */
 
 /** The gear that opens Settings.
  *
  *  Drawn, not set in type. There is no icon font in this app: the CSP is
- *  `style-src 'self'` and `font-src 'self' data:`, so no stylesheet or font from
- *  another origin can load, and every mark in the app is a path in the markup
- *  instead — the pencil below, the arrow in `Control`, the hexagon in `Composer`.
+ *  `style-src 'self'`, so no stylesheet or font from another origin can load, and
+ *  every mark in the app is a path in the markup instead — the pencil below, the
+ *  arrow in `Control`, the hexagon in `Composer`.
  *
  *  This one is drawn twice: a 1.8-weight outline, and a 1.0-weight copy at half
  *  opacity sitting just under it. The offset ghost is what makes it read as
@@ -53,12 +60,82 @@ export interface SidebarProps {
    *  has not read, which is why this is three-valued rather than defaulting to
    *  "connected" and correcting itself a moment later. */
   seen: boolean | null;
+  /** Every chat this machine has, newest first. Never empty — `Chat` seeds one
+   *  rather than let the rail draw a list with nothing in it. */
+  chats: readonly Conversation[];
+  activeId: string;
+  onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
   onNewChat: () => void;
   onSettings: () => void;
+  /** What is known about a newer version. Owned by the chat, so the rail and the
+   *  Settings card cannot disagree about whether an update is waiting. */
+  offer: UpdateOffer;
+  onInstall: () => void;
+  onRestart: () => void;
 }
 
-export default function Sidebar({ seen, onNewChat, onSettings }: SidebarProps) {
+/**
+ * What the update bar says and does, or `null` when there is nothing to act on.
+ *
+ * One function rather than a switch in the markup because the sentence and the
+ * control move together: "Restart" is only the right word beside "is ready", and a
+ * label and an action written in two places will eventually disagree about which
+ * state they are describing. Returning `null` for the four states with nothing to
+ * do — unknown, checking, current, failed — is what makes the bar appear only when
+ * it has something to offer, so it is never a line about nothing.
+ */
+function updateBar(
+  offer: UpdateOffer,
+  onInstall: () => void,
+  onRestart: () => void,
+): { label: string; action: string; act: () => void; disabled: boolean } | null {
+  switch (offer.kind) {
+    case "available":
+      return {
+        label: "New update available",
+        action: "Install",
+        act: onInstall,
+        disabled: false,
+      };
+    case "downloading":
+      return {
+        label: `Getting ${offer.version}…`,
+        action: "Install",
+        act: onInstall,
+        disabled: true,
+      };
+    case "staged":
+      return {
+        label: `Version ${offer.version} is ready`,
+        action: "Restart",
+        act: onRestart,
+        disabled: false,
+      };
+    case "restarting":
+      return { label: "Restarting…", action: "Restart", act: onRestart, disabled: true };
+    case "unknown":
+    case "checking":
+    case "current":
+    case "failed":
+      return null;
+  }
+}
+
+export default function Sidebar({
+  seen,
+  chats,
+  activeId,
+  onSelect,
+  onDelete,
+  onNewChat,
+  onSettings,
+  offer,
+  onInstall,
+  onRestart,
+}: SidebarProps) {
   const state = seen === null ? "checking" : seen ? "seen" : "unseen";
+  const bar = updateBar(offer, onInstall, onRestart);
 
   return (
     // The attribute makes the sidebar's own padding draggable and nothing else
@@ -100,6 +177,73 @@ export default function Sidebar({ seen, onNewChat, onSettings }: SidebarProps) {
         </svg>
         <span className="chat__label">New chat</span>
       </button>
+
+      {/* The chats, newest first and scrolling rather than growing: the rail is a
+          fixed height and a list long enough to push the foot off the bottom would
+          take the connection and the way into Settings with it. Same scroll
+          arrangement as the transcript, for the same reason.
+
+          A row is two buttons, which is the right number — one to open the chat and
+          one to be rid of it — and the second is only revealed on hover or when
+          something inside the row has focus, so a rail at rest is a list of
+          sentences rather than a list of sentences with a row of crosses beside it.
+          It stays in the tab order while hidden, which means a keyboard user can
+          reach it; that is deliberate, and the alternative is a control only a mouse
+          can find. */}
+      <nav className="chat__chats" aria-label="Conversations">
+        {chats.map((chat) => {
+          const title = titleFor(chat);
+          const here = chat.id === activeId;
+          return (
+            <div className="chat__chat" key={chat.id}>
+              <button
+                type="button"
+                className="chat__chat-name"
+                onClick={() => onSelect(chat.id)}
+                aria-current={here ? "true" : undefined}
+              >
+                {title}
+              </button>
+              <button
+                type="button"
+                className="chat__chat-forget"
+                onClick={() => onDelete(chat.id)}
+                aria-label={`Delete ${title}`}
+              >
+                {/* Typed rather than drawn, unlike every other mark here. U+00D7
+                    is in the Latin-1 Supplement, which every subset of the four
+                    vendored faces carries, and none of them declares a
+                    `unicode-range` — so unlike U+2192, which is why `Control`
+                    draws its arrow, this one is genuinely there to be typed. */}
+                ×
+              </button>
+            </div>
+          );
+        })}
+      </nav>
+
+      {/* The bar, in the rail rather than over the conversation, and immediately
+          above the foot — which is the whole of "above Connected", since the rail
+          is a flex column and the foot pushes itself down with `margin: auto`.
+          Nothing here is positioned. */}
+      {bar !== null && (
+        <div className="chat__update">
+          {/* `role="status"`, not the foot's live region: those announce the
+              connection, and an update arriving is a different fact that must not
+              be read out as part of it. */}
+          <span className="chat__update-say" role="status">
+            {bar.label}
+          </span>
+          <button
+            type="button"
+            className="chat__update-do"
+            onClick={bar.act}
+            disabled={bar.disabled}
+          >
+            {bar.action}
+          </button>
+        </div>
+      )}
 
       {/* The foot. The status is a live region rather than a caption, because it
           arrives a moment after the screen does and a screen reader has no other

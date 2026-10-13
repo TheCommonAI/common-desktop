@@ -6,6 +6,10 @@ mod backend;
 // this is driven from here rather than from the web layer.
 mod update;
 
+// The conversations, on disk. The webview has no filesystem and this app has no
+// storage plugin, so this is the only door the chats can go through.
+mod store;
+
 use tauri::{
     Manager, WindowEvent,
     image::Image,
@@ -178,6 +182,10 @@ pub fn run() {
             update::update_check,
             update::update_stage,
             update::update_restart,
+            // The chats, so that closing the app is not the end of them. The
+            // payload is a string and Rust never looks inside it — see `store.rs`.
+            store::conversations_read,
+            store::conversations_write,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -80,6 +80,10 @@ export type UpdateOffer =
   | { kind: "unknown" }
   | { kind: "checking" }
   | { kind: "current" }
+  /** A release exists and nothing has been fetched. The state the rail's bar
+   *  appears on, and the one `Install` acts from — see `takeUpdate` for why the
+   *  download is no longer part of the check. */
+  | { kind: "available"; version: string }
   | { kind: "downloading"; version: string }
   | { kind: "staged"; version: string }
   /** The restart has been asked for and the process is on its way out. Not a
@@ -108,18 +112,23 @@ export async function runningVersion(): Promise<string> {
 }
 
 /**
- * Ask the manifest, and stage whatever it offers.
+ * Ask the manifest, and report what it offers.
  *
- * `report` is called at each state change rather than returned once, because the
- * download is the slow part and the card should be able to say that it is
- * happening. The whole thing is wrapped, because a check that throws — offline, a
- * proxy, a release feed that has moved — must land on a state and not on an
- * unhandled rejection.
+ * `report` is called at each state change rather than returned once, because a
+ * check is a request and the card should be able to say it is happening. The whole
+ * thing is wrapped, because a check that throws — offline, a proxy, a release feed
+ * that has moved — must land on a state and not on an unhandled rejection.
  *
  * The throttle is skipped by `force`, which is what the card's own button passes.
  * A user who presses "Check for updates" has decided to spend the request, and
  * being told "you checked yesterday" by a button they just pressed is the kind of
  * thing that makes a person distrust a control.
+ *
+ * Finding a release stops here. It used to go on to fetch it unprompted, on the
+ * argument that a downloaded update is one the user can act on instantly — but the
+ * update is now offered in the rail with an `Install` on it, and a button whose
+ * work has already been done behind the user's back is a button that lies about
+ * what it did. See `takeUpdate`.
  */
 export async function lookForUpdate(
   report: (offer: UpdateOffer) => void,
@@ -140,12 +149,35 @@ export async function lookForUpdate(
     // about the same release again on the next three launches.
     rememberCheck(Date.now());
 
-    if (status.available === null) {
-      report({ kind: "current" });
-      return;
-    }
+    report(
+      status.available === null
+        ? { kind: "current" }
+        : { kind: "available", version: status.available.version },
+    );
+  } catch {
+    report({ kind: "failed" });
+  }
+}
 
-    report({ kind: "downloading", version: status.available.version });
+/**
+ * Fetch the release the check found, and put it where a restart can reach it.
+ *
+ * Split out of `lookForUpdate` because it is the one part of the update path that
+ * a user has to ask for. It is also the part that takes time — several megabytes
+ * over whatever connection this machine has — which is why the state machine has a
+ * `downloading` for it to report into rather than making the caller wait on a bare
+ * promise.
+ *
+ * The version is passed in rather than read from the manifest again: this is the
+ * release the user was offered, and re-asking the feed could fetch a newer one than
+ * the bar named.
+ */
+export async function takeUpdate(
+  version: string,
+  report: (offer: UpdateOffer) => void,
+): Promise<void> {
+  report({ kind: "downloading", version });
+  try {
     const staged = await updateStage();
 
     // `null` here is not a failure — it is the manifest having stopped offering
