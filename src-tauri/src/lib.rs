@@ -110,6 +110,10 @@ pub fn run() {
         // webview calls it — the three commands in `update.rs` do — so this adds
         // no permission for the page and changes no capability.
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // The pulls this app has running, so a pause can find the transfer it
+        // means to stop. The webview picks the id and hands the same one back to
+        // `ollama_pull_cancel`; the map itself never leaves Rust.
+        .manage(backend::Pulls::default())
         .setup(|app| {
             build_tray(app.handle())?;
             Ok(())
@@ -158,6 +162,10 @@ pub fn run() {
             // Where the weights are, for the one field of `DownloadResult` that
             // has to be a real path.
             backend::ollama_models_dir,
+            // The download itself, streamed from ollama through Rust rather than
+            // fetched by the webview. `ollama_pull` says why the hop exists.
+            backend::ollama_pull,
+            backend::ollama_pull_cancel,
             // The one read that leaves the machine without being asked to.
             // Asked for once, and cached in the web layer — see `backend.rs`.
             backend::where_am_i,
