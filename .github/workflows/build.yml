@@ -45,9 +45,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      # Formatting reads the source and links nothing, so it runs before the system
+      # libraries are installed: a misplaced bracket should not wait on an apt-get.
       - name: Formatting
         run: cargo fmt --check
         working-directory: src-tauri
+      # Linting and testing, unlike formatting, compile the whole dependency graph —
+      # and on Linux Tauri links GTK and WebKitGTK. Without these packages `gio-sys`
+      # fails in its build script and takes the job down with it, which is what this
+      # gate did the first time it ran in CI. The list is the one the `linux` job
+      # installs, and the two have to agree: that job builds the same graph.
+      - name: WebKitGTK and the rest of Tauri's Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
       - name: Lints
         run: cargo clippy --all-targets -- -D warnings
         working-directory: src-tauri
