@@ -52,9 +52,24 @@ jobs:
           ' run.json
           echo "sha=$(jq -r .head_sha run.json)" >> "$GITHUB_OUTPUT"
           gh api "repos/$GH_REPO/actions/runs/$BUILD_RUN/jobs" > jobs.json
-          jq -e 'all(["verify", "windows", "macos"][];
-            . as $name | any($jobs[0].jobs[]; .name == $name and .conclusion == "success"))' \
-            --slurpfile jobs jobs.json jobs.json
+
+          # `verify` and `windows` have one job each, named exactly that. `macos` does
+          # not: it is a matrix, so GitHub appends the matrix parameters and the job is
+          # called `macos (aarch64-apple-darwin, Common-macOS-arm64)`. An equality test
+          # against the bare name can therefore never succeed, and this check — which
+          # gates the release — would fail on every run while looking like it was
+          # working. So a name matches either as itself or as itself followed by the
+          # matrix parameters, and every job that is not `linux` must have concluded
+          # successfully. `linux` is dispatch-only, so on a push to main it is always
+          # `skipped`, and it is building an installer that this workflow does not
+          # publish; it is excluded rather than required.
+          jq -e '
+            [ .jobs[] | select(.name != "linux") ] as $real
+            | ($real | length) >= 4
+              and all($real[]; .conclusion == "success")
+              and all(["verify", "windows", "macos"][];
+                  . as $want | any($real[]; .name == $want or (.name | startswith($want + " "))))
+          ' jobs.json
 
       # Checked out at the commit that was built, not at whatever main has moved on
       # to since. The scripts and the version files used below are therefore the ones
