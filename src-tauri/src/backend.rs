@@ -113,6 +113,10 @@ fn silent(program: impl AsRef<std::ffi::OsStr>) -> Command {
 /// `/` as a stand-in for "wherever they land", and that is a path that resolves
 /// to the home volume on a Mac and does not exist at all on Windows — so a
 /// placeholder is replaced and a real path is honoured.
+///
+/// macOS and Windows only, on the same predicate as `capture` and for the same
+/// reason: the disk read for everywhere else refuses before it resolves a path.
+#[cfg(any(target_os = "macos", windows))]
 fn weights_volume(path: &str) -> Result<String, String> {
     if !path.is_empty() && path != "/" {
         return Ok(path.to_string());
@@ -241,6 +245,13 @@ fn run_common(verb: &str, extra: &[&str], json: bool) -> Result<String, String> 
 }
 
 /// Capture stdout from a system program, for the hardware reads.
+///
+/// macOS and Windows only, and the predicate is the mirror of the one the stubs
+/// at the foot of each read carry. Those two platforms are the ones whose reads
+/// shell out — `sysctl`, `df`, `pmset` on one, PowerShell on the other — and
+/// everywhere else the read refuses without running anything at all, so nothing
+/// there can call this.
+#[cfg(any(target_os = "macos", windows))]
 fn capture(program: &str, args: &[&str]) -> Result<String, String> {
     let out = silent(program)
         .args(args)
