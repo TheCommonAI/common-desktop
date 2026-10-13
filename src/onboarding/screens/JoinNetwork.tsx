@@ -1,0 +1,205 @@
+import { useState, type ReactNode } from "react";
+import ShareLog from "../../chat/ShareLog";
+import { formatBytes, formatLatency } from "../copy";
+import { LANE_LABEL, findModel } from "../models";
+import Control from "../parts/Control";
+import Statement from "../parts/Statement";
+import { onboardingService, type JoinProgress, type JoinResult } from "../service";
+import type { ScreenProps } from "../steps";
+import { refused, useTask } from "../use-task";
+
+/**
+ * The end, and the only green in the app.
+ *
+ * The verification is a sequence of statements rather than a checklist, which
+ * makes it the purest screen in the register: one thing is happening at a time,
+ * and the statement is the thing. Nothing starts until the user asks, and
+ * nothing is offered while it runs — there is no useful way to interrupt a
+ * registration, so there is no control offering to.
+ *
+ * The last state had no controls at all, and the flow ended on the sentence. It
+ * has exactly one now, because the sentence is no longer the end of anything:
+ * it says this machine is live, and there is now a screen where being live is
+ * worth something. One control, and it is the only place in the flow where the
+ * forward move does not go to another step.
+ *
+ * The two states where it does *not* work carry a way to leave with the
+ * evidence — a report of this machine, this is `ShareLog`. Both are the same
+ * failure from where the user is standing: it will not connect. One of them says
+ * so outright; the other registered the machine and then could not be routed to,
+ * which is a firewall and not a bug report, and is exactly the thing the join
+ * log's last lines describe.
+ */
+
+/** The clause for a phase, which is the whole caption: the phase *is* the
+ *  information, so there is no second line for it to sit beside. */
+function phaseStatement(phase: JoinProgress["phase"], label: string): ReactNode {
+  switch (phase) {
+    case "registering":
+      return "Registering this machine.";
+    case "loading-model":
+      return `Loading ${label}.`;
+    case "test-prompt":
+      return "Asking it something.";
+    case "confirming":
+      return "Checking the network can see you.";
+  }
+}
+
+export default function JoinNetwork({ flow, next, back }: ScreenProps) {
+  const model = flow.modelId === null ? null : findModel(flow.modelId);
+  const label = model?.label ?? "the model";
+
+  const { state, run } = useTask<JoinResult, JoinProgress>((opts) =>
+    flow.lane === null || flow.modelId === null
+      ? refused<JoinResult>("Nothing to join with.")
+      : onboardingService.joinNetwork(
+          {
+            lane: flow.lane,
+            modelId: flow.modelId,
+            // The step machine will not have let the user here without an
+            // answer, so this fallback is unreachable; it exists so that the
+            // request type stays honest rather than to be used.
+            limits: flow.limits ?? {
+              contribute: "idle",
+              cap: { cpuPercent: 50, gpuPercent: 40 },
+              quietHours: null,
+            },
+          },
+          opts,
+        ),
+  );
+
+  /**
+   * Which run this is. Focus has to move when the controls come and go — a
+   * retry unmounts the button that was pressed — but not when one phase
+   * replaces another, because nothing on screen unmounted. So the focus key is
+   * constant for the length of a run and changes only when a new one starts,
+   * and the phase changes are announced by the live region instead. Two
+   * mechanisms, never both for the same change.
+   */
+  const [attempt, setAttempt] = useState(0);
+  const start = () => {
+    setAttempt((n) => n + 1);
+    run();
+  };
+
+  const progress = state.status === "running" || state.status === "error" ? state.progress : null;
+  // Before the first phase lands the request has still been sent, so the first
+  // thing it does is the honest thing to say.
+  const phase = progress?.phase ?? "registering";
+  const answered = progress?.answered ?? null;
+
+  let statement: ReactNode;
+  let caption: ReactNode | readonly ReactNode[];
+  let controls: ReactNode | undefined;
+  let live = false;
+
+  if (state.status === "done") {
+    const join = state.value;
+    if (join.gatewaySeen) {
+      live = true;
+      statement = `You're live in the ${LANE_LABEL[join.lane]} lane.`;
+      caption = [`Node ${join.nodeId}`, label];
+    } else {
+      // A successful call reporting a failed check. The node is registered —
+      // that is not in doubt, and saying otherwise would send the user looking
+      // for a problem that is not there — but the gateway cannot route to it.
+      statement = "You're registered.";
+      caption = ["But the gateway can't reach this machine", "usually a firewall"];
+    }
+    controls = join.gatewaySeen ? (
+      // The one control on the green screen, and the only forward move in the
+      // flow that leads out of the flow. It does not name the chat, because the
+      // thing the user wants is not "the chat" — it is to ask this machine
+      // something, which is what the test prompt a moment ago already did.
+      <Control onClick={next} arrow>
+        Ask it something
+      </Control>
+    ) : (
+      <>
+        <Control onClick={start} arrow>
+          Try again
+        </Control>
+        <Control onClick={back} quiet>
+          Back
+        </Control>
+        {/* The registered-but-unreachable case is still "it will not connect",
+            which is the whole of what a report is for. */}
+        <ShareLog />
+      </>
+    );
+  } else if (state.status === "error") {
+    statement = "The network didn't answer.";
+    caption = [
+      state.error.code === "timeout"
+        ? "It took too long to answer"
+        : state.error.code === "network"
+          ? "Nothing came back from the gateway"
+          : "Something went wrong at this end",
+      state.error.detail ?? null,
+    ];
+    controls = (
+      <>
+        <Control onClick={start} arrow>
+          Try again
+        </Control>
+        <Control onClick={back} quiet>
+          Back
+        </Control>
+        {/* This is the state the report exists for: the join failed, the reason
+            is in a log on this machine, and the person who could read it is not
+            sitting here. */}
+        <ShareLog />
+      </>
+    );
+  } else if (state.status === "running") {
+    statement = phaseStatement(phase, label);
+    caption =
+      phase === "loading-model"
+        ? [model === null ? null : `${formatBytes(model.bytes)} from disk into memory`]
+        : phase === "test-prompt"
+          ? answered === null
+            ? // What the model was asked is not known until the answer comes
+              // back, and this screen does not invent it. One true clause now,
+              // the proof in a moment.
+              ["Your machine is answering it"]
+            : [`“${answered.prompt}”`, `“${answered.answer}”`, `${formatLatency(answered.latencyMs)} on your machine`]
+          : phase === "confirming"
+            ? ["Waiting for the gateway to answer"]
+            : // A name for this machine, and nothing else. It used to say "and a
+              // key for it", which was false: the Alpha issues a bearer token to
+              // a node — `identity.json` holds it — and never a keypair, so
+              // there is no key being made here and nothing for a user to keep.
+              ["Choosing a name for this machine"];
+    controls = undefined;
+  } else {
+    statement = "One last thing.";
+    caption = [
+      "Registering this machine",
+      "asking the model a question",
+      "checking the gateway can see you",
+    ];
+    controls = (
+      <>
+        <Control onClick={start} arrow>
+          Join the network
+        </Control>
+        <Control onClick={back} quiet>
+          Back
+        </Control>
+      </>
+    );
+  }
+
+  return (
+    <Statement
+      statement={statement}
+      caption={caption}
+      controls={controls}
+      live={live}
+      focusKey={state.status === "idle" ? "ready" : `join-${attempt}`}
+      announce={state.status !== "idle"}
+    />
+  );
+}

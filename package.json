@@ -1,77 +1,31 @@
 {
   "name": "common-desktop",
-  "productName": "Common",
+  "private": true,
   "version": "0.2.0",
-  "description": "Chat and contribute to the Common AI network.",
-  "main": "src/main/index.cjs",
-  "author": "TheCommonAI",
-  "license": "AGPL-3.0-or-later",
-  "repository": "https://github.com/TheCommonAI/common-desktop",
-  "engines": {
-    "node": ">=24.11.0"
-  },
+  "type": "module",
   "scripts": {
-    "postinstall": "install-electron",
-    "start": "electron .",
-    "test": "node --test tests/*.test.cjs",
-    "check": "node scripts/check.cjs",
-    "dist:win": "electron-builder --win nsis --x64 --publish never",
-    "dist:portable": "electron-builder --win portable --x64 --publish never",
-    "dist:mac": "electron-builder --mac dmg zip --arm64 --x64 --publish never",
-    "dist:linux": "electron-builder --linux AppImage --x64 --publish never"
-  },
-  "devDependencies": {
-    "electron": "44.3.0",
-    "electron-builder": "26.15.3",
-    "jsdom": "30.0.1"
-  },
-  "build": {
-    "appId": "au.com.commonai.desktop",
-    "asar": true,
-    "files": [
-      "src/**/*",
-      "assets/**/*",
-      "LICENSE",
-      "THIRD_PARTY_NOTICES.md",
-      "package.json"
-    ],
-    "directories": {
-      "output": "release"
-    },
-    "artifactName": "Common-${os}-${arch}.${ext}",
-    "win": {
-      "target": "nsis",
-      "icon": "assets/icon.ico"
-    },
-    "portable": {
-      "artifactName": "Common-Windows-${arch}-Portable.exe"
-    },
-    "nsis": {
-      "oneClick": true,
-      "perMachine": false,
-      "createDesktopShortcut": true,
-      "deleteAppDataOnUninstall": false,
-      "include": "scripts/installer.nsh",
-      "installerIcon": "assets/icon.ico",
-      "uninstallerIcon": "assets/icon.ico",
-      "installerHeaderIcon": "assets/icon.ico"
-    },
-    "mac": {
-      "target": [
-        "dmg",
-        "zip"
-      ],
-      "category": "public.app-category.productivity",
-      "icon": "assets/icon.icns",
-      "hardenedRuntime": true
-    },
-    "linux": {
-      "target": "AppImage",
-      "category": "Utility",
-      "icon": "assets/icon.png"
-    }
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b",
+    "tauri": "tauri"
   },
   "dependencies": {
-    "electron-updater": "^6.8.3"
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "katex": "^0.19.0",
+    "markdown-it": "^15.0.2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/markdown-it": "^14.2.0",
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.0.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.0.16"
   }
 }

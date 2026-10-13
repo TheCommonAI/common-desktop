@@ -1,0 +1,1543 @@
+/* ---------------------------------------------------------------------------
+   Brand faces — the real names from the original Common app
+   (src/renderer/style.css in the Electron project).
+--------------------------------------------------------------------------- */
+@font-face {
+  font-family: "CommonDisplay";
+  src: url("./assets/display.woff2") format("woff2");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "CommonNote";
+  src: url("./assets/annotation.woff2") format("woff2");
+  font-display: swap;
+}
+
+/* Everything that is neither of those two.
+   The app used to have a third and a fourth voice — a grotesque for the chrome
+   and a serif for the prose — and both are gone: there is one family now, for
+   every piece of text that is not the display line or the hand.
+   Inter, and Bold 700 is the whole of the range in use. Vendored rather than
+   linked so the app has no network dependency at first paint; the variable file
+   rather than a frozen instance, so the family is genuinely the family and the
+   weights above and below the body — 900 for emphasis — are real cuts of it and
+   not a synthesis. The file names say what the face is for, not who drew it.
+   `font-display: block` rather than `swap`: this is the app's own text, so a
+   moment of nothing beats a moment of the wrong thing. It is a local file read
+   from disk — the blank is a frame or two, not a round trip. */
+@font-face {
+  font-family: "CommonPlain";
+  src: url("./assets/plain.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: block;
+}
+
+/* The italic is a real file for the same reason. `font-synthesis: none` is set
+   below, so with only the upright on hand an `<em>` in an answer renders exactly
+   as the words around it — emphasis that silently is not there. */
+@font-face {
+  font-family: "CommonPlain";
+  src: url("./assets/plain-italic.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: italic;
+  font-display: block;
+}
+
+/* ---------------------------------------------------------------------------
+   Ground
+   --ground is also the native window colour, set in
+   src-tauri/tauri.conf.json (app.windows[0].backgroundColor). It paints the
+   window before the webview loads, so change the two together.
+--------------------------------------------------------------------------- */
+:root {
+  --ground: #292928;
+  --ink: #f6f6f6;
+  --ink-quiet: #9a988f;
+
+  /* Three voices, and two of them are the app's own. `--font-body` keeps its
+     name and every one of its consumers — controls, rail labels, placeholder,
+     timestamps — so the whole chrome moved to Inter by being pointed at it
+     rather than by editing call sites. The system stack stays behind it as the
+     floor for a glyph the latin subset cannot reach. */
+  --font-body: "CommonPlain", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-display: "CommonDisplay", var(--font-body);
+  --font-note: "CommonNote", var(--font-body);
+
+  /* What the model says, and what you type into. The same face as the chrome
+     now, so the two are told apart by size and leading alone — kept as its own
+     name rather than folded into `--font-body`, because it still marks the one
+     thing that matters about this text: it is what somebody said, and not a
+     label about it. */
+  --font-text: var(--font-body);
+
+  /* The one success colour in the app, and it is used at exactly one moment: the
+     whole of the sentence that ends the flow. A warm green, so that it belongs
+     on the ground rather than sitting on top of it. There is deliberately no
+     warning colour beside it — attention is earned by absence and by full ink,
+     not by a hue, which is what keeps this one worth looking at. */
+  --live: #8fc07a;
+
+  /* The one surface in the app, and the chat is the only screen that has one.
+     The onboarding never needed it: a screen is ground, type on ground, and
+     nothing laid on top of either. A conversation does, because a transcript
+     has to say which of two people said a thing, and the only way to say that
+     without a second ink or a label is to give one of them a plane to sit on. */
+  --raise: #4c4c4b;
+
+  /* The step entrance, in one place. Reduced motion collapses every screen by
+     setting this to zero rather than by listing them, so a screen written later
+     respects the preference without being added to a list. */
+  --dur-step: 0.3s;
+
+  color-scheme: dark;
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 24px;
+  /* The body weight of the whole app, and the one everything else is measured
+     against. Everything that recedes does it with `--ink-quiet`; nothing does it
+     by going lighter, which is why there is no 400 left anywhere in this file
+     outside the display and note faces. */
+  font-weight: 700;
+
+  color: var(--ink);
+  background-color: var(--ground);
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-text-size-adjust: 100%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+}
+
+/* ---------------------------------------------------------------------------
+   Stage — the fixed frame the opening and the onboarding both play out inside
+--------------------------------------------------------------------------- */
+.stage {
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ---------------------------------------------------------------------------
+   Opening — the wordmark alone on the field. Click anywhere to begin.
+--------------------------------------------------------------------------- */
+.intro {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-inline: 16px;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.intro--leaving {
+  animation: leave 0.55s cubic-bezier(0.4, 0, 0.2, 1) both;
+  /* On its way out, and no longer taking the click. */
+  pointer-events: none;
+}
+
+/* The pointer target is the whole frame, so the keyboard gets a real button,
+   parked out of sight. Tab focus lands on it. */
+.intro__begin {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  margin: -1px;
+  overflow: hidden;
+  white-space: nowrap;
+  clip-path: inset(50%);
+}
+
+/* ...which is invisible, so mark the focused frame instead. */
+.intro:has(:focus-visible) {
+  outline: 2px solid var(--ink-quiet);
+  outline-offset: -8px;
+}
+
+.word {
+  position: relative;
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: clamp(3rem, 14vw, 14rem);
+  letter-spacing: -0.02em;
+  line-height: 1;
+  white-space: nowrap;
+  text-transform: uppercase;
+  animation: arrive 1.4s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+/* The two copies share one box. The soft one is in flow and sets the size; the
+   crisp one is stacked exactly over it. The padding is what keeps the blur from
+   being shaved at the element's edge — and it is the only reason it is there,
+   since the padding sits inside the blurred area and is painted along with it. */
+.layer {
+  display: block;
+}
+
+/* The type, with the blur on its own element so that the mask above can slide
+   without disturbing it. Keeping the blurred raster out of the mask's way is what
+   stops the tracking from re-running the blur on every frame. */
+.layer__ink {
+  display: block;
+  padding: 0.2em;
+  color: var(--ink);
+}
+
+/* The blur is rasterised once and kept, as long as the raster survives between
+   frames — and a slow frame is exactly where it would otherwise be thrown away
+   and rebuilt. */
+.layer__ink--soft {
+  will-change: filter;
+}
+
+/* The crisp copy, and the effect's only mask; being positioned, it paints over
+   the soft copy.
+
+   The mask's shape does not change as the pointer moves, only where it sits, so
+   the gradient is built once in JS around the image's own centre, and the focus is
+   moved by sliding the image — a fixed size, centred on the pointer by backing it
+   off by half its size. Rewriting the gradient instead would re-rasterise it on
+   every frame.
+
+   Half its size, and not the reach: backing it off by the reach puts the
+   gradient's centre only a reach from the image's left edge, so the image stops
+   covering the word as soon as the focus passes a reach — and past the image,
+   `no-repeat` is a cut rather than a soft edge. */
+.layer--focus {
+  position: absolute;
+  inset: 0;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-size: var(--mask-size, 100% 100%);
+  mask-size: var(--mask-size, 100% 100%);
+  -webkit-mask-position: calc(var(--x, 0px) - var(--mask-x, 0px))
+    calc(var(--y, 0px) - var(--mask-y, 0px));
+  mask-position: calc(var(--x, 0px) - var(--mask-x, 0px))
+    calc(var(--y, 0px) - var(--mask-y, 0px));
+}
+
+@keyframes arrive {
+  from {
+    opacity: 0;
+    transform: translateY(1.5rem);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* The opening's exit, mirroring the arrival: out where it came in from. */
+@keyframes leave {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-1.5rem);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Onboarding — what the wordmark hands over to
+--------------------------------------------------------------------------- */
+.onboarding {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  /* A tall screen scrolls rather than clipping. The flow is drawn to fit the
+     configured 800×600 window, so this is a valve and not the plan — but the
+     `overflow: hidden` on `body` means anything that did not fit would be lost
+     silently, which is worse than a scrollbar. */
+  overflow-y: auto;
+  /* The gutter is generous twice over: it is the register's left margin, and it
+     clears the macOS traffic lights, which float over the top-left corner of a
+     transparent-titlebar window at roughly 90×28px. */
+  padding-inline: clamp(2.5rem, 12vw, 8rem);
+  padding-block: clamp(2.5rem, 7vh, 4.5rem);
+  /* Held back so it rises as the wordmark clears, rather than through it. */
+  animation: step-in 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) 0.1s both;
+}
+
+/* ---------------------------------------------------------------------------
+   The flow — one statement, one clause, one line of controls, and ground
+--------------------------------------------------------------------------- */
+
+.sheet {
+  /* Centres when the screen fits and top-aligns when it does not. The obvious
+     `justify-content: center` clips the top of an overflowing column out of
+     reach; auto margins resolve to zero instead, and that is the whole reason
+     for them. */
+  margin-block: auto;
+  width: 100%;
+  /* A very wide window would otherwise stretch a 3rem line to a hundred
+     characters. */
+  max-width: 44rem;
+}
+
+.sheet--forward {
+  animation: step-in var(--dur-step) cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+.sheet--back {
+  animation: step-back var(--dur-step) cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+/* The one large thing on screen. */
+.statement {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: clamp(1.75rem, 5.5vw, 3rem);
+  line-height: 1.08;
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+  /* A place for focus to land, never a control — and the sentence is its own
+     visible confirmation, so it wears nothing. */
+  outline: none;
+}
+
+.statement--live {
+  color: var(--live);
+}
+
+/* The clause beneath. Fragments, never sentences: a full stop in caps at this
+   size is oppressive. */
+.caption {
+  margin: 0.9rem 0 0;
+  font: 400 0.75rem/1.4 var(--font-note);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-quiet);
+}
+
+/* The parts are separate elements so that they can be coloured apart — and so
+   that the separator between them is drawn by the stylesheet, where it is
+   decoration, rather than typed into the copy, where it would be content. */
+.caption__part + .caption__part::before {
+  content: "·";
+  padding-inline: 0.6em;
+}
+
+/* One clause in full ink, and the only emphasis the flow has: the figure or the
+   fact that matters on this screen. */
+.caption__strong {
+  color: var(--ink);
+  font-weight: 400;
+}
+
+/* Only the download has one, and only while its subject is a duration. */
+.sheet__gauge {
+  margin-top: 1.6rem;
+}
+
+.sheet__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.6rem 1.75rem;
+  margin-top: 2.25rem;
+}
+
+/* A control is a line of text. No border, no fill, no box — the only thing
+   separating it from the prose is that it can be used. */
+.control {
+  appearance: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: 700 1rem/1.4 var(--font-body);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+/* A drawn arrow, not a typed one — see Control.tsx. `vertical-align: middle`
+   puts the box's midline on the parent's x-height midline, which is where an
+   arrow belongs beside a word; nothing else is needed to seat it. At 0.8em it
+   stays well inside the control's 1.4 line-height, so the arrow cannot make the
+   line of controls grow. */
+.control__arrow {
+  display: inline-block;
+  width: 0.8em;
+  height: 0.8em;
+  margin-left: 0.4em;
+  vertical-align: middle;
+}
+
+.control__arrow svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.control--quiet {
+  color: var(--ink-quiet);
+}
+
+.control:hover {
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-decoration-color: var(--ink-quiet);
+  text-underline-offset: 0.25em;
+}
+
+/* Focus is carried by two channels, underline and ink, because an underline
+   alone at this size is easy to miss on a dark ground. */
+.control:focus-visible {
+  outline: none;
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-decoration-color: currentColor;
+  text-underline-offset: 0.25em;
+}
+
+.control:disabled {
+  color: color-mix(in srgb, var(--ink-quiet) 50%, transparent);
+  cursor: default;
+  text-decoration: none;
+}
+
+/* A radio group rendered as a line of text: the chosen one in full ink, the rest
+   quiet. Its own row, so that choosing and advancing never read as one gesture. */
+.choices {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem 1.75rem;
+}
+
+.choice {
+  position: relative;
+  display: inline-flex;
+  align-items: baseline;
+  cursor: pointer;
+  color: var(--ink-quiet);
+}
+
+.choice:has(.choice__input:checked) {
+  color: var(--ink);
+}
+
+.choice:hover .choice__label,
+.choice:has(.choice__input:focus-visible) .choice__label {
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-decoration-color: currentColor;
+  text-underline-offset: 0.25em;
+}
+
+.choice:has(.choice__input:focus-visible) {
+  color: var(--ink);
+}
+
+/* Answered, sent, and no longer up for revision. The offer is withdrawn — no
+   pointing hand, no underline on hover — but the ink is left alone, because the
+   choice shown is still the choice that was made. Dimming it would say the
+   answer had been disowned, which is not what is happening: it is being saved. */
+.choice:has(.choice__input:disabled) {
+  cursor: default;
+}
+
+.choice:has(.choice__input:disabled):hover .choice__label {
+  text-decoration: none;
+}
+
+/* The input is the semantics and the keyboard handling; the label is the
+   appearance. Clipped rather than `display: none` so that it still takes focus
+   and still takes arrow keys. */
+.choice__input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  clip-path: inset(50%);
+}
+
+/* The two times, when there are any. Their own row, below the question. */
+.sheet__fields {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem 2rem;
+}
+
+.time {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.time__label {
+  font: 400 0.75rem/1.4 var(--font-note);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-quiet);
+}
+
+.time__input {
+  appearance: none;
+  padding: 0 0 0.15rem;
+  border: 0;
+  /* A hairline, not a box: the same line the gauge is drawn with. */
+  border-bottom: 1px solid color-mix(in srgb, var(--ink) 30%, transparent);
+  background: none;
+  font: 700 0.95rem/1.4 var(--font-body);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.time__input:focus-visible {
+  outline: none;
+  border-bottom: 2px solid var(--ink);
+}
+
+.time__input::-webkit-calendar-picker-indicator {
+  display: none;
+}
+
+/* Same withdrawal as the choices: the line under the value stops being an
+   invitation to type, so it drops to the weight an inert hairline carries
+   everywhere else in this sheet. The value keeps its ink, for the reason given
+   above the choice rule. */
+.time__input:disabled {
+  cursor: default;
+  border-bottom-color: color-mix(in srgb, var(--ink) 16%, transparent);
+}
+
+/* The gauge: marks, not a rule. No track chrome, no box, no percentage. The row
+   is ambient; the numbers in the caption above it are the type.
+
+   The marks are spread by `space-between` rather than by a width, so the row
+   spans the text column exactly as the hairline it replaced did, at any column
+   width. Each mark carries its own size, rise and tilt as custom properties, set
+   in `Rule.tsx`; the wobble lives there because it has to be the same wobble
+   every frame, and a stylesheet cannot count. */
+.rule {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  /* Room for the largest mark plus its wander, so the row does not jitter the
+     layout as the marks move. */
+  height: 0.5rem;
+}
+
+.rule__dot {
+  width: var(--size, 3px);
+  height: var(--size, 3px);
+  /* Not a circle. A circle is the one shape a hand cannot draw. */
+  border-radius: 50% 46% 54% 50% / 52% 50% 48% 54%;
+  background: color-mix(in srgb, var(--ink) 16%, transparent);
+  transform: translateY(var(--rise, 0)) rotate(var(--tilt, 0deg));
+  /* The one transition in the flow. The gauge is this screen's subject, so its
+     movement is content rather than decoration — and the caption beside it must
+     not animate, because the numbers are read, not watched. */
+  transition: background-color 0.2s linear;
+}
+
+.rule__dot--on {
+  background: var(--ink);
+}
+
+/* The mark under the leading edge: caught mid-stroke, so drawn small. It is what
+   keeps a nearly-full row from reading as a full one. */
+.rule__dot--part {
+  background: var(--ink);
+  transform: translateY(var(--rise, 0)) rotate(var(--tilt, 0deg)) scale(0.55);
+}
+
+@keyframes step-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.75rem);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Backwards arrives from above, so that the direction of the move is legible
+   without an arrow or a label saying which way it went. */
+@keyframes step-back {
+  from {
+    opacity: 0;
+    transform: translateY(-0.75rem);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Chat — what the flow hands over to
+
+   The rail is fixed and the conversation takes the rest, which is the whole of
+   the layout: a chat has one thing to arrange and it is which side a line came
+   from. Nothing here is new except `--raise`. The hairlines are the ink at 16%,
+   the same computation the gauge's uninked marks use; the green is `--live`, the
+   same green as the sentence the user arrived from; and the quiet ink is the
+   same quiet ink as every caption in the flow.
+--------------------------------------------------------------------------- */
+.chat {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  /* Set smaller than the flow, on purpose. The flow is six sentences read once;
+     this is prose read for as long as the user wants, and the flow's size would
+     be a headline shouted down a page. */
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+/* --- the rail --------------------------------------------------------------
+   The rail is also why the window can be moved at all. `titleBarStyle:
+   Transparent` takes the titlebar away and with it the only native drag handle,
+   so the app has to declare one — `data-tauri-drag-region`, set by the Sidebar
+   on the emptiest element on screen. Tauri tests the event's *target*, so the
+   wordmark, the button and the label keep their own pointer behaviour.
+   It needs `core:window:allow-start-dragging` in the capability set, and that is
+   NOT part of `core:window:default`: without it a drag raises an unhandled
+   rejection and the window simply does not move. Found by running it. */
+.chat__side {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  width: clamp(11rem, 26%, 15rem);
+  /* Deep at the top to clear the macOS traffic lights, which float over the
+     top-left of a transparent-titlebar window, and level with where the mock
+     puts the mark. */
+  padding: 3.25rem 1rem 1.5rem;
+  border-right: 1px solid color-mix(in srgb, var(--ink) 16%, transparent);
+}
+
+.chat__mark {
+  margin: 0;
+  font-family: var(--font-display);
+  /* Still smaller than the flow's statement and the opening's wordmark, because
+     both of those are the only thing on screen and this is one of three things
+     in a rail — but only just. The mark is the rail's one piece of identity, and
+     below about 1.5rem it reads as a label above the button rather than as the
+     name of the app.
+     1.6rem is the ceiling rather than a round number picked by eye: the rail is
+     `clamp(11rem, 26%, 15rem)` with a rem of padding either side, so its content
+     box is 144px at the narrowest width the mark is still shown at. `COMMON` in
+     this face measures 133px at 1.6rem and 141px at 1.7rem, so this is the largest
+     step with a margin left over. */
+  font-size: 1.6rem;
+  font-weight: 400;
+  line-height: 1;
+  letter-spacing: 0.04em;
+  /* The face draws caps and the source says so too, for the reason the opening
+     wordmark does: what the DOM reads and what the eye sees should not be two
+     different words. */
+  text-transform: uppercase;
+}
+
+.chat__new {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  align-self: flex-start;
+  margin-top: 1.75rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+/* 14px, which is the mock's mark at this window size. The two ends of the
+   glyph are painted differently — an outline for the body, a solid for the
+   point — so neither fill nor stroke is set here; the SVG says which is which. */
+.chat__new-mark {
+  flex: 0 0 auto;
+  width: 0.875rem;
+  height: 0.875rem;
+}
+
+/* A heavy grotesque, uppercase and tightly tracked — the mock's treatment, and
+   deliberately not the caption's. Everywhere else in the app the tracked
+   uppercase line is the note face, which is a hand; a hand is the right voice
+   for a description and the wrong one for a control, because it reads as
+   someone annotating the screen rather than something on it. A navigation
+   label is something on it. */
+.chat__label {
+  font: 700 0.8125rem/1.4 var(--font-body);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* The status is a footnote to the rail and the mock sets it smaller than the
+   control above it, which is also the honest hierarchy: one of these two is
+   something the user can press. */
+.chat__foot .chat__label {
+  font-size: 0.6875rem;
+}
+
+.chat__new:hover .chat__label,
+.chat__new:focus-visible .chat__label {
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.25em;
+}
+
+.chat__new:focus-visible {
+  outline: none;
+}
+
+/* The foot of the rail, and the only row in the app that is two things at once:
+   a reading on the left and a way into Settings on the right. Pushed to the
+   bottom, which is where the mock puts it and where it belongs — a standing fact
+   about the machine is read once and then left alone, and so is a door.
+
+   The status used to be the whole row, one button named "Connected", so the thing
+   the user pressed was a status line. It is not a button now. */
+.chat__foot {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  /* `auto` and not a spacer element: the rail is a flex column, so this one
+     declaration is the whole of the layout. */
+  margin: auto 0 0;
+  color: var(--ink-quiet);
+}
+
+/* A short upright lozenge, taken from the mock. Not a dot and not a pulse: a dot
+   would be a status light, and this says something slower than that. */
+.chat__foot-bar {
+  flex: 0 0 auto;
+  width: 0.5rem;
+  height: 1rem;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--ink) 16%, transparent);
+}
+
+.chat__foot--seen .chat__foot-bar {
+  background: var(--live);
+}
+
+/* Bare, and deliberately so: the drawing is the whole of it. No box, no fill, no
+   tint — the rail's own quiet colour, deepening to full ink when the gear is live.
+   The palette has no warning or accent hue to spend here, and a gear does not need
+   one: it is the only control in the rail that is not already ink.
+
+   The 0.25rem of padding is undone by an equal negative margin on the right, so
+   the drawing's edge still lines up with the rail's content edge while the box a
+   finger has to find is 24px rather than 16. */
+.chat__gear {
+  display: grid;
+  place-items: center;
+  margin-left: auto;
+  margin-right: -0.25rem;
+  padding: 0.25rem;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.chat__gear:hover,
+.chat__gear:focus-visible {
+  color: var(--ink);
+}
+
+/* Unlike `.chat__new`, which sets `outline: none` and lets the underline on its
+   label be the focus signal, this one has no label to underline and so has to
+   carry a ring of its own. */
+.chat__gear:focus-visible {
+  outline: 2px solid var(--ink-quiet);
+  outline-offset: 2px;
+}
+
+/* 20px, and the number is not a round one by accident. The gear is drawn on a
+   24-unit square rather than the pencil's 14 — a gear has more teeth than a pencil
+   has edges, and at 14 they close up into a blob — but it is drawn *inside* that
+   square: the outer path runs from 2.5 to 21.6, so the drawing is about 80% of its
+   own viewBox. At a 1rem box that is a 13px gear, smaller than the 16px bar it
+   stands beside; at 1.25rem it is 16px, which is the bar exactly.
+
+   That the two marks in the foot come out the same drawn height is the point. It
+   also stops wasting the second stroke — the half-opacity copy under the outline
+   is 0.13px out at 1rem, which is no copy at all. */
+.chat__gear-mark {
+  display: block;
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+/* --- the conversation ------------------------------------------------------ */
+.chat__main {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  /* Without this a long message widens the column instead of wrapping in it,
+     and the rail is squeezed to nothing. */
+  min-width: 0;
+}
+
+.chat__log {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  /* Deeper at the top than the sides, which is the mock's one asymmetry here
+     and the thing that keeps the first line from butting the window edge. The
+     sides are inset a little further than the composer's, so the pill reaches
+     wider than the prose it sits under — the mock's own relationship, and the
+     right one: the composer is furniture at the foot of the window, and the
+     transcript is content with a margin around it. */
+  padding: 3.5rem clamp(2rem, 8%, 4.5rem) 1.5rem;
+}
+
+/* The measure, and deliberately short of the column. The mock leaves more
+   ground to the right of a message than the message takes, and that is not
+   waste: a transcript that fills its column reads as a terminal, and a line of
+   prose that runs the full width of a wide window is one the eye has to hunt
+   back along. */
+.msg {
+  max-width: 20rem;
+  margin: 0;
+}
+
+/* What arrives here is the renderer's HTML, not a string: markdown-it's tags
+   for the model's own markup, and KaTeX's for its mathematics. So this is a
+   container for a document rather than a paragraph — which is why it is a `div`
+   and not a `p` in the markup, since a `<ul>` inside a `<p>` is not a thing.
+
+   The prose is set here and the structure inside is set below: everything the
+   renderer emits is a shape the answer made, not a change of voice. */
+.msg__text {
+  margin: 0;
+  overflow-wrap: break-word;
+  /* The reading face. The size is left inherited — this is a change of voice,
+     not of scale — but the leading opens well past the chrome's 1.4: this text
+     is read rather than scanned, and at the body's weight a paragraph set as
+     tight as a label sets as a block. Both the model's replies and the user's
+     own pill come through here. */
+  font-family: var(--font-text);
+  line-height: 1.55;
+}
+
+/* `pre-wrap` used to be here, standing in for a renderer: it is what made the
+   model's line breaks survive being printed as a string. Markdown owns that now
+   — the renderer is run with `breaks` on, so a single newline is a line break as
+   the model meant it — and leaving it on would double every one of them. */
+
+.msg__text > :first-child {
+  margin-top: 0;
+}
+
+.msg__text > :last-child {
+  margin-bottom: 0;
+}
+
+.msg__text p {
+  margin: 0.7em 0;
+}
+
+/* Emphasis, and the reason these are 900 rather than 600.
+   The body is set at 700, so anything lighter than that now reads as the text
+   being *thinner* than what surrounds it — the opposite of what the markup
+   means. 900 is the top of Inter's axis and the only step above the body that
+   is reliably a step at 1rem; 800 next to 700 is a difference you have to look
+   for, which reads as a rendering accident rather than as emphasis. */
+.msg__text strong {
+  font-weight: 900;
+}
+
+.msg__text h1,
+.msg__text h2,
+.msg__text h3,
+.msg__text h4,
+.msg__text h5,
+.msg__text h6 {
+  /* Not the display face, and not larger. In an answer a heading is a signpost
+     inside a paragraph — "First, the bound:" — and setting it as a title would
+     give one clause of a proof the weight of the app's own headline. So: the
+     reader's face at weight, and no step in size at all. */
+  margin: 1.1em 0 0.35em;
+  font-size: 1em;
+  font-weight: 900;
+  line-height: 1.4;
+}
+
+.msg__text ul,
+.msg__text ol {
+  margin: 0.7em 0;
+  padding-left: 1.4em;
+}
+
+.msg__text li {
+  margin: 0.25em 0;
+}
+
+/* The markers take the quiet ink so the items keep the ordinary one: a list is
+   read by its items, and the bullets are only there to say how many there are. */
+.msg__text li::marker {
+  color: var(--ink-quiet);
+}
+
+.msg__text blockquote {
+  margin: 0.7em 0;
+  padding-left: 0.9em;
+  border-left: 2px solid var(--raise);
+  color: var(--ink-quiet);
+}
+
+.msg__text a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.msg__text hr {
+  margin: 1.2em 0;
+  border: 0;
+  border-top: 1px solid var(--raise);
+}
+
+/* Code is the one place in the app that is not one of the four voices, and it is
+   the one place that is right: a snippet is a quotation of something a machine
+   reads back literally, and setting it in a text face would be a claim about it
+   that is not true. A system monospace, so it is the reader's own and costs the
+   bundle nothing. */
+.msg__text code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85em;
+}
+
+.msg__text pre {
+  margin: 0.7em 0;
+  padding: 0.6em 0.8em;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--raise) 65%, transparent);
+  overflow-x: auto;
+}
+
+.msg__text pre code {
+  padding: 0;
+  font-size: 0.8em;
+  background: none;
+}
+
+.msg__text :not(pre) > code {
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--raise) 65%, transparent);
+}
+
+/* Inside the user's pill the tint above would be the pill on itself. The ground
+   is the one shade that still reads as a step there. */
+.msg--user .msg__text pre,
+.msg--user .msg__text :not(pre) > code {
+  background: color-mix(in srgb, var(--ground) 45%, transparent);
+}
+
+.msg__text table {
+  margin: 0.7em 0;
+  border-collapse: collapse;
+  font-family: var(--font-body);
+  font-size: 0.85em;
+}
+
+.msg__text th,
+.msg__text td {
+  padding: 0.3em 0.6em;
+  border: 1px solid var(--raise);
+  text-align: left;
+}
+
+.msg__text th {
+  font-weight: 900;
+}
+
+/* --- and the mathematics ---------------------------------------------------
+   KaTeX brings its own faces and its own metrics. The two opinions this file
+   has about it are the ones KaTeX cannot have: how big it sits against this
+   app's prose, and what happens when a display equation is wider than the
+   measure it interrupts. */
+
+.msg__text .katex {
+  /* KaTeX's default is 1.21em, which is set for a 16px page and reads a size
+     too large next to this serif. One step up, not two: inline math sits in a
+     sentence and should look like the sentence. */
+  font-size: 1.05em;
+  /* Not `break-word`. A formula is spaced with more care than any line-breaker
+     will take, and the inherited rule would break `\sqrt{a_n}` mid-radical to
+     save a scroll. Where it genuinely does not fit, the display rule below
+     scrolls it instead — which is a thing the reader can undo by dragging. */
+  overflow-wrap: normal;
+}
+
+/* The reset KaTeX does for math nested inside math, restated at a higher
+   specificity than the rule above so the order of the two stylesheets stops
+   mattering. */
+.msg__text .katex .katex {
+  font-size: 1em;
+}
+
+/* The measure is left where the mock put it, at 20rem, and a displayed equation
+   is not given a wider one. That was tried and taken back out: the renderer runs
+   with `breaks` on, so a formula written on its own line — which is how this
+   model writes them — lands inside the paragraph above it rather than in a
+   paragraph of its own, and any rule wide enough to fit the equation would widen
+   that paragraph's prose with it. An answer whose paragraphs ran wider than the
+   answers around it is a worse fault than a rare scroll, and the measure is the
+   mock's.
+
+   What is left is the honest part: an ordinary formula fits. The one this was
+   written for — a displayed bound and a boxed result — is about 200px at this
+   size, well inside the column, and so is most of what a 7B model writes. The
+   rest scrolls within its own line, which the reader can drag — and a scroll
+   that stays inside the equation is the whole reason for the ceiling. */
+.msg__text .katex-display {
+  margin: 0.85em 0;
+  padding: 0.1em 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* Which machine answered, in the CLI's register and the CLI's place: under the
+   answer, above the clock, quiet. */
+.msg__served {
+  margin: 0.4rem 0 0;
+  font: 700 0.75rem/1.4 var(--font-body);
+  color: var(--ink-quiet);
+  /* Not a sentence anyone needs read out before the timestamp that follows it. */
+  text-wrap: pretty;
+}
+
+.msg__served + .msg__time {
+  margin-top: 0.1rem;
+}
+
+.msg__time {
+  display: block;
+  margin-top: 0.35rem;
+  font: 700 0.75rem/1.4 var(--font-body);
+  color: var(--ink-quiet);
+}
+
+.msg--user {
+  /* The one plane in the app, and it carries the user's own words. A little
+     wider than the measure the answers keep, as in the mock: what the user
+     wrote is theirs to see whole, and the model's reply is the thing being
+     disciplined. */
+  align-self: flex-end;
+  max-width: min(22rem, 82%);
+  padding: 0.5rem 1.1rem 0.45rem;
+  border-radius: 22px;
+  background: var(--raise);
+}
+
+.msg--user .msg__time {
+  /* Inside the bubble, at its foot, which is where the mock has it. */
+  margin-top: 0.15rem;
+}
+
+/* No answer came back. The ink drops to quiet and nothing else happens: no hue,
+   no border, no mark. Attention is earned by absence, and a question that went
+   unanswered is a quieter thing than one that was never asked. */
+.msg--failed .msg__text {
+  color: var(--ink-quiet);
+}
+
+/* --- while the network has the question ------------------------------------
+   The CLI is never silent while it waits — it prints its line the moment the
+   request goes out — and the app was silent for the whole of a routed answer,
+   which can be a minute. See `Thinking.tsx` for what it says and why. */
+
+.msg--thinking {
+  /* Nothing has been said yet, so it does not get the ink of something said. It
+     keeps the measure so the answer lands where the waiting was and the column
+     does not jump when it arrives. */
+  color: var(--ink-quiet);
+}
+
+/* The three dots, drawn — see `ThinkingMark.tsx` for what they are and why they
+   are a canvas. On its own line above the sentence rather than at the end of it:
+   at forty-eight pixels tall it is a mark, and a mark set inside a line of text
+   would push that line's box apart to hold it.
+   Sized here and backed at the display's ratio in the component, so the pencil
+   stays sharp on a Retina panel. Left unmargined horizontally on purpose — the
+   dots are held eleven pixels inside the canvas so they are never clipped, and
+   that inset is most of what keeps the mark from crowding the edge of the
+   column.
+   No `color` here: it draws in `currentColor` and the line it belongs to is set
+   in the quiet ink, because nothing has been said yet. */
+.thinking__mark {
+  display: block;
+  width: 56px;
+  height: 48px;
+  margin: 0 0 0.4rem;
+}
+
+/* Tabular figures, so the seconds do not shuffle the line sideways as the
+   digits change width. */
+.thinking__clock {
+  font-variant-numeric: tabular-nums;
+}
+
+.thinking__late {
+  margin: 0.35rem 0 0;
+}
+
+/* The way out of a long wait.
+   Set as a word rather than a button, because it sits on the quietest line in
+   the app and a boxed control there would be the loudest thing on the screen.
+   The underline is what says it is pressable — the same mark the app uses for a
+   link — held back to a fraction of the current ink so that it reads as a
+   footnote until it is pointed at or focused, and at full ink when it is. */
+.thinking__stop {
+  margin-left: 0.6em;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
+}
+
+.thinking__stop:hover,
+.thinking__stop:focus-visible {
+  text-decoration-color: currentColor;
+}
+
+.thinking__stop:focus-visible {
+  outline: 2px solid var(--ink-quiet);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* The one line that appears above the composer, and only ever with something to
+   do. It takes the composer's own inline margins so it sits in the composer's
+   column rather than spanning the conversation like a banner, and the gap below
+   it is the whole of the space between the two — the composer has no top margin
+   of its own.
+
+   Quiet ink and no fill, like every other control in the app. An update waiting
+   is not an emergency: an app that shouts about one teaches people to dismiss it,
+   and the one time it matters they will dismiss that too. Being words rather than
+   a mark, it takes the same underline on hover that `New chat` gets. */
+.chat__notice {
+  flex: 0 0 auto;
+  margin: 0 clamp(1.5rem, 7%, 4rem) 0.75rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-quiet);
+  font: 400 0.8125rem/1.4 var(--font-body);
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat__notice:hover,
+.chat__notice:focus-visible {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.25em;
+}
+
+.chat__notice:focus-visible {
+  outline: 2px solid var(--ink-quiet);
+  outline-offset: 2px;
+}
+
+/* Between the click and the process going away. There is nothing left to press,
+   so it stops looking like something that can be. */
+.chat__notice:disabled {
+  cursor: default;
+}
+
+/* --- the composer ---------------------------------------------------------- */
+.composer {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-height: 2.75rem;
+  margin: 0 clamp(1.5rem, 7%, 4rem) 2rem;
+  padding: 0 0.45rem 0 1.1rem;
+  border-radius: 22px;
+  background: var(--raise);
+}
+
+/* The pill lights, not the field. The field has no edge of its own to light,
+   and a ring drawn inside the pill would be a box that is not there. */
+.composer:focus-within {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ink) 30%, transparent);
+}
+
+.composer__input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.65rem 0;
+  border: 0;
+  background: none;
+  /* You type in the face you are about to see your own words in — the same
+     family and the same 700 as the pill above this, so the line you are typing
+     and the line you sent are one thing. At 1rem against the pill's 0.65rem of
+     padding the line still lands inside the 2.75rem min-height, so the composer
+     does not grow. */
+  font: 700 1rem/1.45 var(--font-text);
+  color: var(--ink);
+}
+
+.composer__input:focus-visible {
+  outline: none;
+}
+
+/* Only the placeholder, never the text that replaces it. What the user types is
+   a message and reads as one; the placeholder is a label and reads as the
+   captions it sits above.
+   Set in the display face, which is the app's own and the same face as the
+   wordmark in the rail — so the empty composer is asking in the app's voice
+   rather than in the body face everything else is set in. It draws caps, which is
+   why the `uppercase` below is doing less work here than it looks; the letter
+   spacing stays, because that face is wide and this string is fifteen glyphs. */
+.composer__input::placeholder {
+  font: 400 0.8125rem/1.4 var(--font-display);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-quiet);
+  /* WebKit dims a placeholder by default, which on this ground would put it
+     below the quiet ink it is meant to be. */
+  opacity: 1;
+}
+
+.composer__send {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 1.9375rem;
+  height: 1.9375rem;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  /* The ground again, used as a button: the mark is punched out of the pill
+     rather than laid on top of it. */
+  background: var(--ground);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.composer__send:focus-visible {
+  outline: 2px solid var(--ink-quiet);
+  outline-offset: 2px;
+}
+
+.composer__send:active {
+  transform: scale(0.92);
+}
+
+/* A question is out on the network. The mark recedes to the quiet ink rather
+   than disappearing: the pill keeps its shape and the composer does not change
+   size when the network takes the question, and the send stays legible as the
+   thing that will come back. */
+.composer__send:disabled {
+  color: var(--ink-quiet);
+  cursor: default;
+}
+
+.composer__mark {
+  width: 0.76rem;
+  height: auto;
+}
+
+/* --- settings, the card over the conversation -------------------------------- */
+/* A native `<dialog>`, so the top layer, the focus trap, Escape and the modal
+   semantics are the platform's rather than this sheet's. What is left for the
+   sheet is the surface and the dim.
+
+   `--ground`, not `--raise`. `--raise` means exactly one thing in this app — the
+   plane the user's own words sit on in the transcript — and a card is already
+   lifted off the chat by the backdrop behind it. Two things claiming to be the
+   raised surface would cost the transcript the only signal it has. */
+.settings {
+  width: min(26rem, calc(100vw - 3rem));
+  max-height: 78vh;
+  padding: 0;
+  border: 0;
+  border-radius: 14px;
+  background: var(--ground);
+  color: var(--ink);
+  /* The edge is the same hairline that draws every other division in the app,
+     which is what keeps the card from reading as a second window. */
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ink) 16%, transparent);
+  overflow: hidden;
+}
+
+/* Scoped to `[open]` so that a closed dialog stays whatever the UA says it is,
+   which is `display: none`. An unscoped `display` here would put a shut card on
+   screen permanently. */
+.settings[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+/* The dim the brief asked for, and the reason the card needs no border of its
+   own to be found. Not a black wash at full strength: 45% is enough to push the
+   chat back without pretending the conversation has gone away, which matters
+   because it has not — it is still there behind the card, and the user is coming
+   back to it. */
+.settings::backdrop {
+  background: color-mix(in srgb, #000 45%, transparent);
+}
+
+/* Pinned: the globe never scrolls away, so the card keeps a top and a bottom and
+   the settings under it can be as long as they need to be. */
+.settings__globe-well {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  padding: 1.5rem 0 0.75rem;
+}
+
+/* The canvas takes its ink from here and nowhere else, which is why the globe
+   needs no theme branch of its own: `color` is the ink, and the two quieter tones
+   are the same ink at the two opacities below. On the ground rather than on paper,
+   so the drawing inverts exactly as the rest of the interface does — the world is
+   drawn in `--ink` either way round.
+
+   The two alphas are the drawing's, not the palette's, which is why they are plain
+   numbers the canvas reads and multiplies rather than a `color-mix()` it could not
+   parse. Slightly under the mock's 0.24 and 0.11: white on near-black blooms, and a
+   graticule that shouts is a graticule drawn in pen. */
+.settings__globe {
+  display: block;
+  color: var(--ink);
+  --globe-pencil: 0.2;
+  --globe-ghost: 0.1;
+}
+
+/* `min-height: 0` is load-bearing: without it a flex child will not shrink below
+   its content, the card grows past `max-height`, and the scrolling never
+   happens. */
+.settings__body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 1.5rem 1.5rem;
+}
+
+.settings__title {
+  margin: 0 0 1rem;
+  font: 700 0.8125rem/1.4 var(--font-body);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-quiet);
+}
+
+/* The heading is where `showModal` is made to land (see `Settings.tsx`), so it is
+   focusable and wears nothing. It is not a control and carries no action, and the
+   sentence under it is already the answer to "which card is this" — a ring around
+   a word nobody can press would only look like a control that had gone wrong. */
+.settings__title:focus,
+.settings__title:focus-visible {
+  outline: none;
+}
+
+/* A statement of fact, in the reading face — it is prose about this machine, not
+   a control. The one exception is the model line, whose name is a button. */
+.settings__fact {
+  margin: 0 0 0.3rem;
+  font: 700 0.95rem/1.5 var(--font-text);
+}
+
+.settings__fact:last-child {
+  margin-bottom: 0;
+}
+
+/* The hatch. It is a button and it is not dressed as one: no underline, no hue,
+   no box, and a default cursor rather than a pointing hand. Nothing here may
+   invite the press, because the whole feature is that it is not on offer.
+
+   `text-decoration: none` is stated rather than left to the UA, because the
+   `:focus-visible` rule below has to be the *only* thing that can put a line
+   under this word.
+
+   The exception is keyboard focus, which must be visible — a control that can
+   only be reached by keyboard and cannot be seen while it is there is worse than
+   one that cannot be reached at all. */
+.settings__hatch {
+  appearance: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: default;
+  text-decoration: none;
+}
+
+.settings__hatch:focus-visible {
+  outline: none;
+  text-decoration: underline;
+  text-decoration-color: var(--ink-quiet);
+  text-underline-offset: 0.25em;
+}
+
+.settings__hatch-open {
+  margin-top: 0.75rem;
+}
+
+/* A row with a hairline over it: the same line the gauge and the card's own edge
+   are drawn with, so a division is a division everywhere in the app. */
+.settings__row {
+  margin-top: 1.6rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid color-mix(in srgb, var(--ink) 16%, transparent);
+}
+
+.settings__label {
+  margin: 0 0 0.6rem;
+  font: 700 0.6875rem/1.4 var(--font-body);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-quiet);
+}
+
+/* The percentages a named cap really means. A named choice is only honest if
+   the number it stands for is on the page. */
+.settings__note {
+  margin: 0.5rem 0 0;
+  font: 700 0.75rem/1.5 var(--font-body);
+  color: var(--ink-quiet);
+}
+
+.settings__times {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+  margin-top: 0.75rem;
+}
+
+.settings__controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+  margin-top: 0.75rem;
+}
+
+.settings__controls--last {
+  margin-top: 1.75rem;
+}
+
+/* Handing somebody the evidence. Its own row, set a little further from the
+   controls above it than they are from each other, because the two are doing
+   different jobs: those recover the screen, these describe it. See ShareLog.tsx
+   for why there are two controls and what is left out of what they carry. */
+.share {
+  flex-basis: 100%;
+  margin-top: 0.75rem;
+}
+
+.share__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.6rem 1.75rem;
+}
+
+/* The live region the result lands in, present from the start so that it is
+   already in the accessibility tree when its text arrives — one that appears
+   holding its text is missed by most screen readers. */
+.share__note {
+  margin: 0.6rem 0 0;
+  min-height: 1.125rem;
+  font: 700 0.75rem/1.5 var(--font-body);
+  color: var(--ink-quiet);
+}
+
+/* An absent note is rendered as no child at all, not as an empty string, so
+   `:empty` matches it — and it collapses to nothing rather than pushing the row
+   below it down by a line of blank. The element itself stays, which is the
+   point; only its box goes. */
+.share__note:empty {
+  margin: 0;
+  min-height: 0;
+}
+
+/* Below a comfortable width the rail drops its two labels and lets the marks
+   carry it, because a rail squeezed to nothing is worse than a rail reduced to
+   its marks. The window is 800×600, so this is a valve and not the plan — but a
+   resized window is not an error and should not be made to look like one. */
+@media (max-width: 30rem) {
+  .chat__side {
+    width: 3.5rem;
+    padding-inline: 0.75rem;
+  }
+
+  /* The label is gone here, so the foot is two marks in a 32px content box —
+     a 16px bar, a gap and a 28px gear, which is more than there is. Tightening
+     the gap is what keeps the gear off the rail's own edge: at the standing
+     0.5rem its box lands flush with the border, and its focus ring past it. */
+  .chat__foot {
+    gap: 0.25rem;
+  }
+
+  .chat__label,
+  .chat__mark {
+    display: none;
+  }
+}
+
+/* Note the absence of `.intro--leaving`. Its exit animation is what hands over
+   to the onboarding, so silencing that animation would strand the opening on
+   screen for good. App skips the phase entirely when motion is reduced. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    /* `both` fill lands every element on its end state immediately, so screens
+       still appear — they just do not travel. */
+    --dur-step: 0s;
+  }
+
+  .word,
+  .onboarding {
+    animation: none;
+  }
+
+  .rule__dot {
+    transition: none;
+  }
+
+  /* Nothing to hold still here: `ThinkingMark` draws one frame and stops under
+     this preference rather than being animated and then suppressed, so the dots
+     land where they are and stay. */
+}
