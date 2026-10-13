@@ -83,34 +83,56 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
           mkdir -p release
+
+          # `upload-artifact@v4` keeps each artifact's tree relative to the least
+          # common ancestor of the paths its job uploaded — and the macOS job uploads
+          # from two directories, `bundle/dmg/` and `bundle/macos/`. So what arrives
+          # here is nested, not flat:
+          #
+          #     dmg/Common_0.2.0_aarch64.dmg
+          #     macos/Common.app.tar.gz
+          #
+          # That is observed rather than assumed: it is the tree `gh run download -n
+          # Common-macOS-arm64` actually produced, and under the one-level globs this
+          # step used to carry it matched nothing, which would have aborted the first
+          # release ever made. So every file is looked for by name at whatever depth
+          # it sits — which is also what lets the one script serve a signed run (the
+          # `macos/` directory there as well) and an unsigned one (the `dmg/`
+          # directory alone).
+          one() {
+            local found n
+            found=$(find "$1" -type f -name "$2")
+            n=$(find "$1" -type f -name "$2" | wc -l | tr -d ' ')
+            if [[ "$n" -ne 1 ]]; then
+              echo "expected exactly one $2 under $1, found $n" >&2
+              exit 1
+            fi
+            printf '%s\n' "$found"
+          }
 
           # Tauri emits `Common_0.2.0_x64-setup.exe` and `Common_0.2.0_aarch64.dmg`.
           # The website links at fixed, version-less names from pages that are not in
           # this repository, so they are renamed here and here only.
-          exe=(artifacts/windows/*.exe)
-          [[ "${#exe[@]}" -eq 1 ]] || { echo "expected one Windows installer, found ${#exe[@]}"; exit 1; }
-          [[ -f "${exe[0]}.sig" ]] || { echo "the Windows build was not signed: ${exe[0]}.sig is missing"; exit 1; }
-          mv "${exe[0]}" release/Common-win-x64.exe
-          mv "${exe[0]}.sig" release/Common-win-x64.exe.sig
+          exe=$(one artifacts/windows '*.exe')
+          [[ -f "$exe.sig" ]] || { echo "the Windows build was not signed: $exe.sig is missing"; exit 1; }
+          mv "$exe" release/Common-win-x64.exe
+          mv "$exe.sig" release/Common-win-x64.exe.sig
 
-          arm=(artifacts/mac-arm64/*.dmg)
-          x64=(artifacts/mac-x64/*.dmg)
-          [[ "${#arm[@]}" -eq 1 && "${#x64[@]}" -eq 1 ]] || { echo "expected one DMG per architecture"; exit 1; }
-          mv "${arm[0]}" release/Common-mac-arm64.dmg
-          mv "${x64[0]}" release/Common-mac-x64.dmg
+          arm=$(one artifacts/mac-arm64 '*.dmg')
+          x64=$(one artifacts/mac-x64 '*.dmg')
+          mv "$arm" release/Common-mac-arm64.dmg
+          mv "$x64" release/Common-mac-x64.dmg
 
           # Both macOS architectures emit a file called `Common.app.tar.gz` — in their
           # own target directories. They are the update payloads, and one tarball
           # cannot serve both, so they are renamed apart and named in the manifest
           # under their own keys.
           while IFS=: read -r dir arch; do
-            tar=(artifacts/$dir/Common.app.tar.gz)
-            [[ -f "${tar[0]}" ]] || { echo "no update payload in $dir"; exit 1; }
-            [[ -f "${tar[0]}.sig" ]] || { echo "the $dir update payload was not signed"; exit 1; }
-            mv "${tar[0]}" "release/Common_${VERSION}_${arch}.app.tar.gz"
-            mv "${tar[0]}.sig" "release/Common_${VERSION}_${arch}.app.tar.gz.sig"
+            tar=$(one "artifacts/$dir" 'Common.app.tar.gz')
+            [[ -f "$tar.sig" ]] || { echo "the $dir update payload was not signed: $tar.sig is missing"; exit 1; }
+            mv "$tar" "release/Common_${VERSION}_${arch}.app.tar.gz"
+            mv "$tar.sig" "release/Common_${VERSION}_${arch}.app.tar.gz.sig"
           done <<< $'mac-arm64:aarch64\nmac-x64:x64'
 
       - name: Check the installers are whole, then hash them
