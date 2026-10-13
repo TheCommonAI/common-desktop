@@ -1,9 +1,34 @@
-node_modules/
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Staging directories the publish workflow builds into, then uploads to a
+# release, plus the release notes it writes before attaching them. Local
+# scratch, never a committed artifact.
 release/
 release-*/
-test-results/
-*.log
-.DS_Store
+release-notes.md
 
-src/main/build-info.json
-src/main/release-trust.json
+# The Rust side ignores its own build output in src-tauri/.gitignore, where the
+# paths are relative to it: /target/ and /gen/schemas.
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

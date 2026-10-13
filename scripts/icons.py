@@ -3,10 +3,18 @@
 
     python3 scripts/icons.py
 
-Rewrites the icons in assets/: icon.png, icon.icns, icon.ico, tray.png and the
-macOS menu-bar templates (trayTemplate*.png). Needs Pillow and, for the .icns,
-macOS `iconutil`; it is a design-time tool, not part of the build, so neither
-is a dependency of the app.
+Rewrites the icons in src-tauri/icons/: the app icon at every size Tauri's
+bundle config names, icon.icns, icon.ico, and the menu-bar glyph. Needs Pillow
+and, for the .icns, macOS `iconutil`; it is a design-time tool, not part of the
+build, so neither is a dependency of the app. On a machine without iconutil the
+.icns is skipped and everything else is still written.
+
+This was the Electron build's icon renderer, drawing into `assets/`. The drawing
+is unchanged; only where the files land and what they are called is. Tauri names
+its own set (`32x32.png`, `128x128.png`, `128x128@2x.png`, `icon.icns`,
+`icon.ico`) and `src-tauri/tauri.conf.json` lists exactly those five, so those
+are the names emitted here. `icon.png` is written too — not in that list, but
+conventional.
 
 Why draw the mark instead of downscaling it: twenty dots is the right count at
 512px and turns to a solid grey ring at 16px, which is precisely the size
@@ -25,6 +33,7 @@ import random
 import shutil
 import subprocess
 import sys
+import tempfile
 
 try:
     from PIL import Image, ImageDraw
@@ -32,7 +41,7 @@ except ImportError:
     sys.exit("Pillow is required: python3 -m pip install Pillow")
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-ASSETS = ROOT / "assets"
+ICONS = ROOT / "src-tauri" / "icons"
 
 PAPER = (237, 233, 225)   # --paper #ede9e1
 INK = (40, 38, 36)        # --bg    #282624
@@ -120,8 +129,9 @@ def tray(size, attention=False):
     menu bar, so this one file is right on a light bar and a dark one. The
     `attention` variant puts its signal in the shape -- a dot in the corner --
     instead of recolouring the whole icon, which on the menu bar means guessing
-    at a colour the bar may already be using. Windows and Linux keep tray.png,
-    a drawn badge, which is what a taskbar wants.
+    at a colour the bar may already be using. Nothing in the Tauri app calls for
+    it today -- `build_tray` sets one icon and no attention state -- so it is
+    kept here rather than emitted, in case a menu bar badge returns.
     """
     big = size * SS
     layer = Image.new("RGBA", (big, big), (0, 0, 0, 0))
@@ -142,41 +152,57 @@ def tray(size, attention=False):
     return layer.resize((size, size), Image.LANCZOS)
 
 
+# 44 and not 22: `tray-icon` normalises whatever it is handed to 18 points tall
+# and keeps the aspect, so the extra pixels are what survives on a Retina bar.
+# See the note above `TRAY_PNG` in src-tauri/src/lib.rs.
+TRAY_SIZE = 44
+
+# Windows and Linux read `32x32.png` off the tray instead of this, because a
+# black glyph on a dark taskbar is a glyph nobody can see. One file, two jobs:
+# the taskbar icon and the non-macOS tray icon.
+ICO_SIZES = [16, 24, 32, 48, 64, 128, 256]
+
+ICNS_PLAN = ((16, "icon_16x16"), (32, "icon_16x16@2x"), (32, "icon_32x32"),
+             (64, "icon_32x32@2x"), (128, "icon_128x128"), (256, "icon_128x128@2x"),
+             (256, "icon_256x256"), (512, "icon_256x256@2x"), (512, "icon_512x512"),
+             (1024, "icon_512x512@2x"))
+
+
 def main():
-    square(512).save(ASSETS / "icon.png")
+    ICONS.mkdir(parents=True, exist_ok=True)
+
+    square(512).save(ICONS / "icon.png")
+    square(32).save(ICONS / "32x32.png")
+    square(128).save(ICONS / "128x128.png")
+    square(256).save(ICONS / "128x128@2x.png")
 
     # .ico: every size Windows asks for, each drawn rather than downscaled.
-    sizes = [16, 24, 32, 48, 64, 128, 256]
-    images = [square(s) for s in sizes]
-    images[-1].save(ASSETS / "icon.ico", format="ICO",
-                    sizes=[(s, s) for s in sizes], append_images=images[:-1])
+    images = [square(s) for s in ICO_SIZES]
+    images[-1].save(ICONS / "icon.ico", format="ICO",
+                    sizes=[(s, s) for s in ICO_SIZES], append_images=images[:-1])
 
-    # Tray: a dark badge, so it reads against a light menu bar or taskbar.
-    draw(32, PAPER, INK, 0.22, 0.0).save(ASSETS / "tray.png")
-
-    # macOS menu bar: the mark alone as a template, plus the attention dot.
-    tray(16).save(ASSETS / "trayTemplate.png")
-    tray(32).save(ASSETS / "trayTemplate@2x.png")
-    tray(16, attention=True).save(ASSETS / "trayTemplateAttention.png")
-    tray(32, attention=True).save(ASSETS / "trayTemplateAttention@2x.png")
+    # macOS menu bar: the mark alone, as a template macOS tints itself.
+    tray(TRAY_SIZE).save(ICONS / "tray.png")
 
     if shutil.which("iconutil") is None:
-        print("icon.png, icon.ico, tray.png and the menu-bar templates written. "
-              "icon.icns needs macOS iconutil -- skipped.")
+        print("icon.png, 32x32.png, 128x128.png, 128x128@2x.png, icon.ico and "
+              "tray.png written. icon.icns needs macOS iconutil -- skipped.")
         return
-    work = ASSETS / "Common.iconset"
-    if work.exists():
-        shutil.rmtree(work)
-    work.mkdir()
-    for px, name in ((16, "icon_16x16"), (32, "icon_16x16@2x"), (32, "icon_32x32"),
-                     (64, "icon_32x32@2x"), (128, "icon_128x128"), (256, "icon_128x128@2x"),
-                     (256, "icon_256x256"), (512, "icon_256x256@2x"), (512, "icon_512x512"),
-                     (1024, "icon_512x512@2x")):
-        mac(px).save(work / f"{name}.png")
-    subprocess.run(["iconutil", "-c", "icns", str(work), "-o", str(ASSETS / "icon.icns")],
-                   check=True)
-    shutil.rmtree(work)
-    print("icon.png, icon.icns, icon.ico, tray.png and the menu-bar templates written.")
+
+    # iconutil insists on a `.iconset` directory beside its output, so the set is
+    # built in a temporary one and thrown away after. Writing it into the icons
+    # directory would leave ten PNGs there that nothing reads and Tauri does not
+    # bundle -- they are an intermediate, not an asset.
+    with tempfile.TemporaryDirectory() as scratch:
+        work = pathlib.Path(scratch) / "Common.iconset"
+        work.mkdir()
+        for px, name in ICNS_PLAN:
+            mac(px).save(work / f"{name}.png")
+        subprocess.run(["iconutil", "-c", "icns", str(work),
+                        "-o", str(ICONS / "icon.icns")], check=True)
+
+    print("icon.png, icon.icns, icon.ico, 32x32.png, 128x128.png, 128x128@2x.png "
+          "and tray.png written.")
 
 
 if __name__ == "__main__":

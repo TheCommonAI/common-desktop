@@ -1,9 +1,12 @@
-name: Publish desktop preview
-# Dispatch only. Editing this file used to publish a release: the push trigger
-# fired on any change to it and the inputs defaulted to a fixed run ID and tag,
-# so a change to how releases are made shipped one as a side effect, from
-# whatever build that stale ID pointed at. Both inputs are now typed by the
-# person publishing, every time.
+name: Publish desktop release
+# Dispatch only. Editing this file used to publish a release: the push trigger fired
+# on any change to it and the inputs defaulted to a fixed run ID and tag, so a change
+# to how releases are made shipped one as a side effect, from whatever build that
+# stale ID pointed at. Both inputs are typed by the person publishing, every time.
+#
+# The filename still says "preview" because that is what people type to find it. What
+# it produces is a full release, and since 0.2.0 it carries the update manifest as
+# well as the installers.
 on:
   workflow_dispatch:
     inputs:
@@ -11,31 +14,34 @@ on:
         description: Successful Desktop builds run ID from main
         required: true
       tag:
-        description: New preview release tag
+        description: Release tag, v<version> — must agree with the version files
         required: true
 permissions:
   actions: read
   contents: write
 concurrency:
-  group: desktop-preview-release
+  group: desktop-release
   cancel-in-progress: false
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       BUILD_RUN: ${{ inputs.build_run }}
       RELEASE_TAG: ${{ inputs.tag }}
     steps:
-      - name: Validate successful native build
+      - name: Validate the build this release is cut from
         id: source
         shell: bash
         run: |
           set -euo pipefail
           [[ "$BUILD_RUN" =~ ^[0-9]+$ ]]
-          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$ ]]
+          # A full semver tag and nothing else. A prerelease tag here would break the
+          # website and the updater at the same instant: both resolve through
+          # /releases/latest/, which skips prereleases.
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           gh run watch "$BUILD_RUN" --exit-status --interval 10
           gh api "repos/$GH_REPO/actions/runs/$BUILD_RUN" > run.json
           jq -e --arg repo "$GH_REPO" '
@@ -49,15 +55,93 @@ jobs:
           jq -e 'all(["verify", "windows", "macos"][];
             . as $name | any($jobs[0].jobs[]; .name == $name and .conclusion == "success"))' \
             --slurpfile jobs jobs.json jobs.json
-      - name: Download tested installers
+
+      # Checked out at the commit that was built, not at whatever main has moved on
+      # to since. The scripts and the version files used below are therefore the ones
+      # that produced these artifacts, which is the only reading under which checking
+      # the tag against them means anything.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+
+      - name: Check the tag against the source it was built from
+        id: version
+        shell: bash
+        run: node scripts/check-version.mjs "$RELEASE_TAG"
+
+      - name: Download the tested artifacts
         shell: bash
         run: |
           set -euo pipefail
-          gh run download "$BUILD_RUN" -n Common-Windows-x64 -D installers
-          gh run download "$BUILD_RUN" -n Common-macOS -D installers
+          gh run download "$BUILD_RUN" -n Common-Windows-x64 -D artifacts/windows
+          gh run download "$BUILD_RUN" -n Common-macOS-arm64 -D artifacts/mac-arm64
+          gh run download "$BUILD_RUN" -n Common-macOS-x64   -D artifacts/mac-x64
+
+      - name: Rename to the names the website links to
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+
+          # `upload-artifact@v4` keeps each artifact's tree relative to the least
+          # common ancestor of the paths its job uploaded — and the macOS job uploads
+          # from two directories, `bundle/dmg/` and `bundle/macos/`. So what arrives
+          # here is nested, not flat:
+          #
+          #     dmg/Common_0.2.0_aarch64.dmg
+          #     macos/Common.app.tar.gz
+          #
+          # That is observed rather than assumed: it is the tree `gh run download -n
+          # Common-macOS-arm64` actually produced, and under the one-level globs this
+          # step used to carry it matched nothing, which would have aborted the first
+          # release ever made. So every file is looked for by name at whatever depth
+          # it sits — which is also what lets the one script serve a signed run (the
+          # `macos/` directory there as well) and an unsigned one (the `dmg/`
+          # directory alone).
+          one() {
+            local found n
+            found=$(find "$1" -type f -name "$2")
+            n=$(find "$1" -type f -name "$2" | wc -l | tr -d ' ')
+            if [[ "$n" -ne 1 ]]; then
+              echo "expected exactly one $2 under $1, found $n" >&2
+              exit 1
+            fi
+            printf '%s\n' "$found"
+          }
+
+          # Tauri emits `Common_0.2.0_x64-setup.exe` and `Common_0.2.0_aarch64.dmg`.
+          # The website links at fixed, version-less names from pages that are not in
+          # this repository, so they are renamed here and here only.
+          exe=$(one artifacts/windows '*.exe')
+          [[ -f "$exe.sig" ]] || { echo "the Windows build was not signed: $exe.sig is missing"; exit 1; }
+          mv "$exe" release/Common-win-x64.exe
+          mv "$exe.sig" release/Common-win-x64.exe.sig
+
+          arm=$(one artifacts/mac-arm64 '*.dmg')
+          x64=$(one artifacts/mac-x64 '*.dmg')
+          mv "$arm" release/Common-mac-arm64.dmg
+          mv "$x64" release/Common-mac-x64.dmg
+
+          # Both macOS architectures emit a file called `Common.app.tar.gz` — in their
+          # own target directories. They are the update payloads, and one tarball
+          # cannot serve both, so they are renamed apart and named in the manifest
+          # under their own keys.
+          while IFS=: read -r dir arch; do
+            tar=$(one "artifacts/$dir" 'Common.app.tar.gz')
+            [[ -f "$tar.sig" ]] || { echo "the $dir update payload was not signed: $tar.sig is missing"; exit 1; }
+            mv "$tar" "release/Common_${VERSION}_${arch}.app.tar.gz"
+            mv "$tar.sig" "release/Common_${VERSION}_${arch}.app.tar.gz.sig"
+          done <<< $'mac-arm64:aarch64\nmac-x64:x64'
+
+      - name: Check the installers are whole, then hash them
+        shell: bash
+        run: |
+          set -euo pipefail
           python3 - <<'PY'
           import hashlib, pathlib
-          folder = pathlib.Path("installers")
+          folder = pathlib.Path("release")
           files = sorted(p for p in folder.iterdir() if p.suffix in {".exe", ".dmg"})
           assert sum(p.suffix == ".exe" for p in files) == 1, "Expected one Windows installer"
           assert sum(p.suffix == ".dmg" for p in files) == 2, "Expected both Mac architectures"
@@ -74,11 +158,13 @@ jobs:
                       assert f.read(4) == b"koly", "Invalid DMG trailer"
               lines.append(hashlib.sha256(p.read_bytes()).hexdigest() + "  " + p.name)
           (folder / "SHA256SUMS.txt").write_text("\n".join(lines) + "\n")
+          print("\n".join(lines))
           PY
-      - name: Publish complete preview release
-        env:
-          BUILD_SHA: ${{ steps.source.outputs.sha }}
+
+      - name: Write the release notes
         shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           cat > release-notes.md <<'NOTES'
@@ -90,23 +176,49 @@ jobs:
 
           On first launch, choose Chat, Contribute, or Both. The app guides contributors through installing Ollama and downloading a local model. Ollama's own installer may require confirmation; model downloads require internet access and disk space.
 
-          This preview stops the connection helper churning tunnels: a contributor used to register a quick-tunnel hostname before public DNS could answer for it, lose that race, tear the tunnel down and open a new one every 30 seconds, until Cloudflare rate-limited the account-less tunnels and the helper quit at startup. Common now waits on the hostname it already has, and reports what the helper said when it does quit. Replace the older Common.app in Applications with this build.
+          **Already have an older Common?** This build is a different application underneath — a Tauri client replacing the Electron one — and it cannot update the earlier version into itself. Download and install it by hand once. From this version onward the app checks for new releases on its own, and the copy you install now will update itself from here.
 
-          Ad-hoc signing checks bundle integrity; it does not verify Common's publisher. The Mac apps are still not Developer ID signed or Apple notarized, and Windows remains unsigned. Operating-system warnings or launch blocks are still possible. For a trusted test download, macOS may offer Open Anyway in System Settings > Privacy & Security. Do not disable Gatekeeper globally. Native packaging and automated tests passed; interactive installation and live-network inference still need testing on real PCs.
-
-          Includes the User, Enthusiast, and Developer views, tray controls, and optional launch at login. The separately reviewed common-network security changes are not included.
+          Ad-hoc signing checks bundle integrity; it does not verify Common's publisher. The Mac apps are not Developer ID signed or Apple notarized, and Windows remains unsigned. Operating-system warnings or launch blocks are still possible. For a trusted test download, macOS may offer Open Anyway in System Settings > Privacy & Security. Do not disable Gatekeeper globally. Native packaging and automated tests passed; interactive installation and live-network inference still need testing on real PCs.
 
           SHA256SUMS.txt records the installer checksums.
           NOTES
           printf '\nBuilt from commit %s in [native build run](https://github.com/%s/actions/runs/%s).\n' \
-            "$BUILD_SHA" "$GH_REPO" "$BUILD_RUN" >> release-notes.md
+            "${{ steps.source.outputs.sha }}" "$GH_REPO" "$BUILD_RUN" >> release-notes.md
+
+      - name: Assemble the update manifest
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The manifest is what an already-installed copy reads. Its shape is checked
+          # in `verify` (src-tauri/tests/manifest.rs) against the plugin's own parser,
+          # so a manifest that would silently stop every update from arriving fails
+          # before this runs. The notes become the manifest's `notes`.
+          node scripts/make-manifest.mjs release "$VERSION" "$RELEASE_TAG" \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" release-notes.md
+          cat release/latest.json
+
+      - name: Publish as a full release
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
           # Published as a full release, not a pre-release: GitHub's
           # /releases/latest/download/<file> form resolves only to the newest
-          # NON-prerelease release, and the website's download links use it so
-          # they never need editing again. The installers are still previews --
-          # unsigned on Windows, ad-hoc signed on Mac -- and the title and notes
-          # say so. Only the badge is gone.
-          gh release create "$RELEASE_TAG" installers/*.exe installers/*.dmg installers/SHA256SUMS.txt \
-            --target "$BUILD_SHA" --title "Common 0.1.0 — Desktop preview" \
+          # NON-prerelease release, and both the website's download links and the
+          # updater endpoint use it. The installers are still unsigned on Windows and
+          # ad-hoc signed on Mac, and the notes say so. Only the badge is gone.
+          gh release create "$RELEASE_TAG" \
+            release/Common-win-x64.exe \
+            release/Common-mac-arm64.dmg release/Common-mac-x64.dmg \
+            release/SHA256SUMS.txt release/latest.json \
+            release/Common_${VERSION}_aarch64.app.tar.gz \
+            release/Common_${VERSION}_aarch64.app.tar.gz.sig \
+            release/Common_${VERSION}_x64.app.tar.gz \
+            release/Common_${VERSION}_x64.app.tar.gz.sig \
+            --target "${{ steps.source.outputs.sha }}" \
+            --title "Common $VERSION" \
             --notes-file release-notes.md --draft
           gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --latest

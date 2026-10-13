@@ -1,186 +1,128 @@
-# Common Desktop
+# Common
 
-Common lets you donate spare computer power to a volunteer-run AI network.
-Free and early, from a small nonprofit in South Australia. [Download it here](https://commonai.com.au/join).
+Common is a client for a decentralised network of models running on the machines
+people already own. A machine on its own answers everything badly; a network of
+ordinary computers, each holding the thing it does well, answers most things
+well. That is the whole idea, and the app has one side for each half of it.
 
-A standalone Electron desktop client using the approved Common design. Windows
-is the first priority, macOS supports Apple Silicon and Intel, and Linux packaging
-is experimental. The interface has User, Enthusiast, and Developer detail levels.
+**[Download it here.](https://commonai.com.au/join)**
 
-This app targets **common-network main at 019a5cac063c53736dd289e34cd29c163f847c0c**.
-It makes no network-server changes and does not include the additional security
-and privacy PR currently under review.
+This is a Tauri application — a Rust shell around a web interface — and it
+replaces the Electron build this repository used to hold. It is a few megabytes
+rather than a hundred and thirty, it starts without spinning up a browser, and
+it updates itself.
 
 ## Download and install
 
 | Computer | Installer |
 | --- | --- |
-| Windows 64-bit | [Download Common for Windows (.exe)](https://github.com/TheCommonAI/common-desktop/releases/latest/download/Common-win-x64.exe) |
-| Mac with Apple silicon (M-series) | [Download Common for Apple silicon (.dmg)](https://github.com/TheCommonAI/common-desktop/releases/latest/download/Common-mac-arm64.dmg) |
-| Mac with an Intel processor | [Download Common for Intel Mac (.dmg)](https://github.com/TheCommonAI/common-desktop/releases/latest/download/Common-mac-x64.dmg) |
+| Windows 64-bit | [Common-win-x64.exe](https://github.com/TheCommonAI/common-desktop/releases/latest/download/Common-win-x64.exe) |
+| Mac with Apple silicon (M-series) | [Common-mac-arm64.dmg](https://github.com/TheCommonAI/common-desktop/releases/latest/download/Common-mac-arm64.dmg) |
+| Mac with an Intel processor | [Common-mac-x64.dmg](https://github.com/TheCommonAI/common-desktop/releases/latest/download/Common-mac-x64.dmg) |
 
-Checksums for all three are published alongside them in
+Checksums for all three are in
 [SHA256SUMS.txt](https://github.com/TheCommonAI/common-desktop/releases/latest/download/SHA256SUMS.txt).
+No GitHub sign-in, no extracting a build artifact, and no Node.js, Python or
+terminal commands are needed.
 
 **Windows:** open the installer; Common installs for your user and opens.
-**Mac:** open the DMG and drag Common into Applications, replacing any older
-copy. No GitHub sign-in, no extracting a build artifact, and no Node.js, Python
-or terminal commands are needed.
+**Mac:** open the DMG and drag Common to Applications, replacing any older copy.
 
-> **Maintainers:** these links resolve to the newest release by themselves, and
-> the website uses the same three URLs — so neither needs editing when a preview
-> is published. Two things keep that true, and both are easy to undo by accident:
-> installer filenames carry no version (`artifactName` in package.json), and
-> `publish-preview.yml` publishes a full release, because
-> `/releases/latest/download/<file>` resolves only to the newest *non-prerelease*
-> release and 404s otherwise. The installers are still previews; the release
-> title and notes say so, and only GitHub's badge is gone.
->
-> This is the third arrangement. Preview.1's links pointed at a pinned Actions
-> run and went on serving a build from before the icon changed, which looked like
-> a caching bug on every machine that downloaded it; preview.2's named a release
-> tag, which was correct but went stale the moment preview.3 existed.
+Three things keep those links working, and each is easy to undo by accident:
 
-On first launch, choose Chat, Contribute, or Both. Common guides contributors
-through Ollama installation and local model downloads. Ollama's installer may
-ask for confirmation; models need an internet connection and disk space.
+- **the installer filenames carry no version.** Tauri names them
+  `Common_0.2.0_x64-setup.exe`; `publish-preview.yml` renames them to the three
+  above, and that workflow is the only place that does.
+- **the release is published as a full release, not a prerelease.**
+  `/releases/latest/download/<file>` resolves only to the newest
+  *non-prerelease* release and 404s otherwise.
+- **the app's own updater reads its manifest through the same
+  `latest/download/` path**, so a prerelease breaks the website and every
+  installed copy at the same moment.
 
-These are **preview installers**. Windows is unsigned; the Mac builds carry
-ad-hoc signatures checked inside the final DMGs, but are not Developer ID
-signed or Apple-notarized. Windows SmartScreen or macOS Gatekeeper may warn or
-block initial launch. Publisher signing, Apple notarization, and hands-on
-installation testing remain outstanding.
+## What it does
 
-The DMGs and the .exe are attached to the release itself rather than to a build
-artifact behind a sign-in. See the
-[current release notes and checksums](https://github.com/TheCommonAI/common-desktop/releases/latest),
-or the [releases page](https://github.com/TheCommonAI/common-desktop/releases)
-for earlier builds.
+**Chat** asks the network a question. There is no model picker and no local
+switch, and both omissions are deliberate: the question goes to the gateway,
+which routes it to whichever machine is the best fit for what was actually
+asked. The question does leave this computer — that is what routing is — and the
+answer says which machine gave it.
 
-## Run from source (developers)
+**Contribute** reads this computer, asks the network what it is short of, and
+downloads and serves the one model that would help. Your model runs here and
+answers here. Contributing needs [Ollama](https://ollama.com) and a downloaded
+model; the app walks through both, and neither is needed to use Chat.
 
-Install Node.js 24 LTS, then:
+On first launch, Common shows what it found on this machine, offers the model
+the network most needs that this machine can actually run, and says what
+serving it will cost in disk and memory before anything is downloaded. Resource
+limits are yours to set and can be changed in Settings afterwards, along with
+leaving the network, which forgets this machine's key.
+
+## Requirements
+
+- **macOS** 10.15 or newer, **Windows** 10 or newer. Linux packaging is
+  experimental and not published.
+- The `common` command-line tool. The app runs it rather than reimplementing it.
+  It is already installed on any machine that can contribute; otherwise it comes
+  from the network's own installer. The app looks in `~/.common-network/bin`
+  before `PATH`, and `COMMON_BIN` overrides both.
+- For Chat, nothing else. For Contribute, Ollama and a model.
+
+## Building from source
+
+Node 24, Rust stable, and whichever platform toolchain
+[Tauri lists](https://tauri.app/start/prerequisites/) for your system.
 
 ```sh
 npm ci
-npm start
+npm run tauri dev      # Vite on :1420, in the app shell
+npm run tauri build    # a bundle in src-tauri/target/release/bundle
 ```
 
-The packaged app needs neither Node.js nor Python on the user's computer.
-The explicit `install-electron` postinstall downloads Electron's pinned runtime.
-
-## Features
-
-- Guided role selection, measured hardware, Ollama setup, model downloads,
-  contribution preferences, and connection.
-- Windows Ollama installer download/launch; macOS disk-image download/open with
-  drag-to-Applications instructions; detection of existing Ollama installations.
-- Real model download progress, cancellation/resume, current network catalogue,
-  and existing local model selection.
-- Local or network chat with streaming, cancellation, conversation reset,
-  and private-in-memory chat history for the current window.
-- Markdown answers — headings, emphasis, lists, tables, blockquotes, fenced code
-  and links — rendered as they stream. No dependency and no HTML from the model:
-  every answer is escaped before it is parsed, so markup arrives as text. Links
-  are only ever `http`/`https` and open in the system browser, never in-window.
-- Native tray, optional startup at login on Windows/macOS, close-to-tray,
-  contribution pause/resume, idle/battery policies, and one/two simultaneous jobs.
-- App-managed cloudflared helper, baseline authenticated worker, registration,
-  tunnel recovery and clean-shutdown deregistration.
-- Measured CPU/RAM/disk/model and worker diagnostics. Unsupported statistics are
-  labelled unavailable. No simulated metrics in the application.
-
-## Build
+The gates CI runs, and the ones to run before pushing:
 
 ```sh
-npm run dist:win       # Windows NSIS installer (.exe)
-npm run dist:portable  # Windows portable executable
-npm run dist:mac       # Apple Silicon and Intel .dmg/.zip
-npm run dist:linux     # Experimental Linux AppImage
+npm run typecheck
+npm run build
+node scripts/check-version.mjs
+cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-Build Windows installers on Windows and Mac disk images on macOS. Outputs are in
-`release/`. The included GitHub Actions workflow builds Windows/macOS by default;
-Linux is a manual opt-in. Signing identities are not configured: workflow builds
-are unsigned previews, not signed production releases.
+`npm run tauri dev` never checks for updates: the three updater commands no-op
+outside a release build, so the update path is only exercised by a signed one.
 
-The source repository is [TheCommonAI/common-desktop](https://github.com/TheCommonAI/common-desktop).
-Use the installer links above to install Common. Actions also retains build artifacts.
-The Publish desktop preview workflow can publish a new preview from a successful
-Desktop builds run on main; provide the run ID and a new preview tag.
+## Releases
 
-## Network and privacy behaviour
+[`docs/RELEASING.md`](docs/RELEASING.md) covers the signing key, the repository
+secrets, the three version files that have to agree, and the traps that make a
+release which looks fine and silently never updates anyone.
 
-The default gateway is `https://gateway-production-b820.up.railway.app`.
-This client uses `/health`, `/catalogue`, `POST /nodes`, `DELETE /nodes/{id}` and
-`/v1/chat/completions`, with the existing node/worker token contract. It does not
-use proposed APIs from the unmerged security work.
+The short version: the updater compares the manifest's version against the
+version compiled into the copy already installed on someone's machine. A
+manifest whose version is wrong produces no error anywhere, and no update
+either. `src-tauri/tests/manifest.rs` pins the manifest's shape against the
+updater plugin's own parser, which is the check that catches it.
 
-The gateway may require an active contributor token. Chat-only users can add an
-existing token in Settings or use local chat. With idle-only contribution, a new
-node is registered only after the idle delay; network chat may therefore be
-unavailable while waiting or paused. This is the current gateway's access model.
+## Layout
 
-Community messages and history go to the gateway and its selected workers. The
-current gateway can retry/compose across contributors. A PC administrator can
-inspect ordinary Ollama inference. Common does not control Ollama's own logs.
-No confidential-computing, approved-node routing or guaranteed no-retention mode
-is claimed. The contribution dashboard does not display incoming content.
+| path | what it is |
+| --- | --- |
+| `src/` | the interface: React, TypeScript, one stylesheet |
+| `src/chat/` | the conversation, Settings, the rail, and the calls into Rust |
+| `src/onboarding/` | first run: read the machine, offer a model, join |
+| `src-tauri/src/backend.rs` | every read of this machine and every call to `common` |
+| `src-tauri/src/lib.rs` | the window and the menu-bar icon |
+| `src-tauri/src/update.rs` | check, stage, restart — driven from Rust, not the webview |
+| `src-tauri/tests/manifest.rs` | the update manifest contract |
+| `scripts/` | the version gate, the manifest writer, the icon renderer |
+| `docs/` | the release procedure |
 
-Settings and gateway-specific credentials are stored in `settings.json` in
-Electron's user-data directory. Credentials are stored locally; protect backups.
-A different profile can be selected with `--user-data-dir=/absolute/path`.
-Chat history is held in renderer memory and cleared on quit or destination change.
+The updater is driven from Rust rather than from the webview, which is why
+there is no `@tauri-apps/plugin-updater` dependency and no updater capability to
+grant.
 
-## One machine, one node
+## Licence
 
-The node identity is shared with the terminal client rather than kept privately:
-both read and write `~/.common-network/identity.json` in the format `common join`
-writes (`gateway`, `name`, `node_id`, `node_token`, `catalogue_id`, `domain_tags`,
-`joined_at`). A machine that joined from the terminal keeps its name and its
-`node_token` when it opens the app, so `common status` sees the same node, and
-chat from the app is authenticated by the token the terminal already holds.
-The token is only ever read for the gateway that issued it.
-
-One consequence: `common join` and desktop contribution on the *same machine* at
-the same time both register that one name, and each registration overwrites the
-other's `endpoint_url`. Run one at a time.
-
-Every gateway request carries `X-Common-Client: common-desktop/<version>` (also
-sent as the `User-Agent`), and `POST /nodes` includes the same string as a
-`client` field. Local Ollama requests carry neither. This is how an app user is
-told apart from a terminal user; gateway `main` at 019a5ca does not yet record
-it, so the field is accepted and ignored until the gateway stores it.
-
-## Background operation and uninstall
-
-Ollama controls model memory and GPU scheduling. Common limits community jobs,
-not OS memory. Other applications using Ollama share that runtime. Pausing cancels
-active community jobs; it does not cancel unrelated personal Ollama sessions.
-Counters reset when the worker reconnects.
-
-Close keeps Common in the tray when enabled; Quit ends it and its owned helper
-processes. Start at login is optional. Keep a portable executable at a stable
-location if enabling startup. Disable startup before removing a portable or Mac
-app. The Windows installer removes Common's startup entry on uninstall.
-Ollama and models remain installed when Common is removed.
-
-## Verification and release status
-
-```sh
-npm run check
-npm test
-```
-
-Tests use local fixtures and synthetic content. See [validation](docs/VALIDATION.md)
-and the [native acceptance checklist](docs/RELEASING.md). The released installers
-were built successfully on Windows and macOS from commit
-`6f99c960f18324bdb175bbf0620d9a1506ac7735`; automated checks also passed.
-Interactive installation, tray, battery and real-inference checks are still required.
-
-### Testable Network Client (0.2.0)
-
-This pass adds verified setup, connection recovery, privacy controls, feedback,
-persistent contribution statistics and diagnostics. It requires the companion
-gateway observability migration. See [implementation and rollout notes](docs/TESTABLE-NETWORK-CLIENT.md)
-for the complete scope, privacy/retention model and remaining native/signing gates.
+AGPL-3.0-or-later, matching the network it talks to. See [LICENSE](LICENSE) and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

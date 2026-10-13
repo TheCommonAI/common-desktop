@@ -1,4 +1,13 @@
 name: Desktop builds
+# Three jobs, and the names matter: `publish-preview.yml` checks for `verify`,
+# `windows` and `macos` by name and refuses to publish unless all three concluded
+# `success`. Renaming a job here stops releases without breaking this file.
+#
+# The gates in `verify` replaced the Electron project's `npm run check` and
+# `npm test`, which exercised code that no longer exists. They are now the real
+# ones for a Rust + TypeScript project, and they include the manifest contract test
+# in `src-tauri/tests/manifest.rs` — the check that catches an update feed which
+# has quietly stopped parsing.
 on:
   push:
     branches: [main]
@@ -6,11 +15,15 @@ on:
   workflow_dispatch:
     inputs:
       include_linux:
-        description: Also build the experimental Linux AppImage
+        description: Also build the experimental Linux bundles
         type: boolean
         default: false
 permissions:
   contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -21,11 +34,48 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
-      - run: npm run check
-      - run: npm test
+      # Only that the three version files agree. Whether the *tag* agrees is a
+      # question about a release, and is asked in the publish workflow.
+      - run: node scripts/check-version.mjs
+      - run: npm run typecheck
+      - run: npm run build
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      # Formatting reads the source and links nothing, so it runs before the system
+      # libraries are installed: a misplaced bracket should not wait on an apt-get.
+      - name: Formatting
+        run: cargo fmt --check
+        working-directory: src-tauri
+      # Linting and testing, unlike formatting, compile the whole dependency graph —
+      # and on Linux Tauri links GTK and WebKitGTK. Without these packages `gio-sys`
+      # fails in its build script and takes the job down with it, which is what this
+      # gate did the first time it ran in CI. The list is the one the `linux` job
+      # installs, and the two have to agree: that job builds the same graph.
+      - name: WebKitGTK and the rest of Tauri's Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - name: Lints
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: src-tauri
+      - name: Tests
+        run: cargo test
+        working-directory: src-tauri
+
   windows:
     needs: verify
     runs-on: windows-latest
+    env:
+      # A sentinel, never the key itself. A secret must not be round-tripped through
+      # $GITHUB_ENV, and an *empty* TAURI_SIGNING_PRIVATE_KEY is still a set variable
+      # to the CLI — which would then try to decode "" as a key and fail the build.
+      SIGNED: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -33,18 +83,53 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
-      - run: npm test
-      - run: node scripts/build-info.cjs
-      - run: npm run dist:win
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      # `bundle.createUpdaterArtifacts` is true in tauri.conf.json, so a build with
+      # no signing key fails outright rather than shipping an installer that nothing
+      # can ever be updated into. That is the right default for a release, and the
+      # wrong one for a pull request from a fork, where the key is deliberately not
+      # available — so there the artifacts are turned off and the installer is built
+      # anyway. Same binary; the only thing missing is the `.sig` beside it, and the
+      # publish workflow refuses to go anywhere near a fork's artifacts.
+      - name: Build the installer and its update payload
+        if: env.SIGNED == 'true'
         env:
-          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri build -- --bundles nsis
+      - name: Build the installer alone (no signing key)
+        if: env.SIGNED != 'true'
+        run: npm run tauri build -- --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      # `nsis` and not the config's `all`: the MSI target needs WiX downloaded
+      # mid-build to produce an installer that the updater cannot use anyway.
       - uses: actions/upload-artifact@v4
         with:
           name: Common-Windows-x64
-          path: release/*.exe
+          # The whole directory rather than `*.exe`, so the `.sig` that sits beside
+          # it travels with it. If signing silently did nothing, the publish
+          # workflow is where that is caught, and it is caught loudly.
+          path: src-tauri/target/release/bundle/nsis/*
+          if-no-files-found: error
+
   macos:
     needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        # `macos-13` is retired, so the Intel build is cross-compiled from the
+        # Apple-silicon runner instead. Both architectures are required: the website
+        # serves a DMG for each, and each needs its own `.app.tar.gz`.
+        include:
+          - target: aarch64-apple-darwin
+            artifact: Common-macOS-arm64
+          - target: x86_64-apple-darwin
+            artifact: Common-macOS-x64
     runs-on: macos-latest
+    env:
+      SIGNED: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -52,33 +137,54 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
-      - run: npm test
-      # Seal the final app bundle for testing; this is not Developer ID signing.
-      - run: node scripts/build-info.cjs
-      - run: npm run dist:mac -- -c.mac.identity=-
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.target }}
+      # No `--bundles` here: the config's `all` is `app` and `dmg`, and `app` is what
+      # produces the `.app.tar.gz` the updater installs. Naming a subset would have
+      # to name `app` explicitly, and getting that wrong produces a DMG with no
+      # update payload beside it — a release that installs and never updates.
+      - name: Build signed (DMG and update payload)
+        if: env.SIGNED == 'true'
         env:
-          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-      - name: Verify signatures inside both Mac disk images
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri build -- --target ${{ matrix.target }}
+      - name: Build unsigned (DMG only, no signing key)
+        if: env.SIGNED != 'true'
+        run: >-
+          npm run tauri build -- --target ${{ matrix.target }}
+          --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      - name: Check the disk image opens and the bundle inside it is sealed
         shell: bash
         run: |
           set -euo pipefail
-          for arch in arm64 x64; do
-            mount_dir="$RUNNER_TEMP/common-verify-$arch"
-            mkdir -p "$mount_dir"
-            hdiutil attach "release/Common-mac-$arch.dmg" -readonly -nobrowse -mountpoint "$mount_dir"
-            trap 'hdiutil detach "$mount_dir" || true' EXIT
-            codesign --verify --deep --strict --verbose=2 "$mount_dir/Common.app"
-            codesign --display --verbose=2 "$mount_dir/Common.app"
-            hdiutil detach "$mount_dir"
-            trap - EXIT
-          done
+          dmg=$(ls src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg)
+          mount_dir="$RUNNER_TEMP/common-verify"
+          mkdir -p "$mount_dir"
+          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount_dir"
+          trap 'hdiutil detach "$mount_dir" || true' EXIT
+          codesign --verify --deep --strict --verbose=2 "$mount_dir/Common.app"
+          codesign --display --verbose=2 "$mount_dir/Common.app"
+          hdiutil detach "$mount_dir"
+          trap - EXIT
       - uses: actions/upload-artifact@v4
         with:
-          name: Common-macOS
+          name: ${{ matrix.artifact }}
           path: |
-            release/*.dmg
-            release/*.zip
+            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
+          if-no-files-found: error
+
   linux:
+    # Experimental, as it was before, and only when asked for by hand — the website
+    # serves Windows and macOS only. This has not been run; the system packages below
+    # are the ones Tauri documents, not ones observed working here.
     if: github.event_name == 'workflow_dispatch' && inputs.include_linux
     needs: verify
     runs-on: ubuntu-latest
@@ -89,9 +195,20 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
-      - run: node scripts/build-info.cjs
-      - run: npm run dist:linux
+      - name: WebKitGTK and the rest of Tauri's Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm run tauri build -- --bundles deb,appimage --config '{"bundle":{"createUpdaterArtifacts":false}}'
       - uses: actions/upload-artifact@v4
         with:
           name: Common-Linux-experimental
-          path: release/*.AppImage
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/appimage/*.AppImage
