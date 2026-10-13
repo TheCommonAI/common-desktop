@@ -36,10 +36,12 @@
 //! app puts them.
 
 use serde::Serialize;
-use std::io::Read;
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 // `Manager` is the trait that puts `path()` on the app handle, which is where a
 // report is written. `config` and `package_info` are inherent methods and need no
@@ -1529,6 +1531,295 @@ pub async fn ollama_models_dir() -> Result<String, String> {
     .await
 }
 
+/* ------------------------------ the pull stream ------------------------------ */
+
+/// Ollama, on this machine. The same string as `OLLAMA` in
+/// `src/onboarding/service.real.ts`, and hardcoded there for the reason given
+/// there: the alternative is a setting whose only working value is this one.
+const OLLAMA_PULL_URL: &str = "http://127.0.0.1:11434/api/pull";
+
+/// One message of ollama's pull stream, on its way to the webview.
+///
+/// Three variants rather than a bare line, because the failures are different
+/// animals and the screen says different things about them. Ollama reports its
+/// own refusals *inside* the stream — `{"error":"model not found"}`, one line
+/// among the progress — and those are lines like any other, read by the same
+/// parser that reads the bytes, so they need no variant of their own.
+///
+/// The two that do are the ones with nothing to parse. `Unreachable` means the
+/// transfer never began — ollama is not listening, which is the ordinary state
+/// of a machine that has never run it, and the one case where the honest
+/// sentence is "we could not reach it" rather than "it stopped". `Failed` means
+/// it began and something ended it badly.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum PullEvent {
+    Line { line: String },
+    Unreachable { message: String },
+    Failed { message: String },
+}
+
+/// One in-flight pull, as the cancel command needs to see it.
+struct Pull {
+    /// The `curl` process, once it has started. Behind a mutex of its own rather
+    /// than the registry's, so that cancelling never waits on the thread that is
+    /// reading from it.
+    child: Mutex<Option<Child>>,
+    /// Set by `ollama_pull_cancel` *before* it kills, so the reader can tell a
+    /// deliberate stop from a `curl` that fell over. Order matters: the reverse
+    /// leaves a window where a killed process reads as a failure.
+    stopped: AtomicBool,
+}
+
+/// Every pull this app has running, by the id the webview gave it.
+///
+/// Ollama offers no way to cancel a pull — it is a stream that runs to its end.
+/// `curl` does, and killing it is the correct stop rather than a crude one:
+/// ollama keeps the blob it has written so far, which is what makes the next
+/// attempt a resume instead of a restart. That property is the entire reason the
+/// download screen has a pause button, so the transport must not be the thing
+/// that loses it.
+#[derive(Default)]
+pub struct Pulls(Mutex<HashMap<String, Arc<Pull>>>);
+
+/// Stream a model into ollama, as ollama's own NDJSON.
+///
+/// This runs in Rust rather than in the webview, and the reason is one word:
+/// **CORS**. A `fetch` from the page carries an `Origin` header, and ollama
+/// answers only the origins on its allowlist. On macOS and Linux that list
+/// contains Tauri's `tauri://*`, so the download works and always has. On Windows
+/// Tauri's webview origin is `http://tauri.localhost` — `wry`'s workaround URL
+/// for `tauri://localhost`, per tauri 2.12.3 `manager/mod.rs:335` — and ollama's
+/// defaults do **not** contain it, so the CORS preflight comes back `403` and the
+/// transfer never starts. The model is chosen, the screen waits, and not one byte
+/// is ever counted.
+///
+/// Worse, it cannot be caught in development: `npm run tauri dev` serves the page
+/// from `http://localhost:1420`, which ollama *does* allow, so the pull works on
+/// a Windows dev machine and fails only in the packaged build.
+///
+/// A subprocess sends no `Origin` at all, so the question does not arise on any
+/// platform — which is the whole fix. The webview is still told every byte, so
+/// the progress remains ollama's own accounting rather than this file's; only the
+/// hop it takes to get there has changed.
+///
+/// `curl` rather than an HTTP crate, for the reason `where_am_i` gives below:
+/// this file already reaches the outside world by running something and reading
+/// what it says, and the update plugin's `reqwest` is not worth a direct
+/// dependency to do it differently.
+#[tauri::command]
+pub async fn ollama_pull(
+    app: tauri::AppHandle,
+    model: String,
+    id: String,
+    on_event: tauri::ipc::Channel<PullEvent>,
+) -> Result<(), String> {
+    let pull = Arc::new(Pull {
+        child: Mutex::new(None),
+        stopped: AtomicBool::new(false),
+    });
+    app.state::<Pulls>()
+        .0
+        .lock()
+        .map_err(|_| "the pull registry is poisoned".to_string())?
+        .insert(id.clone(), pull.clone());
+
+    let registry = app.clone();
+    let key = id.clone();
+
+    let outcome = off_thread(move || {
+        // `--data` with the body handed to the process directly, rather than a
+        // shell-quoted string: a model tag needs no escaping on any platform, and
+        // a tag containing a quote could not break out of one.
+        let body = serde_json::json!({ "model": model, "stream": true }).to_string();
+
+        let mut child = match silent("curl")
+            .args([
+                "--silent",
+                "--show-error",
+                // `-N`. Without it curl buffers, and a buffered stream is a
+                // progress bar that sits still and then jumps to the end.
+                "--no-buffer",
+                "--request",
+                "POST",
+                "--header",
+                "Content-Type: application/json",
+                "--data",
+                body.as_str(),
+                OLLAMA_PULL_URL,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            // Reported rather than returned: a machine without `curl` is an
+            // environment this code cannot change, and the screen has a sentence
+            // for it. `Err` is kept for the failures that are this file's own.
+            Err(e) => {
+                let _ = on_event.send(PullEvent::Unreachable {
+                    message: format!("couldn't run curl: {e}"),
+                });
+                return Ok(());
+            }
+        };
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "curl gave nothing to read".to_string())?;
+        let stderr = child.stderr.take();
+
+        if let Ok(mut slot) = pull.child.lock() {
+            *slot = Some(child);
+        }
+
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        // Held rather than returned on the spot, so that every way out of the
+        // loop passes through the reaping below. A `curl` dropped without a
+        // `wait` is a process left behind, and this one is spawned again on every
+        // resume — so a pause loop would be the way to collect a few dozen of
+        // them.
+        let mut broken: Option<String> = None;
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let text = line.trim_end();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    // A send that fails means the window is gone. There is nobody
+                    // left to report to, so the only useful thing to do is stop
+                    // reading and let the process be reaped below.
+                    if on_event
+                        .send(PullEvent::Line {
+                            line: text.to_string(),
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    broken = Some(format!("reading ollama's stream failed: {e}"));
+                    break;
+                }
+            }
+        }
+
+        // Take the child back to reap it. When `ollama_pull_cancel` has killed
+        // it, this returns the kill immediately rather than waiting out the
+        // transfer.
+        let status = pull
+            .child
+            .lock()
+            .map_err(|_| "the pull was poisoned".to_string())?
+            .take()
+            .map(|mut child| child.wait());
+
+        // `--show-error` is what puts a connection refusal here rather than
+        // nowhere; it is read after the wait because curl writes it once and
+        // never fills a pipe.
+        let mut complaint = String::new();
+        if let Some(mut err) = stderr {
+            let _ = err.read_to_string(&mut complaint);
+        }
+
+        // A deliberate stop is not a failure and must not be reported as one: the
+        // web layer has already drawn the pause, and every byte that arrived is
+        // on disk waiting to be resumed.
+        if pull.stopped.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        // Now that the process has been reaped, the read error can be the answer.
+        // It is this file's own failure rather than ollama's, so it goes back as
+        // an `Err`: there is no sentence for it on the screen and inventing one
+        // would be worse than the shape the web layer already has for a command
+        // that would not run.
+        if let Some(message) = broken {
+            return Err(message);
+        }
+
+        match status {
+            Some(Ok(status)) if status.success() => Ok(()),
+            Some(Ok(status)) => {
+                let detail = complaint.trim();
+                let message = if detail.is_empty() {
+                    format!("ollama's pull stopped ({status})")
+                } else {
+                    detail.to_string()
+                };
+                // curl's own `CURLE_COULDNT_CONNECT`. Loopback either answers or
+                // refuses, so this is the whole of "ollama is not running" — the
+                // ordinary state of a machine that has never started it, and the
+                // one failure that should say *we could not reach it* rather than
+                // *it stopped*. Nothing was transferred either way, but only this
+                // one is a fact about the machine rather than about the transfer.
+                let event = if status.code() == Some(7) {
+                    PullEvent::Unreachable { message }
+                } else {
+                    PullEvent::Failed { message }
+                };
+                // Not an `Err`: the environment, or ollama, said what went wrong
+                // and the screen has a sentence for it. `Err` is kept for the
+                // failures that are this file's own.
+                let _ = on_event.send(event);
+                Ok(())
+            }
+            Some(Err(e)) => Err(format!("couldn't wait for curl: {e}")),
+            // No child, which only `ollama_pull_cancel` can arrange.
+            None => Ok(()),
+        }
+    })
+    .await;
+
+    // Always, on every path: an entry left behind is a map that grows for the
+    // life of the process and an id that a later cancel would find and kill
+    // something under.
+    if let Ok(mut registry) = registry.state::<Pulls>().0.lock() {
+        registry.remove(&key);
+    }
+
+    outcome
+}
+
+/// Stop a pull this app started.
+///
+/// The one thing the transport has to add, because a stream that cannot be
+/// interrupted makes the pause button a lie. Killing `curl` leaves ollama's
+/// partial blob exactly where it is — not a side effect to tolerate but the point:
+/// resuming posts the same request, and ollama carries on from what it already
+/// has rather than starting over.
+#[tauri::command]
+pub async fn ollama_pull_cancel(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let pull = app
+        .state::<Pulls>()
+        .0
+        .lock()
+        .map_err(|_| "the pull registry is poisoned".to_string())?
+        .get(&id)
+        .cloned();
+
+    // An id with nothing behind it is a pause that raced the end of the transfer,
+    // which is not a failure worth telling anyone about.
+    let Some(pull) = pull else {
+        return Ok(());
+    };
+
+    pull.stopped.store(true, Ordering::SeqCst);
+    if let Ok(mut slot) = pull.child.lock()
+        && let Some(child) = slot.as_mut()
+    {
+        let _ = child.kill();
+    }
+    Ok(())
+}
+
 /* ---------------------------------- place ---------------------------------- */
 
 /// Roughly where this machine is, for the single dot on the settings globe.
@@ -1541,9 +1832,12 @@ pub async fn ollama_models_dir() -> Result<String, String> {
 /// the globe is a decoration and is not worth a precise answer.
 ///
 /// `curl` rather than an HTTP crate, for the same reason the `common` verbs are
-/// subprocesses: `serde_json` is already a dependency of this crate and an HTTP
-/// client is not, and one more dependency to draw one dot is not a trade worth
-/// making. A machine without `curl` gets no dot, which is the correct failure.
+/// subprocesses: this file already reaches the outside world by running
+/// something and reading what it says, and one more thing done that way costs no
+/// new direct dependency. (`reqwest` is in the tree regardless — the updater
+/// plugin pulls it in — but taking a direct dependency on it to draw one dot is
+/// still not a trade worth making.) A machine without `curl` gets no dot, which
+/// is the correct failure.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaceRead {

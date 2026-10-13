@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 
 import { LANES, fitsHere, modelFor, tierFor } from "./models";
 import {
@@ -44,13 +44,32 @@ import {
  *   verification real (ollama checks its own digests and will not say
  *   `success` until it has).
  *
- * Ollama is called from the webview rather than through Rust on purpose. The
- * stream is the one thing here that is a thousand messages rather than one, and
- * piping it through IPC would mean re-serialising each of them to hand them to
- * the thing that is going to draw them. Ollama answers the webview's origin
- * with the CORS header that allows it. The cost is one line in the production
- * CSP — 127.0.0.1:11434 has to be in `connect-src` — and that is the toll for
- * the only honest progress bar in the app.
+ * Ollama is called from the webview rather than through Rust, with one
+ * exception, and the exception is the download.
+ *
+ * The reason is CORS, and it is worth stating because the obvious reading is
+ * the wrong one. A `fetch` from the page carries an `Origin` header, and ollama
+ * answers only the origins on its allowlist. On macOS and Linux that list holds
+ * Tauri's `tauri://*`, so every call here works. On Windows Tauri's webview
+ * origin is `http://tauri.localhost` — the workaround URL for `tauri://localhost`
+ * that `wry` uses there — and ollama's defaults do not hold it, so the preflight
+ * comes back `403` and the request never leaves. That is fatal for the download
+ * and merely quiet for the rest: the two reads below (`/api/tags`, `/api/ps`)
+ * are wrapped in a `catch` that keeps going, but a pull that cannot start is a
+ * model that cannot be installed, and on Windows it was.
+ *
+ * It also cannot be seen in development. `npm run tauri dev` serves the page
+ * from `http://localhost:1420`, which ollama does allow, so the download works
+ * on a Windows dev machine and fails only in the packaged build.
+ *
+ * So the pull goes through `ollama_pull` in Rust, which runs `curl` and streams
+ * ollama's NDJSON back over a channel. A subprocess sends no `Origin`, so the
+ * question does not arise on any platform — and every line is still ollama's
+ * own, so the progress, the pause and the verification stay as real as they
+ * were. See the command's own comment in `backend.rs`.
+ *
+ * That leaves one line in the production CSP: 127.0.0.1:11434 has to be in
+ * `connect-src` for the two reads that still happen here.
  *
  * ── The two honest gaps ───────────────────────────────────────────────────────
  *
@@ -501,9 +520,22 @@ function suggestLane(report: HardwareReport): Task<LaneSuggestion> {
 /* --------------------------------- the weights --------------------------------- */
 
 /** Ollama, on this machine. Not configurable, because the alternative is a
- *  setting whose only working value is this one. See the file header for why the
- *  webview may call it and what the production CSP therefore has to allow. */
+ *  setting whose only working value is this one. The webview may call it only
+ *  for the two reads below; the download goes through Rust, and the file header
+ *  says why. */
 const OLLAMA = "http://127.0.0.1:11434";
+
+/** One message from `ollama_pull`, as `PullEvent` in `backend.rs` sends it.
+ *
+ * `line` is ollama's own NDJSON, verbatim — the same text the webview used to
+ * read off the response body, and the reason the parser below is unchanged.
+ * `unreachable` is ollama not being there at all; `failed` is a transfer that
+ * started and did not finish. Both are only ever sent when the transfer is over
+ * and there is no line that could have said it. */
+type PullEvent =
+  | { kind: "line"; line: string }
+  | { kind: "unreachable"; message: string }
+  | { kind: "failed"; message: string };
 
 /**
  * The six rungs of the ladder, as ollama tags.
@@ -586,7 +618,16 @@ function downloadModel(
   let cancelled = false;
   let paused = false;
   let state: DownloadProgress["state"] = "downloading";
-  let controller: AbortController | null = null;
+  /**
+   * The id of the pull Rust is running, or `null`.
+   *
+   * An id rather than a handle, because the transfer no longer lives in this
+   * process. `ollama_pull_cancel` looks it up in a map on the Rust side, which
+   * is what makes a stop safe to get wrong: a cancel that arrives after the
+   * transfer has ended finds nothing and does nothing, where an abort on a
+   * stale handle would be a coin flip.
+   */
+  let pull: string | null = null;
   /** Bytes per layer, by ollama's digest. See the note above. */
   const layers = new Map<string, { total: number; bytes: number }>();
   /** Rate samples, newest last, cleared whenever the transfer stops. */
@@ -672,10 +713,27 @@ function downloadModel(
     });
   };
 
+  /**
+   * Stop the transfer Rust is running, if one is.
+   *
+   * Fire and forget. The answer is not needed: a pause has already drawn itself,
+   * a failure is already on its way to `reject`, and an id Rust does not know
+   * about is a cancel that raced the end of the transfer — which is not an error
+   * and must not become one.
+   */
+  const stopPull = () => {
+    if (pull === null) return;
+    const id = pull;
+    pull = null;
+    void invoke("ollama_pull_cancel", { id }).catch(() => {
+      // A cancel that cannot be delivered changes nothing that is on screen.
+    });
+  };
+
   const fail = (error: OnboardingError) => {
     if (settled) return;
     settled = true;
-    controller?.abort();
+    stopPull();
     reject(error);
   };
 
@@ -764,68 +822,71 @@ function downloadModel(
     }
     if (paused || cancelled || settled) return;
 
-    const mine = new AbortController();
-    controller = mine;
+    const mine = `${request.modelId}:${Date.now()}`;
+    pull = mine;
 
-    let response: Response;
+    const channel = new Channel<PullEvent>();
+
+    channel.onmessage = (event) => {
+      // A pause or a cancel stops the transfer on purpose and has already been
+      // reported; a failure has already been handed to `reject`. Anything that
+      // arrives after that is a line nobody is left to draw.
+      if (paused || cancelled || settled) return;
+      // Wrapped because this is a callback and nothing above it is listening: an
+      // exception raised in here is swallowed by the dispatcher that called it,
+      // which for a throw out of the drawing code `absorb` calls into would mean
+      // a download that appears to keep working while the bug goes unreported.
+      // `fail` is the only way out of a callback, so every path uses it.
+      try {
+        if (event.kind === "line") {
+          absorb(event.line);
+          return;
+        }
+        // The two endings that carry no stream. The split is the one the old code
+        // drew between a rejected `fetch` and a non-ok response, kept because the
+        // two are different things to be told: "not listening" is the ordinary
+        // state of a machine that has never run ollama, and "stopped halfway" is
+        // not.
+        fail(
+          new OnboardingError(
+            "network",
+            event.kind === "unreachable"
+              ? "Couldn't reach the model on this machine."
+              : "The download stopped.",
+            event.message,
+          ),
+        );
+      } catch (from) {
+        fail(asError(from));
+      }
+    };
+
     try {
-      response = await fetch(`${OLLAMA}/api/pull`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: forOllama(), stream: true }),
-        signal: mine.signal,
-      });
+      await invoke("ollama_pull", { model: forOllama(), id: mine, onEvent: channel });
     } catch (from) {
       if (paused || cancelled || settled) return;
+      // Rust declining the call, rather than ollama saying something: there is no
+      // message of ollama's to show, so this keeps the older, vaguer sentence.
       throw new OnboardingError(
         "network",
         "Couldn't reach the model on this machine.",
         reason(from),
       );
+    } finally {
+      // Only this trip's id, so a pause that has already started the next one
+      // cannot have it cleared out from under it.
+      if (pull === mine) pull = null;
     }
 
-    if (!response.ok || response.body === null) {
-      const text = await response.text().catch(() => "");
-      throw new OnboardingError(
-        "network",
-        "The download stopped.",
-        text.trim() === "" ? `ollama answered ${response.status}` : text.trim(),
-      );
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    for (;;) {
-      let chunk: ReadableStreamReadResult<Uint8Array>;
-      try {
-        chunk = await reader.read();
-      } catch (from) {
-        // A pause aborts this reader on purpose, and a cancel does too. Both are
-        // stops rather than failures, and both have already been reported.
-        if (paused || cancelled || settled) return;
-        throw new OnboardingError("network", "The download stopped.", reason(from));
-      }
-      if (chunk.done) break;
-
-      buffer += decoder.decode(chunk.value, { stream: true });
-      let cut = buffer.indexOf("\n");
-      while (cut >= 0) {
-        const line = buffer.slice(0, cut).trim();
-        buffer = buffer.slice(cut + 1);
-        if (line !== "") absorb(line);
-        if (settled) return;
-        cut = buffer.indexOf("\n");
-      }
-      if (paused || cancelled) return;
-    }
+    // The transfer ended, one way or another. A pause, a cancel or a failure
+    // that has already been reported all end here without a second word.
+    if (paused || cancelled || settled) return;
 
     // The stream ended. Ollama says `success` only after it has checked the
     // digests of everything it wrote, so a stream that stops without one is a
     // transfer that did not finish — including the case where the connection
     // closed cleanly, which is the one that would otherwise look like success.
-    if (!confirmed && !paused && !cancelled && !settled) {
+    if (!confirmed) {
       throw new OnboardingError(
         "network",
         "The download stopped.",
@@ -901,7 +962,10 @@ function downloadModel(
       samples.length = 0;
       lastEmit = -Infinity;
       emit(true);
-      controller?.abort();
+      // Killing `curl` leaves ollama's partial blob where it is, which is what
+      // makes `resume` a resume: the same request goes out again and ollama
+      // carries on from the bytes it already has.
+      stopPull();
     },
     resume() {
       if (settled || !paused) return;
