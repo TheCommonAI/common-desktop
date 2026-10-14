@@ -189,7 +189,15 @@ export interface DownloadProgress {
    *  here that is still settling reads to the user as a broken estimate. */
   bytesPerSecond: number | null;
   etaSeconds: number | null;
-  state: "downloading" | "paused" | "verifying";
+  /** `waiting` is not a transfer at all: it is ollama not being up yet, and the
+   *  step before the first byte. It is a state rather than a silence because a
+   *  first run on a cold machine spends real seconds in it, and a screen that
+   *  shows nothing for that long cannot be told from a hung one. */
+  state: "downloading" | "paused" | "verifying" | "waiting";
+  /** Seconds spent waiting for ollama, and only ever set while `state` is
+   *  `"waiting"`. It is what makes the wait legible: the number changes, so the
+   *  screen is not one unchanging frame for half a minute. */
+  waitedSeconds: number | null;
 }
 
 export interface DownloadResult {

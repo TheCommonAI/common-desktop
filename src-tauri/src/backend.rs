@@ -42,7 +42,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 // `Manager` is the trait that puts `path()` on the app handle, which is where a
 // report is written. `config` and `package_info` are inherent methods and need no
 // import; this one is what supplies the folder.
@@ -779,6 +779,23 @@ pub async fn network_leave() -> Result<String, String> {
 #[tauri::command]
 pub async fn network_ask_local(question: String, model: Option<String>) -> Result<String, String> {
     off_thread(move || {
+        // Ollama first, for the same reason the download waits: this is the
+        // proof that *this machine* can answer, and on a fresh install the daemon
+        // may still be coming up. There is no channel here — this command answers
+        // in one piece — so the wait is silent, and a machine that never answers
+        // gets a sentence rather than a hang.
+        if !await_ollama(
+            Instant::now() + OLLAMA_WAIT,
+            OLLAMA_POLL,
+            ollama_answers,
+            start_ollama,
+            || true,
+        ) {
+            return Err(format!(
+                "ollama isn't answering on {OLLAMA_HOST} — start it and try again"
+            ));
+        }
+
         let bin = common_bin();
         let mut cmd = silent(&bin);
         // `--local` is a top-level flag and therefore must precede the verb; see
@@ -1538,23 +1555,57 @@ pub async fn ollama_models_dir() -> Result<String, String> {
 /// there: the alternative is a setting whose only working value is this one.
 const OLLAMA_PULL_URL: &str = "http://127.0.0.1:11434/api/pull";
 
+/// Where ollama listens on this machine, for the sentences this file writes
+/// about it. The URLs above and below spell the same host out again because a
+/// `const` cannot be assembled from one, and `service.real.ts` holds a literal
+/// copy for the same reason.
+const OLLAMA_HOST: &str = "127.0.0.1:11434";
+
+/// The cheapest question ollama answers, and the only thing asked of it that is
+/// not the pull itself. A version string and nothing else: this goes out once a
+/// second while the app waits for a daemon that is still starting, so answering
+/// it has to cost nothing.
+const OLLAMA_VERSION_URL: &str = "http://127.0.0.1:11434/api/version";
+
+/// How long the app waits for ollama before it says it could not reach it.
+///
+/// A cold daemon takes seconds, not minutes, and the slow case is a first run
+/// that has to start one: the `.app` or the Windows service has to come up,
+/// bind, and load a runner. Thirty seconds is longer than that takes on the
+/// machines this ships to, and short enough that a machine with no ollama at all
+/// is not left staring at a spinner.
+const OLLAMA_WAIT: Duration = Duration::from_secs(30);
+
+/// How often the wait looks up to see whether ollama has answered yet.
+const OLLAMA_POLL: Duration = Duration::from_secs(1);
+
 /// One message of ollama's pull stream, on its way to the webview.
 ///
-/// Three variants rather than a bare line, because the failures are different
-/// animals and the screen says different things about them. Ollama reports its
-/// own refusals *inside* the stream — `{"error":"model not found"}`, one line
-/// among the progress — and those are lines like any other, read by the same
-/// parser that reads the bytes, so they need no variant of their own.
+/// Variants rather than a bare line, because the failures are different animals
+/// and the screen says different things about them. Ollama reports its own
+/// refusals *inside* the stream — `{"error":"model not found"}`, one line among
+/// the progress — and those are lines like any other, read by the same parser
+/// that reads the bytes, so they need no variant of their own.
 ///
-/// The two that do are the ones with nothing to parse. `Unreachable` means the
+/// The ones that do are the ones with nothing to parse. `Unreachable` means the
 /// transfer never began — ollama is not listening, which is the ordinary state
 /// of a machine that has never run it, and the one case where the honest
 /// sentence is "we could not reach it" rather than "it stopped". `Failed` means
 /// it began and something ended it badly.
+///
+/// `Waiting` is the odd one out and is not a failure at all: it is the app
+/// saying it is still trying, once a second, while it waits for a daemon that is
+/// coming up. It exists because the alternative is worse than silence — a
+/// progress bar that has not moved for half a minute is indistinguishable from a
+/// hung one, and the whole point of waiting is that the user does nothing. Its
+/// `seconds` count up from the start of the wait rather than down to the end of
+/// it: a countdown to the moment the app gives up is a worse thing to watch for
+/// half a minute than a figure that says it is still trying.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum PullEvent {
     Line { line: String },
+    Waiting { seconds: u32 },
     Unreachable { message: String },
     Failed { message: String },
 }
@@ -1582,6 +1633,139 @@ struct Pull {
 #[derive(Default)]
 pub struct Pulls(Mutex<HashMap<String, Arc<Pull>>>);
 
+/// Whether ollama answers on loopback right now.
+///
+/// One `curl` on the cheapest endpoint it has. Loopback either answers at once
+/// or refuses at once, so the timeouts are a ceiling that is almost never paid —
+/// they are there for the machine where something else holds the port and says
+/// nothing, which would otherwise hang the wait rather than end it.
+///
+/// `--fail` so that a listener answering with a status code is not mistaken for
+/// ollama: readiness means a 2xx from this URL, not merely a connection.
+fn ollama_answers() -> bool {
+    ollama_answers_at(OLLAMA_VERSION_URL)
+}
+
+/// The same probe against any URL, which is what lets the test at the foot of
+/// this file point it at a port nothing is listening on. That refusal is the one
+/// arm of this that can be checked on a machine with no daemon on it, and it is
+/// worth checking: it is the arm the first run depends on.
+fn ollama_answers_at(url: &str) -> bool {
+    silent("curl")
+        .args([
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--connect-timeout",
+            "1",
+            "--max-time",
+            "2",
+        ])
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Ask the platform to start ollama, and say whether the ask was taken.
+///
+/// The desktop app rather than `ollama serve` wherever there is one, because the
+/// app owns the daemon's lifecycle and its port: a bare `serve` started beside a
+/// running app only fails to bind, and says nothing this file can read. On
+/// Windows that app is `ollama app.exe` under `%LOCALAPPDATA%\Programs\Ollama`,
+/// asked for by path because the app is not on `PATH` while `ollama.exe` alone
+/// is.
+///
+/// The daemon is spawned and the handle dropped, so it outlives the window:
+/// quitting Common must not stop the model server the user's other tools are
+/// also using.
+fn start_ollama() -> bool {
+    if cfg!(target_os = "macos") {
+        // `open -a` has done its job once the app is launched, so its exit
+        // status is the whole answer — and it does not wait on the daemon, which
+        // is what the poll after it is for.
+        return silent("open")
+            .arg("-a")
+            .arg("Ollama")
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+    }
+
+    if cfg!(windows)
+        && let Some(local) = std::env::var_os("LOCALAPPDATA")
+    {
+        let app = PathBuf::from(local)
+            .join("Programs")
+            .join("Ollama")
+            .join("ollama app.exe");
+        if app.is_file() {
+            return silent(app).spawn().is_ok();
+        }
+    }
+
+    // `ollama serve` is the fallback, and the only path on Linux.
+    silent("ollama")
+        .arg("serve")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .is_ok()
+}
+
+/// Wait for ollama to answer, asking the platform to start it once on the way.
+///
+/// This is the whole of the Windows first-run fix. `ollama_pull` ran `curl`
+/// exactly once, at the instant the model was chosen, and a daemon that is
+/// installed but not yet up loses that race: the pull dies with curl's
+/// `CURLE_COULDNT_CONNECT` and the app says it could not reach ollama, which was
+/// true for about two seconds and false for the rest of the machine's life.
+///
+/// So: probe, ask the platform to start it if the probe fails, then keep probing
+/// until it answers or the deadline passes. The closures are seams rather than
+/// indirection for its own sake — `answers` and `start` so the loop can be
+/// tested without a daemon (see the tests at the foot of this file), and `tick`
+/// so the caller decides what a second of waiting is worth saying, and can cut
+/// the wait short when the user has.
+///
+/// - `deadline` — when to stop waiting and let the caller report it.
+/// - `poll` — how long to sleep between probes.
+/// - `answers` — whether ollama is up *now*.
+/// - `start` — ask the platform to start it. Called at most once, and only ever
+///   after a probe has already failed.
+/// - `tick` — one turn of the wait. `false` abandons it immediately. It is handed
+///   nothing because what is worth saying about a wait is how long it has been
+///   going, and only the caller knows when it began.
+fn await_ollama(
+    deadline: Instant,
+    poll: Duration,
+    mut answers: impl FnMut() -> bool,
+    mut start: impl FnMut() -> bool,
+    mut tick: impl FnMut() -> bool,
+) -> bool {
+    let mut asked = false;
+    loop {
+        if answers() {
+            return true;
+        }
+        if !asked {
+            asked = true;
+            let _ = start();
+        }
+        if deadline.saturating_duration_since(Instant::now()).is_zero() {
+            return false;
+        }
+        if !tick() {
+            return false;
+        }
+        std::thread::sleep(poll);
+    }
+}
+
 /// Stream a model into ollama, as ollama's own NDJSON.
 ///
 /// This runs in Rust rather than in the webview, and the reason is one word:
@@ -1607,6 +1791,14 @@ pub struct Pulls(Mutex<HashMap<String, Arc<Pull>>>);
 /// this file already reaches the outside world by running something and reading
 /// what it says, and the update plugin's `reqwest` is not worth a direct
 /// dependency to do it differently.
+///
+/// Before any of that, it waits for ollama to be up — see `await_ollama` — and
+/// gives up only after `OLLAMA_WAIT` has passed with no answer. A refusal after
+/// that wait is genuinely a machine with no daemon on it, rather than one whose
+/// daemon had not finished starting, which is the distinction the first run used
+/// to get wrong. Every entry into a pull goes through that wait, including the
+/// two ways back in from a failure or a pause, so a resume re-checks readiness
+/// without the screen having to ask for it.
 #[tauri::command]
 pub async fn ollama_pull(
     app: tauri::AppHandle,
@@ -1628,6 +1820,50 @@ pub async fn ollama_pull(
     let key = id.clone();
 
     let outcome = off_thread(move || {
+        // Nothing is asked of ollama until it has answered something. This is the
+        // Windows first run: the pull used to be fired at a daemon that had not
+        // finished starting, so `ollama app.exe` had been launched and the
+        // transfer still died on the connection. Now the launch is made here if
+        // it is needed, the version endpoint is polled until it comes up, and the
+        // transfer begins only then. The failure is reported by this code, and
+        // only once the wait has actually run out.
+        let began = Instant::now();
+        let ready = await_ollama(
+            began + OLLAMA_WAIT,
+            OLLAMA_POLL,
+            ollama_answers,
+            start_ollama,
+            || {
+                // A failed send means the window has gone and there is nobody
+                // left to wait for; a stop means the user has already said so and
+                // the screen has already drawn it. Either way, stop waiting.
+                //
+                // The number is time spent, not time left: a countdown to the
+                // moment the app gives up is a worse thing to watch for half a
+                // minute than a figure that says it is still trying.
+                !pull.stopped.load(Ordering::SeqCst)
+                    && on_event
+                        .send(PullEvent::Waiting {
+                            seconds: began.elapsed().as_secs() as u32,
+                        })
+                        .is_ok()
+            },
+        );
+        if !ready {
+            // A stop during the wait is the user's own doing and is not reported
+            // as a failure — the same rule the reaping below follows.
+            if !pull.stopped.load(Ordering::SeqCst) {
+                let _ = on_event.send(PullEvent::Unreachable {
+                    message: format!(
+                        "nothing answered on {OLLAMA_HOST} for {}s — start Ollama, \
+                         then try again",
+                        OLLAMA_WAIT.as_secs()
+                    ),
+                });
+            }
+            return Ok(());
+        }
+
         // `--data` with the body handed to the process directly, rather than a
         // shell-quoted string: a model tag needs no escaping on any platform, and
         // a tag containing a quote could not break out of one.
@@ -1637,6 +1873,17 @@ pub async fn ollama_pull(
             .args([
                 "--silent",
                 "--show-error",
+                // Retry the connection, not the transfer. Ollama has just
+                // answered the readiness probe above, so a refusal here means it
+                // went away in between — and ten attempts a second apart is the
+                // difference between a failed download and a slow one. `--retry`
+                // does cover a POST on curl 8.x, which is worth stating because
+                // it historically covered only idempotent methods.
+                "--retry",
+                "10",
+                "--retry-connrefused",
+                "--retry-delay",
+                "1",
                 // `-N`. Without it curl buffers, and a buffered stream is a
                 // progress bar that sits still and then jumps to the end.
                 "--no-buffer",
@@ -1921,4 +2168,175 @@ pub async fn where_am_i() -> Result<PlaceRead, String> {
         })
     })
     .await
+}
+
+/* ---------------------------------- tests ---------------------------------- */
+
+/// The readiness wait, exercised with a probe and a starter that are both
+/// counters, so the whole thing runs in milliseconds and answers about this code
+/// rather than about what happens to be installed on the machine.
+///
+/// It lives here, at the foot of the module, rather than in `tests/` beside
+/// `manifest.rs`: `await_ollama` is private, and the four closures it takes are
+/// the seams that make it testable — a test outside the crate could reach
+/// neither.
+///
+/// What is deliberately *not* here is a test against a live daemon. That would
+/// pass on a developer's laptop and fail on a build machine, reporting on the
+/// machine instead of on the code. The one arm that can be checked anywhere is
+/// the refusal, and it is checked below.
+#[cfg(test)]
+mod readiness {
+    use super::*;
+    use std::cell::Cell;
+
+    /// Short enough that the suite is instant, long enough that the poll loop
+    /// gets several goes at it.
+    const QUICK: Duration = Duration::from_millis(10);
+
+    /// A deadline a known number of polls away, so what the loop does is exact
+    /// rather than a race against the wall clock.
+    fn deadline_after(steps: u32) -> Instant {
+        Instant::now() + QUICK * steps
+    }
+
+    /// A counter two closures can share.
+    ///
+    /// The probe and the starter are both handed to `await_ollama` at once, so
+    /// they are alive together and each is `FnMut` — a plain `u32` captured by
+    /// both is two mutable borrows of one place, which does not compile. A
+    /// `Cell` is borrowed shared, and a counter has no need to be anything else.
+    #[derive(Default)]
+    struct Tally(Cell<u32>);
+
+    impl Tally {
+        fn bump(&self) -> u32 {
+            self.0.set(self.0.get() + 1);
+            self.0.get()
+        }
+
+        fn get(&self) -> u32 {
+            self.0.get()
+        }
+    }
+
+    #[test]
+    fn a_daemon_that_is_already_answering_is_neither_watched_nor_started() {
+        let probes = Tally::default();
+        let starts = Tally::default();
+        let ready = await_ollama(
+            deadline_after(5),
+            QUICK,
+            || probes.bump() > 0,
+            || {
+                starts.bump();
+                true
+            },
+            || true,
+        );
+
+        assert!(ready);
+        assert_eq!(
+            probes.get(),
+            1,
+            "one probe is the answer; the rest is waste"
+        );
+        assert_eq!(
+            starts.get(),
+            0,
+            "nothing may be started when nothing is wrong"
+        );
+    }
+
+    #[test]
+    fn the_daemon_is_started_once_over_a_whole_wait_and_only_after_a_refusal() {
+        let probes = Tally::default();
+        let starts = Tally::default();
+        let probes_when_started = Cell::new(None);
+        let ready = await_ollama(
+            deadline_after(5),
+            QUICK,
+            || probes.bump() > 2,
+            || {
+                starts.bump();
+                probes_when_started.set(Some(probes.get()));
+                false
+            },
+            || true,
+        );
+
+        assert!(ready, "the third probe answers, so the wait must succeed");
+        assert_eq!(starts.get(), 1, "once for the wait, not once per second");
+        // The order is the point. A launcher racing a daemon that is already up
+        // fails to bind the port, so the start has to answer a refusal.
+        assert_eq!(
+            probes_when_started.get(),
+            Some(1),
+            "the daemon was started before a probe had said no"
+        );
+    }
+
+    #[test]
+    fn a_daemon_that_never_answers_gives_up_at_the_deadline() {
+        let mut ticks = 0;
+        let began = Instant::now();
+        let ready = await_ollama(
+            Instant::now() + QUICK * 3,
+            QUICK,
+            || false,
+            || true,
+            || {
+                ticks += 1;
+                true
+            },
+        );
+
+        assert!(
+            !ready,
+            "nothing answered, so the wait must not claim it did"
+        );
+        assert!(ticks >= 1, "the screen is told the wait is happening");
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "the deadline is a deadline, not a suggestion: {:?}",
+            began.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_tick_that_says_stop_abandons_the_wait_on_that_tick() {
+        let mut ticks = 0;
+        let ready = await_ollama(
+            Instant::now() + Duration::from_secs(60),
+            QUICK,
+            || false,
+            || true,
+            || {
+                ticks += 1;
+                false
+            },
+        );
+
+        assert!(!ready, "a cancelled wait has not found a daemon");
+        assert_eq!(ticks, 1, "a stop is acted on at once, not next second");
+    }
+
+    /// The refusal, which is the arm a first run actually meets, and the only
+    /// one that can be checked without a daemon on the machine. A closed loopback
+    /// port refuses immediately rather than sitting on the timeout, so this also
+    /// pins that the probe costs about nothing when the answer is no.
+    ///
+    /// If `curl` is missing entirely the spawn fails and the probe still answers
+    /// `false`, so this stays green on a machine that cannot run the pull at all
+    /// — which is the honest reading, since such a machine has no first run.
+    #[test]
+    fn a_port_nothing_listens_on_is_not_ollama() {
+        let began = Instant::now();
+        assert!(!ollama_answers_at("http://127.0.0.1:45999/api/version"));
+        assert!(
+            began.elapsed() < Duration::from_secs(3),
+            "a closed loopback port must refuse at once, not time out: {:?}",
+            began.elapsed()
+        );
+    }
 }

@@ -529,11 +529,14 @@ const OLLAMA = "http://127.0.0.1:11434";
  *
  * `line` is ollama's own NDJSON, verbatim — the same text the webview used to
  * read off the response body, and the reason the parser below is unchanged.
- * `unreachable` is ollama not being there at all; `failed` is a transfer that
- * started and did not finish. Both are only ever sent when the transfer is over
- * and there is no line that could have said it. */
+ * `waiting` is ollama not being up yet, once a second until it is; its `seconds`
+ * count up from the start of the wait. `unreachable` is ollama not being there
+ * at all; `failed` is a transfer that started and did not finish. Both of those
+ * are only ever sent when the transfer is over and there is no line that could
+ * have said it. */
 type PullEvent =
   | { kind: "line"; line: string }
+  | { kind: "waiting"; seconds: number }
   | { kind: "unreachable"; message: string }
   | { kind: "failed"; message: string };
 
@@ -710,6 +713,7 @@ function downloadModel(
       etaSeconds:
         speed === null || total === null ? null : Math.max(0, Math.round((total - bytes) / speed)),
       state,
+      waitedSeconds: null,
     });
   };
 
@@ -761,8 +765,35 @@ function downloadModel(
       bytesPerSecond: null,
       etaSeconds: null,
       state,
+      waitedSeconds: null,
     });
     announced = true;
+  };
+
+  /**
+   * Ollama is not up yet, and Rust is waiting for it.
+   *
+   * The only thing the screen hears while that happens, once a second — a first
+   * run on a cold Windows machine would otherwise be thirty seconds of one
+   * unchanging frame, which is what a hang looks like.
+   *
+   * It draws itself rather than going through `emit`, for the reason `verify`
+   * does: `emit` reports a transfer, and there is no transfer yet. It also
+   * deliberately leaves `state` alone, so that the first line of ollama's to
+   * arrive puts the screen back to reporting bytes without anything having to
+   * notice that it had stopped. The count it carries is whatever earlier lines
+   * established — nothing on a first run, the resumed total after a pause.
+   */
+  const waiting = (seconds: number) => {
+    if (announced) return;
+    opts?.onProgress?.({
+      receivedBytes: received(),
+      totalBytes: expected(),
+      bytesPerSecond: null,
+      etaSeconds: null,
+      state: "waiting",
+      waitedSeconds: seconds,
+    });
   };
 
   /** One line of ollama's NDJSON. */
@@ -840,6 +871,12 @@ function downloadModel(
       try {
         if (event.kind === "line") {
           absorb(event.line);
+          return;
+        }
+        // Not an ending and not a byte: ollama still coming up, and Rust saying
+        // so once a second so the screen is not silent while it waits.
+        if (event.kind === "waiting") {
+          waiting(event.seconds);
           return;
         }
         // The two endings that carry no stream. The split is the one the old code
