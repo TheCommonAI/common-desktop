@@ -533,6 +533,69 @@ function suggestLane(report: HardwareReport): Task<LaneSuggestion> {
  *  says why. */
 const OLLAMA = "http://127.0.0.1:11434";
 
+/** How long to wait for Ollama to become ready, in milliseconds. */
+const OLLAMA_READY_TIMEOUT_MS = 30_000;
+/** How often to poll Ollama readiness, in milliseconds. */
+const OLLAMA_POLL_INTERVAL_MS = 1_000;
+
+/**
+ * Check if Ollama is responding.
+ *
+ * Uses `/api/version` which is lightweight and always available when Ollama
+ * is running. Returns true if Ollama responds, false otherwise.
+ */
+async function isOllamaReady(): Promise<boolean> {
+  try {
+    const response = await fetch(`${OLLAMA}/api/version`, {
+      method: "GET",
+      signal: AbortSignal.timeout(2000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ensure Ollama is running and ready before making API calls.
+ *
+ * Polls `/api/version` every second. If Ollama isn't responding, attempts to
+ * start it (on Windows, via the installed Ollama app; on macOS/Linux, assumes
+ * it's already running or will be started by the user). Throws after 30 seconds
+ * if Ollama never becomes ready.
+ *
+ * This fixes the "curl: (7) Failed to connect to 127.0.0.1:11434" error that
+ * occurs when the app tries to pull a model before Ollama has finished starting.
+ */
+async function ensureOllamaReady(): Promise<void> {
+  const deadline = Date.now() + OLLAMA_READY_TIMEOUT_MS;
+  let startAttempted = false;
+
+  while (Date.now() < deadline) {
+    if (await isOllamaReady()) {
+      return;
+    }
+
+    // Try to start Ollama once if it's not responding
+    if (!startAttempted) {
+      startAttempted = true;
+      try {
+        await invoke("start_ollama");
+      } catch {
+        // Starting failed, but keep polling — it might come up on its own
+      }
+    }
+
+    await wait(OLLAMA_POLL_INTERVAL_MS);
+  }
+
+  throw new OnboardingError(
+    "network",
+    "Ollama isn't responding. Please make sure Ollama is installed and running.",
+    `Ollama at ${OLLAMA} did not respond within ${OLLAMA_READY_TIMEOUT_MS / 1000} seconds`,
+  );
+}
+
 /** One message from `ollama_pull`, as `PullEvent` in `backend.rs` sends it.
  *
  * `line` is ollama's own NDJSON, verbatim — the same text the webview used to
@@ -849,6 +912,11 @@ function downloadModel(
 
   /** One trip through the stream. Called again by `resume`. */
   const pump = async (): Promise<void> => {
+    // Ensure Ollama is running before attempting to pull. This fixes the
+    // "curl: (7) Failed to connect" error on Windows where Ollama may still
+    // be starting up when the app tries to download a model.
+    await ensureOllamaReady();
+
     // Before the first byte, and only once: the ladder id becomes the tag ollama
     // will answer to.
     await resolveTag();

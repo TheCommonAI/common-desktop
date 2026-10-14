@@ -170,6 +170,9 @@ pub fn run() {
             // Where the weights are, for the one field of `DownloadResult` that
             // has to be a real path.
             backend::ollama_models_dir,
+            // Start Ollama if it isn't running. Called before downloads to avoid
+            // "curl: (7) Failed to connect" errors on Windows.
+            backend::start_ollama,
             // The download itself, streamed from ollama through Rust rather than
             // fetched by the webview. `ollama_pull` says why the hop exists.
             backend::ollama_pull,
