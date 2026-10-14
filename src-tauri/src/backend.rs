@@ -1045,21 +1045,22 @@ pub async fn network_ask(question: String) -> Result<String, String> {
 /// gateway's own answer, rather than this process's opinion of itself.
 ///
 /// The child's output goes to a log file rather than to a pipe nobody drains,
-/// which would fill its buffer and wedge it. The log path is returned so a
-/// failure can be shown to the user as text rather than as a silent nothing.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct JoinStarted {
-    pub pid: u32,
-    pub log_path: String,
-}
-
+/// which would fill its buffer and wedge it, and `network_join_log` reads that file
+/// back so a failure can be shown to the user as text rather than as a silent
+/// nothing.
+///
+/// Nothing is returned but the fact that it worked. The `Child` is kept, in `Join`,
+/// rather than dropped with a pid handed back to the caller: a pid is only ever a
+/// number to be re-found, and re-finding it means a second program — `tasklist` on
+/// Windows, `kill -0` elsewhere — whose answer this process has no way to check.
+/// See `JoinState`, which is what that cost.
 #[tauri::command]
 pub async fn network_join(
+    app: tauri::AppHandle,
     model: Option<String>,
     name: Option<String>,
     lan: bool,
-) -> Result<JoinStarted, String> {
+) -> Result<(), String> {
     off_thread(move || {
         let bin = common_bin();
 
@@ -1109,10 +1110,15 @@ pub async fn network_join(
         // `launch_error`, where the sentence for a missing CLI is written.
         let child = cmd.spawn().map_err(|e| launch_error(&bin, e))?;
 
-        Ok(JoinStarted {
-            pid: child.id(),
-            log_path: log_path.to_string_lossy().to_string(),
-        })
+        // Held, not dropped. Whatever is in the slot is a join this app started
+        // and has stopped asking about — the flow spawns at most one per run now —
+        // and a stale handle is overwritten here rather than consulted.
+        *app.state::<Join>()
+            .0
+            .lock()
+            .map_err(|_| "the join handle is poisoned".to_string())? = Some(child);
+
+        Ok(())
     })
     .await
 }
@@ -1220,48 +1226,115 @@ pub async fn network_join_log(tail: usize) -> Result<String, String> {
 
 /* ------------------------------ a live join ------------------------------ */
 
-/// Whether a process this app started is still alive.
+/// The join this app started, if it started one.
 ///
-/// `network_join` spawns `common join` detached and hands back its pid: that
-/// process *is* the node, and it is meant to outlive the call that made it, so
-/// there is no `Child` left to hold. Polling the pid is how "the join died" is
-/// told apart from "the join is still working", and the two need different
-/// words on screen — one is a failure to show the log of, the other is patience.
+/// `Mutex<Option<Child>>` rather than a bare `Option<Child>`: `Child` is `Send`
+/// but not `Sync`, so Tauri cannot manage it except behind a lock. Nothing here
+/// is contended — the flow asks once a second — so the mutex is for the type
+/// system rather than for the scheduling.
 ///
-/// Signal 0 is the unix idiom: it performs the existence and permission checks
-/// and delivers nothing. Status 0 means something is there.
-#[cfg(unix)]
-fn is_running(pid: u32) -> Result<bool, String> {
-    let status = silent("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|e| format!("couldn't ask after pid {pid}: {e}"))?;
-    Ok(status.success())
+/// A finished child is left in the slot rather than cleared. `Child::try_wait`
+/// caches the status, so a join that has ended answers the same way every time it
+/// is asked, and the answer stays worth having: it is what the screen puts in its
+/// disclosure line.
+#[derive(Default)]
+pub struct Join(Mutex<Option<Child>>);
+
+/// What became of the join this app started.
+///
+/// Four answers, and `HandedOff` is the one this type exists for.
+///
+/// On unix the process spawned *is* the join. `common` is a shell script whose
+/// last act is to `exec` the Python CLI, and `os.execv` replaces the process image
+/// while keeping the pid, so `try_wait` returning nothing means the join is
+/// working and returning a status means it has stopped. `kill -0` agreed with
+/// this, at the price of a subprocess a second.
+///
+/// On Windows neither of those holds. `install.ps1` writes `common.cmd`, a batch
+/// wrapper, and `Command` runs it through `cmd.exe` — so the program this app
+/// holds is three layers away from the join. The wrapper's last act is to run the
+/// Python CLI, which `os.execv`s into `join.py`, and on Windows that leaves a
+/// process rather than replacing one. The program this app holds therefore exits,
+/// cleanly and at once, by design — while the join it started carries on under a
+/// pid nothing here was ever given.
+///
+/// Read as a death, that is the worst available reading. A friend's machine did
+/// exactly this: the node was registered, the worker was listening, `/peers` listed
+/// it, and the app had already spent all three of its attempts and put "the network
+/// didn't answer" on screen about a network that plainly had. A pid is also a
+/// locale-dependent text search to re-find on Windows, which is a second way to be
+/// wrong in the same direction.
+///
+/// So the platform decides, here, where it is known — rather than on the far side of
+/// the boundary, which would have to guess.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase", tag = "state")]
+pub enum JoinState {
+    /// This app has not started a join.
+    None,
+    /// Still going. On Windows that means only that it has not handed off yet.
+    Running,
+    /// Exited cleanly, having handed off to a program this app cannot see. Windows
+    /// only, and success rather than failure: the join is out there, and `network_status`
+    /// is what says whether it arrived.
+    HandedOff,
+    /// Exited without handing off, so nothing this app started is serving.
+    Ended { code: String },
 }
 
-/// Windows has no signal 0, so this reads `tasklist`. A filtered `tasklist`
-/// with no match prints "No tasks are running which match the specified
-/// criteria." rather than nothing, so the pid itself has to be looked for —
-/// testing the output for emptiness would answer "running" every time.
-#[cfg(windows)]
-fn is_running(pid: u32) -> Result<bool, String> {
-    let out = silent("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-        .output()
-        .map_err(|e| format!("couldn't ask after pid {pid}: {e}"))?;
-    Ok(String::from_utf8_lossy(&out.stdout).contains(&pid.to_string()))
+/// What a finished child means, from its exit code and the platform.
+///
+/// A clean exit on Windows is the batch wrapper having done its job: `cmd.exe`
+/// leaves with the status of the command it ran, and that command handed off. A
+/// clean exit anywhere else is the join itself having stopped, which is news.
+///
+/// The two inputs are arguments rather than read from the environment so that a
+/// test on any platform can pin every answer — the same reason `common_names`
+/// takes `windows` instead of a `cfg!`. Windows is where this went wrong and is
+/// the platform least likely to be the one running the suite.
+///
+/// The exit code is the single most useful fact about a join that stopped, and on
+/// Windows close to the only one: a wrapper that failed to hand off is a batch file
+/// that could not run Python, and the number is what says so.
+fn finished(windows: bool, code: Option<i32>) -> JoinState {
+    if windows && code == Some(0) {
+        return JoinState::HandedOff;
+    }
+    JoinState::Ended {
+        code: match code {
+            Some(code) => format!("exit code {code}"),
+            // No code means it was ended by a signal, which on unix is the only
+            // way that happens — and there is no number to report.
+            None => "ended by a signal".to_string(),
+        },
+    }
 }
 
-/// A pid can be reused, but the window here is the length of one onboarding and
-/// a recycled pid would have to land on the exact number this app was handed.
-/// The cost of being wrong is a spinner that runs a little longer, never a
-/// wrong answer.
+/// What the join this app started is doing now.
+///
+/// One `waitpid(WNOHANG)` or one `GetExitCodeProcess`, and no subprocess at all —
+/// where asking after a pid cost a fresh `tasklist` or `kill` every second for four
+/// minutes, and on Windows cost the answer too.
 #[tauri::command]
-pub async fn process_running(pid: u32) -> Result<bool, String> {
-    off_thread(move || is_running(pid)).await
+pub async fn network_join_state(app: tauri::AppHandle) -> Result<JoinState, String> {
+    let state = app.state::<Join>();
+    let mut slot = state
+        .0
+        .lock()
+        .map_err(|_| "the join handle is poisoned".to_string())?;
+    let Some(child) = slot.as_mut() else {
+        return Ok(JoinState::None);
+    };
+    match child.try_wait() {
+        Ok(None) => Ok(JoinState::Running),
+        Ok(Some(status)) => Ok(finished(cfg!(windows), status.code())),
+        // Asking failed, which is not evidence of anything. `Running` here means
+        // "keep waiting", never "it is up" — the caller reads it as one of the two
+        // states that do not spend a retry, and the gateway is what decides whether
+        // the join arrived. Guessing the other way would spend one of three
+        // attempts against a join that may be fine, which is the bug being fixed.
+        Err(_) => Ok(JoinState::Running),
+    }
 }
 
 /* ------------------------------- diagnostics -------------------------------- */
@@ -2477,5 +2550,65 @@ mod launch {
             &["common"][..],
             "install.sh writes the extensionless name, and only that"
         );
+    }
+}
+
+/* --------------------------------- a live join --------------------------------- */
+
+/// The one judgement that decides whether a join this app started is reported as
+/// working or as dead, which on a real machine was the whole of the difference
+/// between a node that was registered and a screen saying it never answered.
+///
+/// Nothing here can spawn the wrapper, so what is pinned is the reading of a child
+/// that has already left: the exit code it left with, and what that code means on
+/// each platform. The platform is a parameter for the same reason `common_names`
+/// takes one — this machine is not a Windows machine, and Windows is the only place
+/// the answer differs.
+#[cfg(test)]
+mod live_join {
+    use super::*;
+
+    #[test]
+    fn a_windows_wrapper_that_exits_cleanly_is_a_join_that_started_and_not_one_that_stopped() {
+        assert!(
+            matches!(finished(true, Some(0)), JoinState::HandedOff),
+            "cmd.exe leaves with the status of the command it ran, and that command \
+             handed off to join.py under a pid this app was never given — reading it \
+             as a death is what put 'the network didn't answer' over a live node"
+        );
+    }
+
+    #[test]
+    fn the_same_clean_exit_is_a_death_where_the_process_spawned_is_the_join() {
+        // On unix `os.execv` replaces the image and keeps the pid, so the child
+        // this app holds *is* the join. A clean exit there is the join stopping,
+        // and treating it as a handoff would leave the flow waiting on a node that
+        // is gone until the four-minute deadline.
+        assert!(matches!(finished(false, Some(0)), JoinState::Ended { .. }));
+    }
+
+    #[test]
+    fn a_wrapper_that_could_not_hand_off_carries_the_number_that_says_so() {
+        // A batch file that could not run Python is the case this is written for:
+        // the exit code is the only fact about it that reaches the screen, and the
+        // disclosure line under the sentence is where it goes.
+        match finished(true, Some(1)) {
+            JoinState::Ended { code } => assert!(
+                code.contains('1'),
+                "the code on screen has to be the code the process left: {code}"
+            ),
+            other => panic!("a failed handoff is a join that is not serving, not {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_child_ended_by_a_signal_says_so_rather_than_reporting_a_code_of_nothing() {
+        match finished(false, None) {
+            JoinState::Ended { code } => assert!(
+                !code.contains('0'),
+                "there is no code to report, and a zero would read as a clean exit: {code}"
+            ),
+            other => panic!("a signalled child has ended, not {other:?}"),
+        }
     }
 }

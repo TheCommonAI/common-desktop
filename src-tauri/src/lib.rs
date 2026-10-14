@@ -118,6 +118,11 @@ pub fn run() {
         // means to stop. The webview picks the id and hands the same one back to
         // `ollama_pull_cancel`; the map itself never leaves Rust.
         .manage(backend::Pulls::default())
+        // The join this app started, so that "is it still working?" is answered by
+        // the process handle rather than by hunting for its pid with a second
+        // program. On Windows those two answers disagree, and the disagreement cost
+        // a friend a working node reported as a dead network — see `JoinState`.
+        .manage(backend::Join::default())
         .setup(|app| {
             build_tray(app.handle())?;
             Ok(())
@@ -159,10 +164,9 @@ pub fn run() {
             // tag to pull and a failed join has something to say.
             backend::network_catalogue,
             backend::network_join_log,
-            // Whether the `join` this app started is still working. The join is
-            // detached and meant to outlive the call, so the pid is the only
-            // handle there is on it.
-            backend::process_running,
+            // What the `join` this app started is doing. The join outlives the call
+            // that made it, so what is held is its handle and not its answer.
+            backend::network_join_state,
             // Where the weights are, for the one field of `DownloadResult` that
             // has to be a real path.
             backend::ollama_models_dir,
