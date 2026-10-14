@@ -12,7 +12,8 @@ import { appVersion, updateCheck, updateRestart, updateStage } from "./backend";
  * The work is split so the cheap part is always done and the expensive part is
  * rationed. The version this app is running is a local read and is asked for on
  * every open; the release manifest is a request to GitHub and is fetched at most
- * once a day. A user who opens the app five times before lunch pays for one check.
+ * once every four hours. A user who opens the app five times before lunch pays for
+ * one check.
  *
  * Nothing here is required for the app to work. Every path fails to a state the
  * surfaces can print honestly, and none of them throws at the caller — an app that
@@ -20,7 +21,7 @@ import { appVersion, updateCheck, updateRestart, updateStage } from "./backend";
  */
 
 /**
- * When the manifest was last fetched, so a day can be measured.
+ * When the manifest was last fetched, so the interval below can be measured.
  *
  * Under the same `common.` prefix as the rest of this app's storage, and read and
  * written through the same guarded pair as `geo.readPlace` — `localStorage` throws
@@ -33,16 +34,29 @@ import { appVersion, updateCheck, updateRestart, updateStage } from "./backend";
 const KEY = "common.updates.lastChecked";
 
 /**
- * A day between checks.
+ * Four hours between checks.
  *
- * Day-length and not hour-length because the release cadence is a release
- * cadence, not a heartbeat: nothing is gained by asking four times for an answer
- * that changes weekly, and each ask is a request to a third party that logs it.
- * Nor is it checked on a timer while the app sits in the menu bar — a laptop that
- * has been asleep for a week should learn about an update when it wakes and the
- * user looks at it, not by waking itself up to ask.
+ * Not a day, which is what this was, and which was the wrong side of the only
+ * thing the number trades off. The release cadence is weekly, so a day is not
+ * asking a question whose answer has changed; what it is doing is putting an
+ * unbounded delay between a release landing and the person who wanted it hearing
+ * about it. Nobody who works in this app all day should be able to go a whole
+ * working day with a release waiting and never be told — and with a day between
+ * checks that is exactly what happens to anyone who leaves the window open.
+ *
+ * Nor an hour, which is the other tempting answer. Four checks a day is already
+ * an order of magnitude more often than the answer changes, and each one is a
+ * request to a third party that logs it. Four lands a release on screen the same
+ * working day it is published, on the first look the user takes after it is — which
+ * is as soon as anything here can usefully say it.
+ *
+ * Still not a timer, and that has not changed. Nothing is checked while the app
+ * sits in the menu bar: a laptop asleep for a week should learn about an update
+ * when it wakes and the user looks at it, not by waking itself up to ask. This is a
+ * floor on how often the two moments that do check — launch, and the window coming
+ * back to the front — may reach out, and nothing more.
  */
-const INTERVAL_MS = 24 * 60 * 60 * 1000;
+const INTERVAL_MS = 4 * 60 * 60 * 1000;
 
 function readLastChecked(): number | null {
   try {
@@ -97,6 +111,86 @@ export type UpdateOffer =
 /** Whether the app is in the middle of something the user should not start twice. */
 export function busy(offer: UpdateOffer): boolean {
   return offer.kind === "checking" || offer.kind === "downloading";
+}
+
+/** What an offer asks of the user: the word on the control, which of the caller's
+ *  two callbacks it means, and whether it can be pressed at all. */
+export interface UpdateAsk {
+  /** Which of the two things this offer wants done. The caller maps it to its own
+   *  callback rather than this handing back a closure, because the two surfaces
+   *  reach the same two actions from different places and there is no reason for
+   *  either to be given the other's. */
+  action: "install" | "restart";
+  /** The word on the control. */
+  actionLabel: "Install" | "Restart";
+  /** Whether the control is live. `downloading` and `restarting` are work already
+   *  happening, and a control that would start it again is disabled rather than
+   *  removed — what is on screen while it happens is the answer to a button that
+   *  looks unpressed, and the answer to that is another press. */
+  disabled: boolean;
+  /** The line about the state, in the rail's register: a fragment to sit beside a
+   *  control in a 13rem column, not a sentence. A surface with room for more writes
+   *  its own — the card does, in a display face; `Settings` has done since it was
+   *  written, and needs to, since its control also covers the states with nothing to
+   *  offer. */
+  says: string;
+}
+
+/**
+ * The one place the state of an update is turned into words and a verb.
+ *
+ * It began as `updateBar` inside `Sidebar`, and the argument for it was that the
+ * sentence and the control move together — "Restart" is only the right word beside
+ * "is ready" — so a label and an action written in two places would eventually
+ * disagree about which state they are describing. That argument did not stop being
+ * true when a second surface appeared; it stopped being satisfiable inside one file.
+ * The rail and the update card both say something and both offer the same action, and
+ * a card that spelled "Install" for itself would be a third place for that
+ * agreement to hold, which is to say a place for it to break.
+ *
+ * What is deliberately *not* here is `Settings`, which is a third surface offering
+ * the same actions and keeps its own words — "Restart to update", because its row has
+ * a heading and a fact line above a control that has to cover the quiet states too.
+ * That divergence predates this function. Folding it in would mean rewriting a row
+ * that is not part of this change, and the rail is the surface the card has to agree
+ * with, since they appear together on the same screen and at the same moment.
+ *
+ * `null` is the four states with nothing to do — unknown, checking, current, failed —
+ * and is what makes a surface draw nothing rather than a line about nothing. A caller
+ * that is mid-something it cannot report uses `busy`, which is a different question:
+ * this one is "is there a decision to offer", not "is work happening".
+ */
+export function askFor(offer: UpdateOffer): UpdateAsk | null {
+  switch (offer.kind) {
+    case "available":
+      return {
+        action: "install",
+        actionLabel: "Install",
+        disabled: false,
+        says: "New update available",
+      };
+    case "downloading":
+      return {
+        action: "install",
+        actionLabel: "Install",
+        disabled: true,
+        says: `Getting ${offer.version}…`,
+      };
+    case "staged":
+      return {
+        action: "restart",
+        actionLabel: "Restart",
+        disabled: false,
+        says: `Version ${offer.version} is ready`,
+      };
+    case "restarting":
+      return { action: "restart", actionLabel: "Restart", disabled: true, says: "Restarting…" };
+    case "unknown":
+    case "checking":
+    case "current":
+    case "failed":
+      return null;
+  }
 }
 
 /** The version running, which never depends on the throttle. */

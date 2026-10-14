@@ -337,10 +337,11 @@ export async function updateRestart(): Promise<void> {
  * The version of the app that is running.
  *
  * This is the one update fact that is always available, so it is asked for
- * separately rather than taken from a check. A check is throttled to once a day
- * and may not have run at all — but the Settings card has to be able to name the
- * version it is offering to move off, on any day, whether or not anything was
- * fetched. This reads the bundle's own version: local, no network, no manifest.
+ * separately rather than taken from a check. A check is throttled — see
+ * `INTERVAL_MS` — and may not have run at all — but the Settings card has to be
+ * able to name the version it is offering to move off, at any moment, whether or
+ * not anything was fetched. This reads the bundle's own version: local, no network,
+ * no manifest.
  */
 export async function appVersion(): Promise<string> {
   if (!insideApp()) return PREVIEW_UPDATE.current;
@@ -387,12 +388,26 @@ const PREVIEW_ANSWER: NetworkAnswer = {
 /**
  * The stand-in, for a page running outside the app.
  *
- * "Up to date" is the true answer here rather than a convenient one: there is
- * no installed app in a browser, so there is no version to move it off. The
- * other two update calls throw instead of stubbing — an update that appears to
- * be staged in a preview would be a lie the rest of the UI would act on.
+ * It offers an update, which it did not used to, and the argument for the change
+ * is the argument the other stubs make: a surface that cannot be reached without
+ * building the app is a surface that gets reviewed by whoever remembers what it
+ * looked like last time. The update card is the newest of those, and both ordinary
+ * routes to it are shut in development — `update.rs` answers `available: null` on a
+ * dev build, deliberately, since a dev build hitting the real manifest would offer
+ * an update to a version that has no build behind it. So without this the card would
+ * first be seen by a user.
+ *
+ * The line that still holds is the one about *acting* on a lie. `updateStage` and
+ * `updateRestart` throw outside the app, so pressing `Install` here reports the
+ * failure rather than pretending to have fetched anything, and nothing can be left
+ * half-staged. That is the difference between previewing an offer and previewing an
+ * install, and it is why an `available` is honest where a `staged` would not be.
+ *
+ * `current` is what the browser reports as the running version and should be kept in
+ * step with the release; `available` is a whole minor ahead so that the card has
+ * something unambiguous to name, and so that the two never have to be compared.
  */
 export const PREVIEW_UPDATE: UpdateStatus = {
-  current: "0.2.0",
-  available: null,
+  current: "0.2.4",
+  available: { version: "0.3.0", notes: null, pubDate: null },
 };

@@ -1,5 +1,5 @@
 import { titleFor, type Conversation } from "./conversations";
-import type { UpdateOffer } from "./updates";
+import { askFor, type UpdateOffer } from "./updates";
 
 /**
  * The sidebar: the mark, the chats, the update, and the foot.
@@ -78,48 +78,25 @@ export interface SidebarProps {
 /**
  * What the update bar says and does, or `null` when there is nothing to act on.
  *
- * One function rather than a switch in the markup because the sentence and the
- * control move together: "Restart" is only the right word beside "is ready", and a
- * label and an action written in two places will eventually disagree about which
- * state they are describing. Returning `null` for the four states with nothing to
- * do — unknown, checking, current, failed — is what makes the bar appear only when
- * it has something to offer, so it is never a line about nothing.
+ * The words and the verb come from `askFor` in `updates.ts`, which is where the
+ * argument for them lives — this app now offers an update from two surfaces, and one
+ * of them writing its own "Install" is how the two stop agreeing about what they are
+ * describing. What is left here is the mapping from the ask to *this* surface's two
+ * callbacks, which is the only part the rail owns.
  */
 function updateBar(
   offer: UpdateOffer,
   onInstall: () => void,
   onRestart: () => void,
 ): { label: string; action: string; act: () => void; disabled: boolean } | null {
-  switch (offer.kind) {
-    case "available":
-      return {
-        label: "New update available",
-        action: "Install",
-        act: onInstall,
-        disabled: false,
-      };
-    case "downloading":
-      return {
-        label: `Getting ${offer.version}…`,
-        action: "Install",
-        act: onInstall,
-        disabled: true,
-      };
-    case "staged":
-      return {
-        label: `Version ${offer.version} is ready`,
-        action: "Restart",
-        act: onRestart,
-        disabled: false,
-      };
-    case "restarting":
-      return { label: "Restarting…", action: "Restart", act: onRestart, disabled: true };
-    case "unknown":
-    case "checking":
-    case "current":
-    case "failed":
-      return null;
-  }
+  const ask = askFor(offer);
+  if (ask === null) return null;
+  return {
+    label: ask.says,
+    action: ask.actionLabel,
+    act: ask.action === "install" ? onInstall : onRestart,
+    disabled: ask.disabled,
+  };
 }
 
 export default function Sidebar({

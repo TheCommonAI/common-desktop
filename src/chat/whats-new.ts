@@ -25,6 +25,11 @@
  * The order within a version is the order the changes matter, most first.
  */
 const NOTES: Record<string, readonly string[]> = {
+  "0.2.5": [
+    "On Windows, a machine could join the network, answer questions, and still be told the network had not replied. The app was misreading its own process as one that had stopped; that is fixed, and when a join really does stop the app now says so instead of blaming the network.",
+    "Common now tells you when a new version is waiting. It looks for one more often than once a day, and it opens a card the moment it finds one rather than leaving a line in the rail to be noticed — and if you would rather not now, it asks again next time you open the app.",
+    "Joining the network draws a mark while it works, so registering no longer looks like a screen that has stopped.",
+  ],
   "0.2.2": [
     "Your chats are saved. Close the app and they are still here when you come back, each one with its own history.",
     "That history goes out with your next question, so a follow-up like “and why?” lands on something.",

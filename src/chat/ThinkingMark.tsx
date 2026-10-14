@@ -3,12 +3,16 @@ import { useEffect, useRef } from "react";
 /**
  * Three dots that find each other, let go, and find each other again.
  *
- * This is what the app shows while the network has the question. It replaced a
- * row of pulsing dots that sat at the end of the waiting sentence — the same
- * three marks, but drawn rather than set in type, and about the thing that is
- * actually happening: the dots are machines, and the lines are the question
- * going out to one of them. It is drawn with the same pencil as the settings
- * globe, so the app has one hand rather than two.
+ * This is the app's mark for "this is working and you are waiting", and there are
+ * two places it means that. The first is the chat, while the network has the
+ * question. The second is the join, for as long as the registration is running —
+ * which is a screen that used to sit perfectly still through four phases of
+ * caption, and a still screen cannot be told from a hung one. It replaced a row of
+ * pulsing dots that sat at the end of the waiting sentence — the same three marks,
+ * but drawn rather than set in type, and about the thing that is actually
+ * happening: the dots are machines, and the lines are the question going out to one
+ * of them. It is drawn with the same pencil as the settings globe, so the app has
+ * one hand rather than two.
  *
  * A canvas rather than SVG because the wobble is re-rolled every seventh of a
  * second, seeded from each dot's identity and the tick, so the line shakes like

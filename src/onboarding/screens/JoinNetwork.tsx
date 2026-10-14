@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import ShareLog from "../../chat/ShareLog";
+import ThinkingMark from "../../chat/ThinkingMark";
 import { formatBytes, formatLatency } from "../copy";
 import { LANE_LABEL, findModel } from "../models";
 import Control from "../parts/Control";
@@ -15,7 +16,9 @@ import { refused, useTask } from "../use-task";
  * makes it the purest screen in the register: one thing is happening at a time,
  * and the statement is the thing. Nothing starts until the user asks, and
  * nothing is offered while it runs — there is no useful way to interrupt a
- * registration, so there is no control offering to.
+ * registration, so there is no control offering to. What it does have is a mark,
+ * because a screen that changes nothing for two minutes is indistinguishable from
+ * one that has stopped; see `gauge` below.
  *
  * The last state had no controls at all, and the flow ended on the sentence. It
  * has exactly one now, because the sentence is no longer the end of anything:
@@ -23,12 +26,16 @@ import { refused, useTask } from "../use-task";
  * worth something. One control, and it is the only place in the flow where the
  * forward move does not go to another step.
  *
- * The two states where it does *not* work carry a way to leave with the
- * evidence — a report of this machine, this is `ShareLog`. Both are the same
- * failure from where the user is standing: it will not connect. One of them says
- * so outright; the other registered the machine and then could not be routed to,
- * which is a firewall and not a bug report, and is exactly the thing the join
- * log's last lines describe.
+ * The states where it does *not* work carry a way to leave with the evidence — a
+ * report of this machine, this is `ShareLog`. Two of them do say "it will not
+ * connect", and they are different failures: one is the gateway not being able to
+ * route here, which is a firewall and not a bug report; the other is the gateway
+ * never answering at all. The third is on this side of the glass entirely — the
+ * join stopped — and saying "the network didn't answer" about it is what this
+ * screen used to do to a Windows machine whose node was listed in `/peers`, which
+ * is the mistake the split below exists to prevent. Which of the three is showing
+ * is decided by the error's `code`, and the detail line under each is whatever
+ * evidence came with it: the join log, or the exit code when there is no log.
  */
 
 /** The clause for a phase, which is the whole caption: the phase *is* the
@@ -92,6 +99,7 @@ export default function JoinNetwork({ flow, next, back }: ScreenProps) {
 
   let statement: ReactNode;
   let caption: ReactNode | readonly ReactNode[];
+  let gauge: ReactNode | undefined;
   let controls: ReactNode | undefined;
   let live = false;
 
@@ -130,29 +138,48 @@ export default function JoinNetwork({ flow, next, back }: ScreenProps) {
       </>
     );
   } else if (state.status === "error") {
-    // The one failure on this screen that is not a network failure. A missing
-    // `common` never left this machine — nothing was asked of any network — so
-    // calling it one would send the user to inspect a gateway that was never
-    // reached. It gets its own sentence and its own clause, and no detail line:
-    // the detail is the same sentence with a path on it, and the path is in the
-    // log the Share control carries.
+    // Two failures on this screen are not network failures, and they are the two
+    // that need saying so most plainly.
+    //
+    // A missing `common` never left this machine — nothing was asked of any
+    // network — so calling it one would send the user to inspect a gateway that
+    // was never reached. It gets its own sentence and its own clause, and no
+    // detail line: the detail is the same sentence with a path on it, and the path
+    // is in the log the Share control carries.
+    //
+    // A join that stopped did reach the network, or was trying to, and the app gave
+    // up on the *process*. Saying "nothing came back from the gateway" there is the
+    // wrong way round: it blames the far side for something this machine did, and
+    // it is what a Windows machine was told while its node sat in `/peers`. The
+    // detail carries the exit code, which is the fact that says which it was.
     const missingCli = state.error.code === "cli-missing";
+    const stopped = state.error.code === "join-stopped";
     statement = missingCli
       ? "Common isn't fully installed."
-      : "The network didn't answer.";
+      : stopped
+        ? "The join stopped on this machine."
+        : "The network didn't answer.";
     caption = missingCli
       ? [
           "Its command-line tool isn't installed",
           "It arrives with the network's own installer, not with this app",
         ]
-      : [
-          state.error.code === "timeout"
-            ? "It took too long to answer"
-            : state.error.code === "network"
-              ? "Nothing came back from the gateway"
-              : "Something went wrong at this end",
-          state.error.detail ?? null,
-        ];
+      : stopped
+        ? [
+            // What the app actually knows, and no more. Whether the node reached
+            // the network is the gateway's answer to give, not this line's to
+            // assume — and assuming it wrongly is the bug this state was added for.
+            "It didn't stay running",
+            state.error.detail ?? null,
+          ]
+        : [
+            state.error.code === "timeout"
+              ? "It took too long to answer"
+              : state.error.code === "network"
+                ? "Nothing came back from the gateway"
+                : "Something went wrong at this end",
+            state.error.detail ?? null,
+          ];
     controls = (
       <>
         <Control onClick={start} arrow>
@@ -186,6 +213,21 @@ export default function JoinNetwork({ flow, next, back }: ScreenProps) {
               // a node — `identity.json` holds it — and never a keypair, so
               // there is no key being made here and nothing for a user to keep.
               ["Choosing a name for this machine"];
+    // The mark, for the whole of the running state and for none of any other.
+    //
+    // This screen said nothing at all while it worked. Four phases of caption, each
+    // one true, and every one of them a sentence that sits still — which is the same
+    // thing on screen as a screen that has hung. The register will not carry a spinner
+    // and should not: a spinner is furniture, and the app already has one mark for
+    // "this is working and you are waiting", which is the one the chat shows while the
+    // network has the question.
+    //
+    // Not per phase, and that is deliberate. From this side of the glass "the join is
+    // running" is one state, the caption already names which part of it is happening,
+    // and a rule with no cases is a rule that cannot be got wrong later. It goes the
+    // moment the run does, whether that is a result or a failure, because the mark is
+    // the promise of further news and there is none.
+    gauge = <ThinkingMark />;
     controls = undefined;
   } else {
     statement = "One last thing.";
@@ -210,6 +252,7 @@ export default function JoinNetwork({ flow, next, back }: ScreenProps) {
     <Statement
       statement={statement}
       caption={caption}
+      gauge={gauge}
       controls={controls}
       live={live}
       focusKey={state.status === "idle" ? "ready" : `join-${attempt}`}
