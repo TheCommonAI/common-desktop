@@ -55,13 +55,13 @@ jobs:
             }
           }
           
-          # Find Common.exe
-          $exe = Get-ChildItem -Path $searchPaths -Filter "Common.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          # Find common-desktop.exe (Tauri uses productName from Cargo.toml)
+          $exe = Get-ChildItem -Path $searchPaths -Filter "common-desktop.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($exe) {
             Write-Host "Common installed at: $($exe.FullName)"
             echo "COMMON_EXE=$($exe.FullName)" >> $env:GITHUB_ENV
           } else {
-            Write-Host "ERROR: Could not find Common.exe"
+            Write-Host "ERROR: Could not find common-desktop.exe"
             exit 1
           }
 
