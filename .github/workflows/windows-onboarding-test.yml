@@ -1,15 +1,7 @@
 name: Windows onboarding test
-# Test the real user experience: download the released installer, install it,
-# launch the app, and go through onboarding with default choices. No pre-installing
-# Ollama, no test hooks, no shortcuts.
 on:
   pull_request:
   workflow_dispatch:
-    inputs:
-      release_tag:
-        description: Release tag to test (default: latest)
-        required: false
-        default: latest
 
 permissions:
   contents: read
@@ -26,148 +18,72 @@ jobs:
       - name: Download the Windows installer
         shell: pwsh
         run: |
-          $tag = "${{ inputs.release_tag }}"
-          if ([string]::IsNullOrEmpty($tag) -or $tag -eq "latest") {
-            Write-Host "Fetching latest release..."
-            $release = gh release view --json tagName,assets | ConvertFrom-Json
-            $tag = $release.tagName
-          }
+          Write-Host "Fetching latest release..."
+          $tag = (gh release view --json tagName | ConvertFrom-Json).tagName
           Write-Host "Testing release: $tag"
           
           $installerUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/Common-win-x64.exe"
-          Write-Host "Downloading from: $installerUrl"
-          
           Invoke-WebRequest -Uri $installerUrl -OutFile "$env:TEMP\Common-win-x64.exe" -UseBasicParsing
-          
-          if (Test-Path "$env:TEMP\Common-win-x64.exe") {
-            $size = (Get-Item "$env:TEMP\Common-win-x64.exe").Length
-            Write-Host "Downloaded installer: $size bytes"
-          } else {
-            throw "Failed to download installer"
-          }
+          Write-Host "Downloaded installer: $((Get-Item "$env:TEMP\Common-win-x64.exe").Length) bytes"
 
       - name: Install Common silently
         shell: pwsh
         run: |
           Write-Host "Installing Common..."
-          # NSIS installers support /S for silent install
-          $process = Start-Process -FilePath "$env:TEMP\Common-win-x64.exe" -ArgumentList "/S" -PassThru -Wait
-          Write-Host "Installer exit code: $($process.ExitCode)"
-          
-          # Give the installer a moment to finish background tasks
+          Start-Process -FilePath "$env:TEMP\Common-win-x64.exe" -ArgumentList "/S" -Wait
           Start-Sleep -Seconds 5
           
-          # Check if Common was installed
-          $expectedPath = "$env:LOCALAPPDATA\Common"
-          if (Test-Path $expectedPath) {
-            Write-Host "Common installed to: $expectedPath"
-            Get-ChildItem $expectedPath -Recurse | Select-Object FullName, Length | Format-Table
+          # Find where it installed
+          $exe = Get-ChildItem -Path "$env:LOCALAPPDATA","$env:ProgramFiles","$env:APPDATA" -Filter "Common.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($exe) {
+            Write-Host "Common installed at: $($exe.FullName)"
+            echo "COMMON_EXE=$($exe.FullName)" >> $env:GITHUB_ENV
           } else {
-            Write-Host "Expected install path not found: $expectedPath"
-            # Try other common locations
-            $altPaths = @(
-              "$env:ProgramFiles\Common",
-              "$env:ProgramFiles(x86)\Common",
-              "$env:APPDATA\Common"
-            )
-            foreach ($path in $altPaths) {
-              if (Test-Path $path) {
-                Write-Host "Found at alternative path: $path"
-                Get-ChildItem $path -Recurse | Select-Object FullName, Length | Format-Table
-              }
-            }
+            throw "Could not find Common.exe after install"
           }
 
-      - name: Check if common CLI is on PATH
+      - name: Check common CLI on PATH
         shell: pwsh
         run: |
-          Write-Host "Checking if 'common' CLI is available..."
-          
-          # Refresh PATH from registry (in case installer modified it)
+          # Refresh PATH
           $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
           
-          # Try to find common
-          $commonPath = Get-Command common -ErrorAction SilentlyContinue
-          if ($commonPath) {
-            Write-Host "Found 'common' at: $($commonPath.Source)"
-            & common --version
+          $cli = Get-Command common -ErrorAction SilentlyContinue
+          if ($cli) {
+            Write-Host "CLI found: $($cli.Source)"
           } else {
-            Write-Host "ERROR: 'common' CLI not found on PATH"
-            Write-Host "Current PATH: $env:Path"
-            
-            # Check if CLI exists in expected location
-            $cliPath = "$env:USERPROFILE\.common-network\bin\common"
-            if (Test-Path $cliPath) {
-              Write-Host "CLI exists at $cliPath but is not on PATH"
-            } elseif (Test-Path "$cliPath.exe") {
-              Write-Host "CLI exists at $cliPath.exe but is not on PATH"
+            Write-Host "WARNING: common CLI not on PATH"
+            $cliPath = "$env:USERPROFILE\.common-network\bin"
+            if (Test-Path "$cliPath\common.exe") {
+              Write-Host "CLI exists at $cliPath but not on PATH - this is a bug"
             } else {
-              Write-Host "CLI not found at expected location: $cliPath"
-              # The CLI might be bundled differently or installed separately
-              Write-Host "Note: The CLI may need to be installed separately via the network installer"
+              Write-Host "CLI not installed yet (may be installed during first run)"
             }
-            
-            # Don't fail yet - the CLI might be installed during first run
-            # exit 1
           }
 
-      - name: Launch Common app and capture startup
+      - name: Launch app and take screenshot
         shell: pwsh
         run: |
-          Write-Host "Launching Common app..."
+          $process = Start-Process -FilePath $env:COMMON_EXE -PassThru
+          Start-Sleep -Seconds 10
           
-          # Find the Common executable
-          $commonExe = Get-ChildItem -Path "$env:LOCALAPPDATA" -Filter "Common.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          
-          if (-not $commonExe) {
-            # Try other locations
-            $searchPaths = @("$env:ProgramFiles", "$env:ProgramFiles(x86)", "$env:APPDATA")
-            foreach ($searchPath in $searchPaths) {
-              $commonExe = Get-ChildItem -Path $searchPath -Filter "Common.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-              if ($commonExe) { break }
-            }
-          }
-          
-          if ($commonExe) {
-            Write-Host "Found Common at: $($commonExe.FullName)"
-            
-            # Start the app
-            $process = Start-Process -FilePath $commonExe.FullName -PassThru
-            Write-Host "Started Common with PID: $($process.Id)"
-            
-            # Let it initialize
-            Start-Sleep -Seconds 10
-            
-            # Check if it's still running
-            if (-not $process.HasExited) {
-              Write-Host "Common is running"
-              
-              # Take a screenshot of the initial state
-              Add-Type -AssemblyName System.Windows.Forms
-              $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-              $bitmap = New-Object System.Drawing.Bitmap($screen.Width, $screen.Height)
-              $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-              $graphics.CopyFromScreen($screen.Location, [System.Drawing.Point]::Empty, $screen.Size)
-              $bitmap.Save("$env:GITHUB_WORKSPACE\screenshot-startup.png")
-              Write-Host "Saved startup screenshot"
-              
-              # Stop the app for now
-              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-            } else {
-              Write-Host "ERROR: Common exited with code: $($process.ExitCode)"
-              exit 1
-            }
+          if (-not $process.HasExited) {
+            Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+            $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap($screen.Width, $screen.Height)
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($screen.Location, [System.Drawing.Point]::Empty, $screen.Size)
+            $bitmap.Save("$env:GITHUB_WORKSPACE\screenshot.png")
+            Stop-Process -Id $process.Id -Force
+            Write-Host "App launched successfully, screenshot saved"
           } else {
-            Write-Host "ERROR: Could not find Common.exe"
-            exit 1
+            throw "App exited immediately with code: $($process.ExitCode)"
           }
 
-      - name: Upload screenshots and logs
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows-test-artifacts
-          path: |
-            ${{ github.workspace }}/screenshot-*.png
-            ${{ env.LOCALAPPDATA }}/Common/logs/**
+          path: screenshot.png
           if-no-files-found: ignore
