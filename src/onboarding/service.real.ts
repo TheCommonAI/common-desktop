@@ -148,6 +148,12 @@ function reason(from: unknown): string {
  */
 function classify(message: string): OnboardingErrorCode {
   const text = message.toLowerCase();
+  // Ahead of the rest, because this one is *written* rather than inferred: the
+  // Rust side gives a missing CLI a sentence of its own — the spawn in
+  // `network_join` — so it is matched on those words rather than guessed at from
+  // a syscall. It has to come before the rules below, which would otherwise file
+  // it as something the user cannot act on.
+  if (/command-line tool/.test(text)) return "cli-missing";
   if (/no space left|not enough (disk )?space|enospc|insufficient disk|disk quota/.test(text)) {
     return "insufficient-disk";
   }
@@ -173,6 +179,7 @@ const SENTENCE: Record<OnboardingErrorCode, string> = {
   unsupported: "This machine can't be used.",
   "permission-denied": "The system refused that.",
   network: "Nothing came back.",
+  "cli-missing": "Common's command-line tool isn't installed.",
   "insufficient-disk": "There isn't enough room.",
   "not-found": "That model isn't available.",
   timeout: "That took too long.",
@@ -1179,7 +1186,15 @@ async function spawnJoin(request: JoinRequest): Promise<void> {
     lan: false,
   });
   if (!started.ok) {
-    throw new OnboardingError("network", "Couldn't start the join.", started.detail);
+    // `network` stays the default — a join that would not start is honestly
+    // that — but the missing CLI is the one failure that has to survive the
+    // trip. Its remedy is a download, and "the network didn't answer" would send
+    // the user to inspect a network this machine never used.
+    throw new OnboardingError(
+      classify(started.detail) === "cli-missing" ? "cli-missing" : "network",
+      "Couldn't start the join.",
+      started.detail,
+    );
   }
   running = { pid: started.value.pid, log: started.value.logPath };
 }

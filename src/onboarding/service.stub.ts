@@ -54,6 +54,7 @@ import { LANES, findModel, fitsHere, gb, modelFor, tierFor } from "./models";
  *   commonStub.options.networkAskLane = null     // the unreachable-ask caption
  *   commonStub.options.gatewayUnreachable = true // the failed verification
  *   commonStub.options.fail = "network"          // a rejection somewhere
+ *   commonStub.options.fail = "cli-missing"      // the install that isn't there
  *   commonStub.options.unreadable = ["memory"]   // the read the user supplies by hand
  *   commonStub.options.unreadable = ["graphics"] // a clause that simply goes missing
  *   commonStub.options.speed = 0                 // no waiting at all
@@ -491,9 +492,21 @@ function joinNetwork(
   j.after(REGISTER_MS + LOAD_MS + ANSWER_MS + CONFIRM_MS, at("confirming"));
   j.after(REGISTER_MS + LOAD_MS + ANSWER_MS + CONFIRM_MS * 2, () => {
     settle(() => {
-      const injected = takeFailure("network") ?? takeFailure("timeout");
+      const injected =
+        takeFailure("network") ?? takeFailure("timeout") ?? takeFailure("cli-missing");
       if (injected) {
-        d.reject(failure(injected, "The network didn't answer."));
+        // The missing CLI is the one rejection here that is not a network
+        // failure, so it does not get the network's sentence — the screen shows
+        // its own and never reads this, but a log that says "the network didn't
+        // answer" about a file that is not on disk is a log that lies.
+        d.reject(
+          failure(
+            injected,
+            injected === "cli-missing"
+              ? "Couldn't start the join."
+              : "The network didn't answer.",
+          ),
+        );
         return;
       }
       // Registered whether or not the gateway could see it: a node that

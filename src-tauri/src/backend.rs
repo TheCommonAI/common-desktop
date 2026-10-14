@@ -86,9 +86,14 @@ fn home_dir() -> Result<PathBuf, String> {
 /// alone, a black box appears and vanishes on every hardware read and on every
 /// answer, which reads as a fault in an app whose whole manner is to be quiet.
 ///
-/// Set here, once, rather than at each call site: there are eleven of them and
-/// the twelfth would be the one that forgot. On every other platform this is
+/// Set here, once, rather than at each call site: there are fifteen of them and
+/// the sixteenth would be the one that forgot. On every other platform this is
 /// just `Command::new`.
+///
+/// Nothing here knows about the batch wrapper `install.ps1` writes, and nothing
+/// here should. `std` already does — see `common_names`, which is where the
+/// reason is written down, because the obvious-looking "fix" of naming `cmd.exe`
+/// here is worse than doing nothing and is the first thing anyone would try.
 fn silent(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let cmd = Command::new(program);
     // A second binding rather than a mutable one, so that the platforms which
@@ -105,6 +110,40 @@ fn silent(program: impl AsRef<std::ffi::OsStr>) -> Command {
         cmd
     };
     cmd
+}
+
+/// A failed launch of the CLI, in the one form the interface can act on.
+///
+/// The single most consequential thing on this side of the boundary is that a
+/// missing `common` and an unreachable gateway arrive at the user as the same
+/// event — a helper that would not start — when the two are cured by opposite
+/// things: one by a download, the other by a network. So this is the one message
+/// in this file that is *written to be recognised* rather than only to be read,
+/// and it is recognised on the words "command-line tool", which is what
+/// `classify` in `service.real.ts` matches to produce the `cli-missing` code. The
+/// phrasing is load-bearing. The path after it is the disclosure line, and it is
+/// the first thing to look at when the `common` on `PATH` is not the one in use.
+///
+/// It lives here, and every site that starts the CLI goes through it, because a
+/// sentence this specific is exactly the kind of thing that survives in the one
+/// place it was written and is forgotten in the other three — and the site that
+/// forgets is the one that reports the missing CLI as a network failure.
+///
+/// `NotFound` is the whole of the distinction, and on Windows it is asked to
+/// carry one thing more than it means: `CreateProcess` says "not found" both
+/// about a file that is not there and about a program it could not be made to
+/// run. Both are the same fact from the user's side — the tool this app means to
+/// run is not runnable here, and no join has left the machine — so the sentence
+/// stands as written for both, and `common_names` is where the one case that
+/// would have made this confusing is dealt with instead.
+fn launch_error(bin: &std::path::Path, error: std::io::Error) -> String {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => format!(
+            "Common's command-line tool is not installed ({})",
+            bin.display()
+        ),
+        _ => format!("couldn't run {}: {error}", bin.display()),
+    }
 }
 
 /// The volume the weights and the partial downloads will land on.
@@ -143,6 +182,48 @@ fn weights_volume(path: &str) -> Result<String, String> {
     }
 }
 
+/// The names the CLI answers to inside the install directory, in the order the
+/// machine is most likely to have one.
+///
+/// The two installers do not agree on the spelling and each writes only its own:
+/// `install.sh` writes an extensionless `common` — a shell script, which is a
+/// program on the platforms that run it that way — while `install.ps1` writes
+/// `common.cmd`, because on Windows the CLI is a Python program and a batch file
+/// is the only form a command line starts unprompted. `common.exe` is what an
+/// MSVC-era install may have produced.
+///
+/// Windows is offered no extensionless candidate on purpose. `CreateProcess`
+/// appends `.exe` to a name with no extension, so returning `common` there could
+/// only ever be asking for a file that does not exist under that name; the batch
+/// spelling is the one that works.
+///
+/// And the spelling is the whole of it. It is tempting to follow it up by having
+/// `silent` name `cmd.exe` itself, on the reasoning that `CreateProcess` cannot
+/// start a `.cmd`. It can — `std` sees to it. When `Command` spawns a program
+/// whose name ends in `.bat` or `.cmd` (case-insensitively, after resolving the
+/// path), it substitutes `command_prompt()` for the program and builds the
+/// command line with `make_bat_command_line`, which produces
+/// `cmd.exe /e:ON /v:OFF /d /c "script" args…`. That function is where the two
+/// genuinely hard parts live: it quotes any argument containing ASCII
+/// punctuation outside `#$*+-./:?@\_`, and it rewrites every `%` as `%%cd:~,%`
+/// so that a `%VAR%` inside a question reaches the script as typed instead of
+/// being expanded — `/e:ON` in the line above exists precisely to enable that
+/// no-op. Nothing here could be improved by reimplementing it, and doing so by
+/// hand would bypass it: a `cmd /C` written in `silent` would hand the command
+/// line back to `cmd.exe` to be re-split, and would have to get the quoting and
+/// the `%` rewrite right a second time, unasked and untested.
+///
+/// `windows` is a parameter rather than a `cfg!` so that a test on any platform
+/// can pin both answers. Windows is where this went wrong and is the platform
+/// least likely to be the one running the suite.
+fn common_names(windows: bool) -> &'static [&'static str] {
+    if windows {
+        &["common.cmd", "common.exe"]
+    } else {
+        &["common"]
+    }
+}
+
 /// The `common` binary, in the order that gives the least surprising answer.
 ///
 /// A `.app` launched from Finder inherits a minimal `PATH` that will not
@@ -160,11 +241,7 @@ fn common_bin() -> PathBuf {
     // binary, the identity and the weights all live under this directory.
     if let Ok(home) = home_dir() {
         let dir = home.join(".common-network").join("bin");
-        // Both spellings, because the installer's own choice is the one that
-        // decides it: `common` is what the CLI's installers have always written
-        // and is what a Windows shell resolves either way, while `common.exe` is
-        // what an MSVC-era install may have produced.
-        for name in ["common", "common.exe"] {
+        for name in common_names(cfg!(windows)) {
             let installed = dir.join(name);
             if installed.is_file() {
                 return installed;
@@ -227,9 +304,7 @@ fn run_common(verb: &str, extra: &[&str], json: bool) -> Result<String, String> 
     // stray escape sequence inside JSON is a parse error with a baffling cause.
     cmd.env("NO_COLOR", "1");
 
-    let out = cmd
-        .output()
-        .map_err(|e| format!("couldn't run {}: {e}", bin.display()))?;
+    let out = cmd.output().map_err(|e| launch_error(&bin, e))?;
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -810,9 +885,7 @@ pub async fn network_ask_local(question: String, model: Option<String>) -> Resul
         cmd.arg("ask").arg(&question);
         cmd.env("NO_COLOR", "1");
 
-        let out = cmd
-            .output()
-            .map_err(|e| format!("couldn't run {}: {e}", bin.display()))?;
+        let out = cmd.output().map_err(|e| launch_error(&bin, e))?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             return Err(if stderr.is_empty() {
@@ -894,9 +967,7 @@ pub async fn network_ask(question: String) -> Result<String, String> {
         // rather than missed.
         let epoch = ASK_EPOCH.load(Ordering::SeqCst);
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("couldn't run {}: {e}", bin.display()))?;
+        let mut child = cmd.spawn().map_err(|e| launch_error(&bin, e))?;
 
         // Both pipes are drained by their own threads for the whole of the wait
         // below. `Command::output` drains them too, but it waits without a way
@@ -934,6 +1005,10 @@ pub async fn network_ask(question: String) -> Result<String, String> {
                     // leaving the child behind would leave it holding a node.
                     let _ = child.kill();
                     let _ = child.wait();
+                    // Not `launch_error`: this child started, and a wait that
+                    // fails is not a missing install however it is spelled. The
+                    // sentence there is reserved for a launch, where the two
+                    // readings it distinguishes are both live.
                     return Err(format!("couldn't run {}: {e}", bin.display()));
                 }
             }
@@ -1030,9 +1105,9 @@ pub async fn network_join(
         cmd.stderr(Stdio::from(log_err));
         cmd.stdin(Stdio::null());
 
-        let child = cmd
-            .spawn()
-            .map_err(|e| format!("couldn't start {}: {e}", bin.display()))?;
+        // The failure that says the least and needs to say the most — see
+        // `launch_error`, where the sentence for a missing CLI is written.
+        let child = cmd.spawn().map_err(|e| launch_error(&bin, e))?;
 
         Ok(JoinStarted {
             pid: child.id(),
@@ -2337,6 +2412,70 @@ mod readiness {
             began.elapsed() < Duration::from_secs(3),
             "a closed loopback port must refuse at once, not time out: {:?}",
             began.elapsed()
+        );
+    }
+}
+
+/* ---------------------------------- launch --------------------------------- */
+
+/// The two facts that decide whether the CLI can be started at all.
+///
+/// Windows is the one platform whose installer writes a spelling no other
+/// installer writes, and the difference between finding it and not is the
+/// difference between a join that works and "couldn't start common: program not
+/// found" — which is the whole of the Windows failure, and which reads to the
+/// user as the network having gone quiet rather than as a missing file.
+///
+/// Nothing here can exercise `CreateProcess`, so what is pinned is the pair of
+/// decisions that feed it: which spellings are looked for, and which sentence a
+/// failed launch produces. The third decision — what to do with a `.cmd` once it
+/// has been found — is not this file's to make and is not tested here; `std`
+/// makes it, and `common_names` says where.
+#[cfg(test)]
+mod launch {
+    use super::*;
+
+    #[test]
+    fn a_missing_cli_is_named_as_a_missing_cli_and_not_as_a_failed_join() {
+        let bin = std::path::Path::new(r"C:\Users\A B\.common-network\bin\common.cmd");
+        let missing = launch_error(bin, std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(
+            missing.contains("command-line tool"),
+            "service.real.ts reads this sentence as `cli-missing` on those two words and on no others: {missing}"
+        );
+        assert!(
+            missing.contains("common.cmd"),
+            "the path is what tells the `common` that was run from the one on PATH: {missing}"
+        );
+
+        let refused = launch_error(
+            bin,
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        );
+        assert!(
+            !refused.contains("command-line tool"),
+            "only a file that is not there is a missing install; a refused launch is the same \
+             event with a different remedy, and the interface must not offer a download for it"
+        );
+    }
+
+    #[test]
+    fn windows_is_offered_the_spelling_its_own_installer_writes_first() {
+        let on_windows = common_names(true);
+        assert_eq!(
+            on_windows.first().copied(),
+            Some("common.cmd"),
+            "the name the Windows installer writes is the name that has to be found"
+        );
+        assert!(
+            !on_windows.contains(&"common"),
+            "CreateProcess appends .exe, so a bare `common` is a candidate that cannot exist"
+        );
+
+        assert_eq!(
+            common_names(false),
+            &["common"][..],
+            "install.sh writes the extensionless name, and only that"
         );
     }
 }
