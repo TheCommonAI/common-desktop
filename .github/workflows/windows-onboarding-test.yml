@@ -30,16 +30,39 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "Installing Common..."
-          Start-Process -FilePath "$env:TEMP\Common-win-x64.exe" -ArgumentList "/S" -Wait
+          $proc = Start-Process -FilePath "$env:TEMP\Common-win-x64.exe" -ArgumentList "/S" -PassThru -Wait
+          Write-Host "Installer exit code: $($proc.ExitCode)"
           Start-Sleep -Seconds 5
           
-          # Find where it installed
-          $exe = Get-ChildItem -Path "$env:LOCALAPPDATA","$env:ProgramFiles","$env:APPDATA" -Filter "Common.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          # Debug: show what's in common install locations
+          Write-Host "=== Searching for Common.exe ==="
+          $searchPaths = @(
+            "$env:LOCALAPPDATA\Programs",
+            "$env:LOCALAPPDATA",
+            "$env:APPDATA",
+            "$env:ProgramFiles",
+            "${env:ProgramFiles(x86)}"
+          )
+          foreach ($p in $searchPaths) {
+            if (Test-Path $p) {
+              Write-Host "Checking $p..."
+              Get-ChildItem -Path $p -Filter "Common*" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                Write-Host "  Found dir: $($_.FullName)"
+                Get-ChildItem $_.FullName -Filter "*.exe" -ErrorAction SilentlyContinue | ForEach-Object {
+                  Write-Host "    EXE: $($_.FullName)"
+                }
+              }
+            }
+          }
+          
+          # Find Common.exe
+          $exe = Get-ChildItem -Path $searchPaths -Filter "Common.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($exe) {
             Write-Host "Common installed at: $($exe.FullName)"
             echo "COMMON_EXE=$($exe.FullName)" >> $env:GITHUB_ENV
           } else {
-            throw "Could not find Common.exe after install"
+            Write-Host "ERROR: Could not find Common.exe"
+            exit 1
           }
 
       - name: Check common CLI on PATH
