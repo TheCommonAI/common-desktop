@@ -95,22 +95,39 @@ export default function DownloadModel({ flow, update, next, back }: ScreenProps)
     statement = "That's the model.";
     parts = [label, "ready"];
   } else if (state.status === "error") {
+    // What went wrong, in the words of the layer that failed. This used to be
+    // the fixed sentence "The download stopped.", which is wrong for the one
+    // failure that is not a stopped transfer — ollama not being up at all, where
+    // nothing ever started and so nothing stopped.
+    const moved = progress?.receivedBytes ?? 0;
     focusKey = "error";
-    statement = "The download stopped.";
+    statement = state.error.message;
     parts = [
-      total === null
-        ? null
-        : `${formatTransfer(progress?.receivedBytes ?? 0, total)} is on disk`,
-      "resuming will be quick",
+      // Both of these are claims about a partial file, so both are withheld when
+      // there is no partial file. "Resuming will be quick" is a promise about a
+      // retry that would begin at zero, which is the one thing it cannot be.
+      moved > 0 && total !== null ? `${formatTransfer(moved, total)} is on disk` : null,
+      moved > 0 ? "resuming will be quick" : null,
       state.error.detail ?? null,
     ];
     gauged = true;
   } else if (state.status === "running") {
     const current = state.progress;
-    focusKey = current?.state === "paused" ? "paused" : current?.state === "verifying" ? "verifying" : "running";
-    statement = `Downloading ${label}.`;
+    focusKey =
+      current?.state === "waiting"
+        ? "waiting"
+        : current?.state === "paused"
+          ? "paused"
+          : current?.state === "verifying"
+            ? "verifying"
+            : "running";
+    statement = current?.state === "waiting" ? "Waiting for Ollama." : `Downloading ${label}.`;
     if (current === null) {
       parts = ["Starting…"];
+    } else if (current.state === "waiting") {
+      // Seconds so far, and they move, which is the whole of their job: this is
+      // the state a cold first run spends its first half-minute in.
+      parts = [`starting it — ${current.waitedSeconds ?? 0}s`];
     } else if (current.state === "verifying") {
       parts = ["Checking the file…"];
     } else if (current.state === "paused") {
@@ -181,14 +198,19 @@ export default function DownloadModel({ flow, update, next, back }: ScreenProps)
       </>
     );
   } else if (state.status === "running") {
+    const mode = state.progress?.state;
+    // A wait has nothing to hold. There is no transfer to pause, only a daemon
+    // coming up, so Cancel is the whole of what it can be told.
+    const middle =
+      mode === "waiting" ? null : mode === "paused" ? (
+        <Control onClick={resume}>Resume</Control>
+      ) : (
+        <Control onClick={pause}>Pause</Control>
+      );
     controls =
-      state.progress?.state === "verifying" ? undefined : (
+      mode === "verifying" ? undefined : (
         <>
-          {state.progress?.state === "paused" ? (
-            <Control onClick={resume}>Resume</Control>
-          ) : (
-            <Control onClick={pause}>Pause</Control>
-          )}
+          {middle}
           <Control onClick={() => setConfirming(true)} quiet>
             Cancel
           </Control>

@@ -351,6 +351,8 @@ function downloadModel(
         ? null
         : Math.max(0, Math.round((totalBytes - receivedBytes) / REPORTED_RATE)),
       state,
+      // The stub never waits for anything: it has no daemon to wait for.
+      waitedSeconds: null,
     });
   };
 
