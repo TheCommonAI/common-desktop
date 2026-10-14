@@ -159,11 +159,9 @@ pub fn run() {
             backend::network_ask,
             backend::network_ask_stop,
             backend::network_join,
-            // Not a `common` verb: the catalogue lives at the gateway, and the
-            // join log lives on disk. Both exist so that a download knows which
-            // tag to pull and a failed join has something to say.
+            // Not a `common` verb: the catalogue lives at the gateway, so that a
+            // download knows which tag to pull.
             backend::network_catalogue,
-            backend::network_join_log,
             // What the `join` this app started is doing. The join outlives the call
             // that made it, so what is held is its handle and not its answer.
             backend::network_join_state,
