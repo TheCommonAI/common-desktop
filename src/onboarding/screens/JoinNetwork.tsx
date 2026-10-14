@@ -130,15 +130,29 @@ export default function JoinNetwork({ flow, next, back }: ScreenProps) {
       </>
     );
   } else if (state.status === "error") {
-    statement = "The network didn't answer.";
-    caption = [
-      state.error.code === "timeout"
-        ? "It took too long to answer"
-        : state.error.code === "network"
-          ? "Nothing came back from the gateway"
-          : "Something went wrong at this end",
-      state.error.detail ?? null,
-    ];
+    // The one failure on this screen that is not a network failure. A missing
+    // `common` never left this machine — nothing was asked of any network — so
+    // calling it one would send the user to inspect a gateway that was never
+    // reached. It gets its own sentence and its own clause, and no detail line:
+    // the detail is the same sentence with a path on it, and the path is in the
+    // log the Share control carries.
+    const missingCli = state.error.code === "cli-missing";
+    statement = missingCli
+      ? "Common isn't fully installed."
+      : "The network didn't answer.";
+    caption = missingCli
+      ? [
+          "Its command-line tool isn't installed",
+          "It arrives with the network's own installer, not with this app",
+        ]
+      : [
+          state.error.code === "timeout"
+            ? "It took too long to answer"
+            : state.error.code === "network"
+              ? "Nothing came back from the gateway"
+              : "Something went wrong at this end",
+          state.error.detail ?? null,
+        ];
     controls = (
       <>
         <Control onClick={start} arrow>

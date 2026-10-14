@@ -70,6 +70,10 @@ export type OnboardingErrorCode =
   | "permission-denied"
   /** Offline, DNS, TLS, or the far side is down. */
   | "network"
+  /** The `common` CLI the app runs is not on this machine. The join never left
+   *  the machine, so this is not a network failure and must never be shown as
+   *  one: the remedy is an install, not a retry. */
+  | "cli-missing"
   /** Not enough room for the weights. Carries the requirement in `detail`. */
   | "insufficient-disk"
   /** The model id is not available from any mirror. */
