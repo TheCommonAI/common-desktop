@@ -161,7 +161,15 @@ function classify(message: string): OnboardingErrorCode {
     return "permission-denied";
   }
   if (/timed out|timeout|deadline exceeded|took too long/.test(text)) return "timeout";
-  if (/not found|does not exist|no such|unknown model|404/.test(text)) return "not-found";
+  // A bare `not found` used to sit here, and it was a trap. The Windows wrapper
+  // in `~/.common-network/bin/common.cmd` printed a false "python not found on
+  // PATH" whenever its interpreter chain fell through, so a join that failed for
+  // any reason at all — an unreachable peer, a bad argument — was filed as a
+  // missing model and the screen blamed the catalogue. A model that is really
+  // absent names itself, so require the word.
+  if (/unknown model|no such model|model not found|does not exist|\b404\b/.test(text)) {
+    return "not-found";
+  }
   if (
     /could not resolve|nodename nor servname|connection refused|network is unreachable|no route to host|can't reach|cannot reach|unreachable|offline|tls|certificate|bad gateway|\b50[234]\b|eof|failed to fetch|load failed/.test(
       text,
