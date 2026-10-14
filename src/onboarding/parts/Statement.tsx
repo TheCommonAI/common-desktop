@@ -22,10 +22,13 @@ export interface StatementProps {
    */
   caption?: ReactNode | readonly ReactNode[];
   /**
-   * The one thing a screen may put between the clause and the controls, and
-   * only the download screen does: a hairline gauge, for the one step whose
-   * subject is a duration. It is a named slot rather than free space — a screen
-   * can add a gauge or nothing, not a table.
+   * The one thing a screen may put between the clause and the controls: the mark
+   * for "this is working and you are waiting". The download draws it as a hairline
+   * gauge, because that step's subject is a duration and a duration can be
+   * measured; the join draws the app's three dots, because that step's subject is
+   * a promise and all there is to say about it is that it is still being kept. Two
+   * users of one slot, and it stays a named slot rather than free space: a screen
+   * can put a mark there or nothing, not a table.
    */
   gauge?: ReactNode;
   /** One line of text. The control that advances is in full ink; everything

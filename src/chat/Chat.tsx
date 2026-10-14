@@ -3,6 +3,7 @@ import Composer from "./Composer";
 import Settings from "./Settings";
 import Sidebar from "./Sidebar";
 import Transcript from "./Transcript";
+import UpdatePrompt from "./UpdatePrompt";
 import WhatsNew from "./WhatsNew";
 import {
   loadConversations,
@@ -119,11 +120,18 @@ export default function Chat() {
   //
   // Two pieces of state rather than one, because they answer questions with
   // different costs: the version is a local read that is always available, and
-  // the offer depends on a check that is rationed to once a day. Settings has to
-  // be able to name the version it would be moving off on a day the check did not
-  // run.
+  // the offer depends on a check that is rationed. Settings has to be able to name
+  // the version it would be moving off at a moment the check did not run.
   const [offer, setOffer] = useState<UpdateOffer>({ kind: "unknown" });
   const [version, setVersion] = useState("");
+
+  // The version the user has waved away, if any, and only for as long as this launch
+  // lasts. Nothing is written to disk, which is the whole of "ask again next launch":
+  // a dismissal that outlived the process would be a person who said "later" once and
+  // then never heard about the release again, which is the state this card exists to
+  // get out of. A later release re-asks on its own, since the version it names is not
+  // the one that was dismissed.
+  const [wavedAway, setWavedAway] = useState<string | null>(null);
 
   const active = chats.list.find((chat) => chat.id === chats.activeId) ?? chats.list[0];
 
@@ -229,8 +237,8 @@ export default function Chat() {
     // always said so — `updates.INTERVAL_MS` argues that "a laptop that has been
     // asleep for a week should learn about an update when it wakes and the user
     // looks at it" — but until now nothing woke it up to look. Unforced, so the
-    // day-throttle still rations the request; this is the moment the answer may
-    // have changed, not a reason to ask more often.
+    // throttle still rations the request; this is the moment the answer may have
+    // changed, not a reason to ask more often.
     const onWake = () => {
       if (document.visibilityState === "visible") lookForUpdate(setOffer);
     };
@@ -242,7 +250,7 @@ export default function Chat() {
   }, []);
 
   /**
-   * The card's own button, which gets past the day-throttle.
+   * The card's own button, which gets past the throttle.
    *
    * Not guarded by `live`: React 19 dropped the warning about setting state on an
    * unmounted component, and this is only reachable from a card inside this
@@ -455,6 +463,47 @@ export default function Chat() {
     setFresh(null);
   }, [fresh]);
 
+  /** The version an update is about, or `null` when the offer names none. Only
+   *  three of the kinds carry one, and `restarting` is not among them. */
+  const offeredVersion =
+    offer.kind === "available" || offer.kind === "downloading" || offer.kind === "staged"
+      ? offer.version
+      : null;
+
+  /**
+   * Whether the update card is on screen.
+   *
+   * Two conditions, and both are doing work.
+   *
+   * `fresh === null` is the collision guard. The first launch after an update is the
+   * one moment at which both of this app's self-opening cards want the screen: the
+   * notes for the version that just arrived, and — because a check runs on the same
+   * mount — the offer of whatever has been released since. Two modals is not a thing
+   * that can happen, so one of them has to yield, and it is not the notes. They are
+   * about the version the user is now running, which no later moment will be about
+   * again; the offer will still be true in a minute.
+   *
+   * `restarting` opens the card even though it names no version, because reaching
+   * that state with the card closed is ordinary rather than exceptional: the rail's
+   * bar carries `Restart` and so does `Settings`, and either of them can be pressed
+   * while this card is shut. The button then looks unpressed for the second between
+   * the click and the process going, and the answer to an unpressed button is another
+   * click — which is the whole of why `UpdateOffer` has a `restarting` at all.
+   */
+  const updateOpen =
+    fresh === null &&
+    (offer.kind === "restarting" || (offeredVersion !== null && offeredVersion !== wavedAway));
+
+  /** Wave the offer away. Only a version can be dismissed, and only for this launch.
+   *
+   *  Reachable by `Later`, by Escape, and by the dialog's own close — all three are
+   *  the same answer, so all three land here. The rail's bar is deliberately not
+   *  dismissed with it: it is the affordance rather than the announcement, and a
+   *  release the user has deferred is one they still need a way to act on. */
+  const dismissUpdate = useCallback(() => {
+    if (offeredVersion !== null) setWavedAway(offeredVersion);
+  }, [offeredVersion]);
+
   return (
     <section className="chat" aria-label="Chat">
       <Sidebar
@@ -499,6 +548,18 @@ export default function Chat() {
         version={fresh === null ? "" : fresh.version}
         notes={fresh === null ? [] : fresh.notes}
         onClose={dismissWhatsNew}
+      />
+      {/* The card the app opens for the other direction: not what this version
+          brought, but the one waiting. Same three properties as the notes card —
+          kept mounted, opened by the app rather than by a click, and yielding to the
+          notes on the one launch where both would want the screen. See `updateOpen`
+          above for the collision, and `UpdatePrompt` for why it exists at all. */}
+      <UpdatePrompt
+        open={updateOpen}
+        offer={offer}
+        onInstall={installUpdate}
+        onRestart={restartForUpdate}
+        onClose={dismissUpdate}
       />
     </section>
   );

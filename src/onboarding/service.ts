@@ -74,6 +74,11 @@ export type OnboardingErrorCode =
    *  the machine, so this is not a network failure and must never be shown as
    *  one: the remedy is an install, not a retry. */
   | "cli-missing"
+  /** The join ran and then stopped, taking its attempts with it. Like
+   *  `cli-missing` this is a failure on *this* machine and must never be shown
+   *  as a network one — whether the network ever heard from it is a separate
+   *  question with its own evidence, and `detail` carries that evidence. */
+  | "join-stopped"
   /** Not enough room for the weights. Carries the requirement in `detail`. */
   | "insufficient-disk"
   /** The model id is not available from any mirror. */

@@ -180,6 +180,7 @@ const SENTENCE: Record<OnboardingErrorCode, string> = {
   "permission-denied": "The system refused that.",
   network: "Nothing came back.",
   "cli-missing": "Common's command-line tool isn't installed.",
+  "join-stopped": "The join stopped on this machine.",
   "insufficient-disk": "There isn't enough room.",
   "not-found": "That model isn't available.",
   timeout: "That took too long.",
@@ -1133,10 +1134,19 @@ async function status(): Promise<Status> {
  *
  * `common join` does not return — it replaces itself with `join.py`, which
  * pulls, serves and then loops for as long as the machine is contributing — so
- * the pid is the only handle there is on it, and it is kept here rather than
- * returned because a second call to `joinNetwork` is a retry and not a second
- * node. */
-let running: { pid: number; log: string } | null = null;
+ * whether it is still working is a question about a process and not about a
+ * file. The handle that answers it lives in Rust, because the answer differs by
+ * platform and the platform is known there; what is kept here is only the fact
+ * that an attempt was made, so that a second call to `joinNetwork` is a retry and
+ * not a second node. */
+let joined = false;
+
+/** What became of the join this app started, as `backend.rs` reads it. */
+type JoinState =
+  | { state: "none" }
+  | { state: "running" }
+  | { state: "handedOff" }
+  | { state: "ended"; code: string };
 
 /** How many times a join that died young is started again before the flow gives
  *  up on it.
@@ -1144,25 +1154,44 @@ let running: { pid: number; log: string } | null = null;
  *  Three, because the failure being retried is a coin flip rather than a broken
  *  thing: `join.py` gives its catalogue fetch ten seconds and the gateway has
  *  been measured at eight, so one loss is ordinary and three in a row is
- *  evidence. Only a *confirmed* death spends an attempt — see the wait in
+ *  evidence. Only a *confirmed* end spends an attempt — see the wait in
  *  `joinNetwork` — so a slow join is never cut short by this, and the attempts
- *  are spread over a dying join's twelve seconds rather than the whole budget. */
+ *  are spread over a dying join's twelve seconds rather than the whole budget.
+ *
+ *  What a "confirmed end" is depends on the platform, which is the thing worth
+ *  being careful about here: on Windows it can only ever be a wrapper that failed
+ *  to hand off. A join that starts and then dies out there is not something this
+ *  machine can see, so it is not retried — it is waited on, and then reported. */
 const MAX_JOIN_ATTEMPTS = 3;
 
-async function joinIsRunning(): Promise<boolean> {
-  if (running === null) return false;
+/** What the join this app started is doing — `null` when the read itself failed.
+ *
+ *  `null` and `{ state: "ended" }` are deliberately different answers, and
+ *  conflating them is the mistake this function replaced. A read that failed is
+ *  not knowledge of an end, and treating it as one spends a retry on a join that
+ *  may be working — which puts a second `join.py` on the worker's port. The end
+ *  this is built to notice is a *confirmed* one.
+ *
+ *  Which of the four states mean what is the platform's business, and is settled
+ *  where the platform is known: `finished` in `backend.rs`, which is also where the
+ *  reason `handedOff` exists at all is written down. On Windows the program this app
+ *  holds is a batch wrapper that hands off and leaves, so a clean exit there is the
+ *  ordinary way a join *starts* — read as a death, it took a friend's live node off
+ *  the network and put "the network didn't answer" on screen about it. */
+async function joinState(): Promise<JoinState | null> {
+  // Nothing was started, so Rust has no handle to ask about. Answered here rather
+  // than as `null`, because the two are read differently: this one may spawn, and
+  // `null` may not.
+  if (!joined) return { state: "none" };
   try {
-    const alive = await invoke<boolean>("process_running", { pid: running.pid });
-    if (!alive) running = null;
-    return alive;
+    return await invoke<JoinState>("network_join_state");
   } catch {
-    // Not knowing whether it is alive is not the same as knowing it is not. The
-    // status read that follows is the deciding evidence either way.
-    return false;
+    // The read, not the process. See above: not knowing is not knowing it stopped.
+    return null;
   }
 }
 
-/** Start one `common join` and keep its pid.
+/** Start one `common join`, and keep nothing of it but the fact that it started.
  *
  *  A function rather than the one block it used to be, because the retry path
  *  starts it again after a death. `join.py` reclaims its own node from the token
@@ -1170,7 +1199,7 @@ async function joinIsRunning(): Promise<boolean> {
  *  this machine re-registering and not a duplicate node — which is the same
  *  reason the guard before it is allowed to spawn at all. */
 async function spawnJoin(request: JoinRequest): Promise<void> {
-  const started = await read<{ pid: number; logPath: string }>("network_join", {
+  const started = await read<null>("network_join", {
     // The catalogue id, not the ollama tag: `join.py` resolves the tag from
     // the catalogue itself, and passing the id is what puts a ladder id into
     // `identity.catalogue_id` — so the node is filed under the model the
@@ -1196,7 +1225,11 @@ async function spawnJoin(request: JoinRequest): Promise<void> {
       started.detail,
     );
   }
-  running = { pid: started.value.pid, log: started.value.logPath };
+  // Set last, on the only path where a process was in fact started. It is what
+  // `joinState` reads first: with no attempt made there is no handle in Rust to
+  // ask about, and "nothing was started" is a different answer from "it has
+  // stopped" — the first would spend a retry, the second is the one that should.
+  joined = true;
 }
 
 /** The tail of the join's log, as the disclosure line under a failure. This is
@@ -1262,9 +1295,12 @@ function joinNetwork(request: JoinRequest, opts?: ProgressOptions<JoinProgress>)
      *
      * Three cases, and only the middle one is subtle.
      *
-     * — A join **this app started** and that is still alive is reused. That is the
+     * — A join **this app started and has not seen end** is reused. That is the
      *   retry path: a `"confirming"` that did not come good must not put a second
-     *   `join.py` on the same port.
+     *   `join.py` on the same port. It is asked as "not ended" rather than as
+     *   "alive" because on Windows the process this app holds is a wrapper that
+     *   hands off and leaves — so it has always already ended, and a question
+     *   phrased as "is it alive" can only ever answer no. See `joinState`.
      *
      * — An identity **and** a gateway that can reach it is reused. Checking the
      *   identity alone would be wrong, and this is the hole the second clause
@@ -1278,7 +1314,9 @@ function joinNetwork(request: JoinRequest, opts?: ProgressOptions<JoinProgress>)
      * — Otherwise, spawn. Which is the fresh case, and also the stale one.
      */
     const known = await status();
-    const already = (await joinIsRunning()) || (known.nodeId !== null && known.node?.healthy === true);
+    const start = await joinState();
+    const already = (start !== null && start.state !== "none" && start.state !== "ended") ||
+      (known.nodeId !== null && known.node?.healthy === true);
     if (!already) await spawnJoin(request);
 
     /**
@@ -1296,10 +1334,15 @@ function joinNetwork(request: JoinRequest, opts?: ProgressOptions<JoinProgress>)
      *
      * Which is why a death is retried here instead of surfacing as an error. A
      * join dies young on the far side's slowness rather than this machine's, and
-     * the cure for that is another attempt — spent only on a *confirmed* death,
-     * since `joinIsRunning` answers false only once the pid is gone, so a join
-     * that is merely slow keeps its attempt and keeps its port. See
+     * the cure for that is another attempt — spent only on a *confirmed* end, so
+     * a join that is merely slow keeps its attempt and keeps its port. See
      * `MAX_JOIN_ATTEMPTS`.
+     *
+     * On Windows "confirmed end" is narrower than it sounds, and that is the
+     * point: the wrapper's exit says nothing about the join, so the only end this
+     * loop can witness there is a wrapper that failed to hand off. Everything
+     * after that is the gateway's to notice — which is what the sentence below the
+     * log has always claimed, and what this loop used to contradict.
      *
      * **loading-model** and **test-prompt** are the same wait seen two ways, and
      * which one is shown is decided by whether the model is already in memory —
@@ -1324,17 +1367,25 @@ function joinNetwork(request: JoinRequest, opts?: ProgressOptions<JoinProgress>)
         break;
       }
 
-      // Nothing of this app's is serving: either the join died — the pid is gone,
-      // and `joinIsRunning` has just cleared it — or the gateway is listing a node
-      // it can no longer reach with no join of ours behind it. Both want the same
-      // answer, and a join that is still running never reaches here, so this
-      // cannot put a second `join.py` on the worker's port.
-      if (!(await joinIsRunning())) {
+      // Nothing of this app's is serving, and — unlike every other reading on this
+      // line — that is now something this loop has actually been told rather than
+      // inferred: the joined process has ended without handing off, which is the
+      // only kind of end a wrapper that has done its job never produces. A join
+      // that is still working, or that has handed off and carried on out of sight,
+      // never reaches here, so this cannot put a second `join.py` on the worker's
+      // port. A read that failed is not an end and does not come here at all.
+      const now = await joinState();
+      if (now !== null && now.state === "ended") {
         if (attempts >= MAX_JOIN_ATTEMPTS) {
+          // Not `network`. This machine started a join, watched it stop, and gave
+          // up after three — the gateway was never asked and never refused, so
+          // the sentence for an unanswered network is a lie here, and the one the
+          // log below is there to disprove. What is left to say is narrower and
+          // true: the process ended, and this is how.
           throw new OnboardingError(
-            "network",
-            SENTENCE.network,
-            (await joinLog()) || `the join exited ${attempts} times`,
+            "join-stopped",
+            SENTENCE["join-stopped"],
+            (await joinLog()) || `the join ${now.code}, ${attempts} times`,
           );
         }
         attempts += 1;
@@ -1343,14 +1394,17 @@ function joinNetwork(request: JoinRequest, opts?: ProgressOptions<JoinProgress>)
 
       if (Date.now() > DEADLINE) {
         // The one failure here that is a failure: nothing reachable after four
-        // minutes. Whether the process is alive decides which of the two sentences
-        // the disclosure line should carry — but both are the log's words, not this
-        // file's guess.
-        const alive = await joinIsRunning();
+        // minutes. Which sentence it gets is decided by what the *gateway* said
+        // rather than by what this machine thinks of itself. A node the gateway is
+        // listing is one it has heard from — it registered, and it cannot be reached
+        // — which is a different failure from silence and needs different words.
+        // Asking the process instead is what put "nothing came back from the
+        // gateway" on screen for a node the gateway was listing.
+        const heard = current.nodeId !== null;
         throw new OnboardingError(
-          alive ? "timeout" : "network",
-          SENTENCE[alive ? "timeout" : "network"],
-          (await joinLog()) || (alive ? "the join is still running" : "the join exited"),
+          heard ? "timeout" : "network",
+          SENTENCE[heard ? "timeout" : "network"],
+          (await joinLog()) || (heard ? "the gateway knows this node but cannot reach it" : "nothing registered"),
         );
       }
       await wait(1000);

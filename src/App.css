@@ -350,7 +350,10 @@ body {
   font-weight: 400;
 }
 
-/* Only the download has one, and only while its subject is a duration. */
+/* Two screens fill this slot and each fills it with the app's own mark for work in
+   progress: the download with the hairline gauge, while its subject is a duration,
+   and the join with the three dots, while its subject is a promise with nothing yet
+   to measure. The gap is from the clause above. */
 .sheet__gauge {
   margin-top: 1.6rem;
 }
@@ -1308,10 +1311,12 @@ body {
   color: var(--ink-quiet);
 }
 
-/* The three dots, drawn — see `ThinkingMark.tsx` for what they are and why they
-   are a canvas. On its own line above the sentence rather than at the end of it:
-   at forty-eight pixels tall it is a mark, and a mark set inside a line of text
-   would push that line's box apart to hold it.
+/* The three dots, drawn — see `ThinkingMark.tsx` for what they are, why they are a
+   canvas, and the two screens that show them. On its own line above the sentence in
+   the chat rather than at the end of it: at forty-eight pixels tall it is a mark, and
+   a mark set inside a line of text would push that line's box apart to hold it. On the
+   join it sits in the gauge slot under the clause, where there is no sentence for it
+   to push apart.
    Sized here and backed at the display's ratio in the component, so the pencil
    stays sharp on a Retina panel. Left unmargined horizontally on purpose — the
    dots are held eleven pixels inside the canvas so they are never clipped, and
@@ -1673,33 +1678,40 @@ body {
   min-height: 0;
 }
 
-/* --- what's new -------------------------------------------------------------
+/* --- the two self-opening cards ---------------------------------------------
 
-   The card that opens itself, once, on the first launch after an update. It is
-   `Settings`'s surface and `Settings`'s construction — a `<dialog>`, `showModal`,
-   `::backdrop`, the same hairline and the same 14px — and that is the point: the two
-   are the same kind of object, and a second idiom for "a card over the conversation"
-   would be a second thing for the user to learn.
+   What's new, and the offer of the next one. Both open themselves — the first on the
+   first launch after an update, the second the moment a check finds a release — and
+   they are `Settings`'s surface and `Settings`'s construction: a `<dialog>`,
+   `showModal`, `::backdrop`, the same hairline and the same 14px. That is the point.
+   The two are the same kind of object, and a second idiom for "a card over the
+   conversation" would be a second thing for the user to learn — so the frame, the
+   title's treatment and the row of controls are written once below and worn by both,
+   rather than restated and left to drift.
 
-   Three things differ, and each is because this one is read rather than used.
+   What differs is only ever about what is inside. The notes card is wider: its notes
+   are four whole sentences, and at the settings card's 26rem each of them wraps three
+   times. 32rem is where a sentence of that length lands in two lines in this face,
+   without the measure running past the point where the eye loses its place on the way
+   back to the left. The update card holds one sentence and no notes, and a 32rem
+   column around one line is a card with a hole in it, so it sets its own narrower
+   width below.
 
-   It is wider. The notes are four whole sentences, and at the settings card's 26rem
-   each of them wraps three times. 32rem is where a sentence of that length lands in
-   two lines in this face, without the measure running past the point where the eye
-   loses its place on the way back to the left.
+   Neither has the settings card's globe, which has nothing to say about a version
+   number.
 
-   It has no globe — the settings card's one piece of machinery, which has nothing to
-   say about a version number.
-
-   And it takes focus on its heading rather than on its first control, which is
-   `Settings`'s arrangement for `Settings`'s reason and more so here: the only control
-   is at the bottom, so a reader that opened at the first focusable thing would begin
-   this card at its last word, and the notes would never be read at all. */
-.whatsnew {
+   Both take focus on their heading rather than on their first control, which is
+   `Settings`'s arrangement for `Settings`'s reason and more so here: the controls are
+   at the bottom, so a reader that opened at the first focusable thing would begin the
+   card at its last word, and the notes would never be read at all. */
+.whatsnew,
+.updateprompt {
   width: min(32rem, calc(100vw - 3rem));
   max-height: 78vh;
   /* A valve, not a scroll: the notes are four sentences and this only comes into play
-     in a window too short to hold them. */
+     in a window too short to hold them. The update card inherits it and never needs
+     it — three lines of card in a window that cannot hold three lines is a window with
+     a different problem. */
   overflow-y: auto;
   padding: 1.5rem;
   border: 0;
@@ -1709,13 +1721,14 @@ body {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--ink) 16%, transparent);
 }
 
-.whatsnew::backdrop {
+.whatsnew::backdrop,
+.updateprompt::backdrop {
   background: color-mix(in srgb, #000 45%, transparent);
 }
 
 /* `.settings__title`'s treatment exactly — same face, same size, same tracking, same
-   quiet ink. The two cards are the same kind of thing, and one of them announcing
-   itself more loudly than the other would be a claim about which one matters. */
+   quiet ink. All three are the same kind of thing, and one of them announcing itself
+   more loudly than the others would be a claim about which one matters. */
 .whatsnew__title {
   margin: 0;
   font: 700 0.8125rem/1.4 var(--font-body);
@@ -1728,8 +1741,35 @@ body {
    a control and carries no action, and a ring around a word nobody can press only
    looks like a control that has gone wrong. */
 .whatsnew__title:focus,
-.whatsnew__title:focus-visible {
+.whatsnew__title:focus-visible,
+.updateprompt__title:focus,
+.updateprompt__title:focus-visible {
   outline: none;
+}
+
+/* --- the update card ---------------------------------------------------------
+
+   Narrower than the notes card, and it is the whole of the difference: this one says
+   one sentence and asks one question, and a 32rem column holding a line and a half is
+   a card shaped like the space it is not using. 23rem is where `Common 0.2.5 is
+   available.` sits on one line in this face, with the two controls under it and room
+   to breathe. */
+.updateprompt {
+  width: min(23rem, calc(100vw - 3rem));
+}
+
+/* The version, and the subject of the card — so it is set the way the notes card sets
+   its version, in the display face, rather than the way both cards set their quiet
+   uppercase eyebrows. There is no eyebrow here and nothing above it: the sentence is
+   the heading, and giving it a label of its own would be a second thing saying less
+   than the first. */
+.updateprompt__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  font-weight: 400;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
 }
 
 /* The version, and the biggest thing on the card.
@@ -1780,7 +1820,8 @@ body {
   background: color-mix(in srgb, var(--ink) 30%, transparent);
 }
 
-.whatsnew__controls {
+.whatsnew__controls,
+.updateprompt__controls {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem 1.5rem;

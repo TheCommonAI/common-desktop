@@ -492,19 +492,31 @@ function joinNetwork(
   j.after(REGISTER_MS + LOAD_MS + ANSWER_MS + CONFIRM_MS, at("confirming"));
   j.after(REGISTER_MS + LOAD_MS + ANSWER_MS + CONFIRM_MS * 2, () => {
     settle(() => {
+      // `cli-missing` and `join-stopped` are the two rejections here that are not
+      // network failures, so neither gets the network's sentence. The screen shows
+      // its own and never reads this — but a log that says "the network didn't
+      // answer" about a file that is not on disk, or about a process that stopped on
+      // this machine, is a log that lies, and the log is the thing a user sends.
       const injected =
-        takeFailure("network") ?? takeFailure("timeout") ?? takeFailure("cli-missing");
+        takeFailure("network") ??
+        takeFailure("timeout") ??
+        takeFailure("cli-missing") ??
+        takeFailure("join-stopped");
       if (injected) {
-        // The missing CLI is the one rejection here that is not a network
-        // failure, so it does not get the network's sentence — the screen shows
-        // its own and never reads this, but a log that says "the network didn't
-        // answer" about a file that is not on disk is a log that lies.
+        const stopped = injected === "join-stopped";
         d.reject(
           failure(
             injected,
             injected === "cli-missing"
               ? "Couldn't start the join."
-              : "The network didn't answer.",
+              : stopped
+                ? "The join stopped on this machine."
+                : "The network didn't answer.",
+            // The exit code is what the real path puts on this line, and the stopped
+            // screen has a caption slot for it. Without one the preview would show
+            // that slot empty, which reads as a screen that is broken rather than as
+            // a detail that is genuinely absent.
+            stopped ? "the join exit code 1" : undefined,
           ),
         );
         return;
