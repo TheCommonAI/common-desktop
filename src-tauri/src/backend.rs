@@ -1696,83 +1696,6 @@ pub async fn ollama_models_dir() -> Result<String, String> {
     .await
 }
 
-/* ------------------------------ starting ollama ------------------------------ */
-
-/// Attempt to start Ollama if it isn't already running.
-///
-/// On Windows, Ollama is typically installed to `%LOCALAPPDATA%\Programs\Ollama`
-/// and can be started by running `ollama serve` or launching the Ollama app.
-/// On macOS, Ollama is usually started via the menu bar app. On Linux, it's
-/// typically a systemd service or manually started.
-///
-/// This is best-effort: if Ollama can't be started, the caller will get an error
-/// when they try to use it, which is a clearer message than a failed start.
-#[tauri::command]
-pub async fn start_ollama() -> Result<(), String> {
-    off_thread(|| {
-        #[cfg(windows)]
-        {
-            // Try to start Ollama using the installed app
-            // First, try 'ollama serve' which works if ollama is on PATH
-            let serve_result = silent("ollama")
-                .arg("serve")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn();
-
-            if serve_result.is_ok() {
-                return Ok(());
-            }
-
-            // Fall back to the typical Windows install location
-            let home = home_dir()?;
-            let ollama_exe = home
-                .join("AppData")
-                .join("Local")
-                .join("Programs")
-                .join("Ollama")
-                .join("ollama.exe");
-
-            if ollama_exe.is_file() {
-                let _ = silent(&ollama_exe)
-                    .arg("serve")
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn();
-            }
-            Ok(())
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            // On macOS, try to open the Ollama app which starts the server
-            let _ = silent("open")
-                .arg("-a")
-                .arg("Ollama")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn();
-            Ok(())
-        }
-
-        #[cfg(not(any(windows, target_os = "macos")))]
-        {
-            // On Linux, try 'ollama serve' if it's on PATH
-            let _ = silent("ollama")
-                .arg("serve")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn();
-            Ok(())
-        }
-    })
-    .await
-}
-
 /* ------------------------------ the pull stream ------------------------------ */
 
 /// Ollama, on this machine. The same string as `OLLAMA` in
@@ -2112,13 +2035,6 @@ pub async fn ollama_pull(
                 // `-N`. Without it curl buffers, and a buffered stream is a
                 // progress bar that sits still and then jumps to the end.
                 "--no-buffer",
-                // Retry on connection refused — Ollama may still be starting up.
-                // This is a backup to the TypeScript readiness polling.
-                "--retry",
-                "5",
-                "--retry-connrefused",
-                "--retry-delay",
-                "2",
                 "--request",
                 "POST",
                 "--header",
