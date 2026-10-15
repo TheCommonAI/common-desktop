@@ -113,8 +113,16 @@ export default function JoinNetwork({ flow, next, back }: ScreenProps) {
       // A successful call reporting a failed check. The node is registered —
       // that is not in doubt, and saying otherwise would send the user looking
       // for a problem that is not there — but the gateway cannot route to it.
+      //
+      // The second clause used to read "usually a firewall", which is the one
+      // likely cause that is wrong here: the gateway reaches this machine through
+      // a tunnel this end opened *outward*, so a firewall on this end is not what
+      // stands in the way — a network that filters the tunnel's host is, and a
+      // quick tunnel that has gone stale is. Both are named, neither is chosen:
+      // the app cannot tell them apart from here, and Try again is the move that
+      // answers it either way.
       statement = "You're registered.";
-      caption = ["But the gateway can't reach this machine", "usually a firewall"];
+      caption = ["But the gateway can't reach this machine", "usually a firewall or a restrictive network"];
     }
     controls = join.gatewaySeen ? (
       // The one control on the green screen, and the only forward move in the

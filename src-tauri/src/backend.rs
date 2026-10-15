@@ -1045,9 +1045,9 @@ pub async fn network_ask(question: String) -> Result<String, String> {
 /// gateway's own answer, rather than this process's opinion of itself.
 ///
 /// The child's output goes to a log file rather than to a pipe nobody drains,
-/// which would fill its buffer and wedge it, and `network_join_log` reads that file
-/// back so a failure can be shown to the user as text rather than as a silent
-/// nothing.
+/// which would fill its buffer and wedge it. That file holds the only account of a
+/// join that fails out there, and `diagnostics` reads its tail back so a failure
+/// reaches the user as text rather than as a silent nothing.
 ///
 /// Nothing is returned but the fact that it worked. The `Child` is kept, in `Join`,
 /// rather than dropped with a pid handed back to the caller: a pid is only ever a
@@ -1192,34 +1192,6 @@ pub async fn network_catalogue() -> Result<String, String> {
             });
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    })
-    .await
-}
-
-/// The tail of the join log, for saying *why* a join did not come up.
-///
-/// `common join` does not return: it replaces itself with `join.py`, which
-/// pulls the weights, starts the worker, opens the tunnel and then loops. So a
-/// join that fails fails *out there*, and the only evidence is what it wrote.
-/// Without this, a failed join is a spinner that stops on a timeout with
-/// nothing to say — which is the worst thing a first-run screen can do.
-///
-/// A missing log is an empty string and not an error: "nothing has been logged"
-/// and "the log could not be read" are different facts, and only the caller
-/// knows which one it cares about.
-#[tauri::command]
-pub async fn network_join_log(tail: usize) -> Result<String, String> {
-    off_thread(move || {
-        let home = home_dir().map_err(|_| "no home to read the log from".to_string())?;
-        let path = home.join(".common-network/join.log");
-        let raw = match std::fs::read_to_string(&path) {
-            Ok(raw) => raw,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
-            Err(e) => return Err(format!("couldn't read {}: {e}", path.display())),
-        };
-        let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
-        let start = lines.len().saturating_sub(tail);
-        Ok(lines[start..].join("\n"))
     })
     .await
 }

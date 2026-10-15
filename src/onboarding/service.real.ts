@@ -1095,8 +1095,12 @@ interface Status {
   joined: boolean;
   name: string | null;
   nodeId: string | null;
-  /** The gateway's view: `null` when it has never heard of this node, or when it
-   *  has heard of it and can no longer route to it. */
+  /** The gateway's own entry for this machine, out of the node list it serves —
+   *  `null` when it has no entry at all, which is the one reading that means this
+   *  machine is not registered, from over there. Presence and reachability are two
+   *  different questions and this object is where both are answered: the entry
+   *  exists once the gateway has the node, and `healthy` is true only once the
+   *  gateway's own health check has passed against it. */
   node: { healthy: boolean } | null;
 }
 
@@ -1232,18 +1236,6 @@ async function spawnJoin(request: JoinRequest): Promise<void> {
   joined = true;
 }
 
-/** The tail of the join's log, as the disclosure line under a failure. This is
- *  the whole reason the log exists: a join fails *out there*, in a process this
- *  one does not own. */
-async function joinLog(): Promise<string> {
-  try {
-    const tail = await invoke<string>("network_join_log", { tail: 8 });
-    return tail.trim();
-  } catch {
-    return "";
-  }
-}
-
 /** One read of the network's opinion of this node, for the confirming phase. */
 async function healthy(): Promise<boolean> {
   const current = await status();
@@ -1322,15 +1314,30 @@ function joinNetwork(request: JoinRequest, opts?: ProgressOptions<JoinProgress>)
     /**
      * The wait, in three parts, each ending on evidence rather than on a timer.
      *
-     * **registering** ends when the gateway can reach this node — `node.healthy`,
-     * and not the identity appearing on disk. The identity is a *file*, written by
+     * **registering** ends when the gateway has this node in its list — `node`, and
+     * not the identity appearing on disk. The identity is a *file*, written by
      * whichever join registered last, and it outlives the process that wrote it:
      * reading `nodeId !== null` as "registered" is what once let a join that had
      * died twelve seconds in look exactly like one that had succeeded — through a
      * model load and a ninety-second confirming poll, on a node that had been gone
      * before either began. The token that file holds is what lets a new attempt
      * reclaim the same node rather than mint a second, but reclaiming is not the
-     * same as having it.
+     * same as having it. So the identity is asked for beside the entry, and only for
+     * the node id this flow goes on to show; the gateway's own list is what says
+     * this machine arrived.
+     *
+     * Listing, and deliberately not `healthy` — which is the correction here.
+     * Registration and reachability are two questions and the gateway keeps two
+     * fields for them: its entry appears once it has accepted a registration, and
+     * `healthy` turns true only when its own health check has passed against the
+     * tunnel. This phase used to ask the second question for four minutes and then
+     * report the answer as a network failure. A friend's Windows machine was told
+     * "it took too long to answer" while its node sat in `/peers` and its own log
+     * said "you are live" — and it never reached the model load or the test prompt,
+     * which is everything the rest of this flow exists to do. Asking reachability
+     * later does not drop it: **confirming**, below, asks it on the gateway's own
+     * answer, where a `false` is reported rather than thrown and the screen has a
+     * state for it.
      *
      * Which is why a death is retried here instead of surfacing as an error. A
      * join dies young on the far side's slowness rather than this machine's, and
@@ -1341,8 +1348,8 @@ function joinNetwork(request: JoinRequest, opts?: ProgressOptions<JoinProgress>)
      * On Windows "confirmed end" is narrower than it sounds, and that is the
      * point: the wrapper's exit says nothing about the join, so the only end this
      * loop can witness there is a wrapper that failed to hand off. Everything
-     * after that is the gateway's to notice — which is what the sentence below the
-     * log has always claimed, and what this loop used to contradict.
+     * after that is the gateway's to notice — which is what the screen has always
+     * claimed, and what this loop used to contradict.
      *
      * **loading-model** and **test-prompt** are the same wait seen two ways, and
      * which one is shown is decided by whether the model is already in memory —
@@ -1359,53 +1366,67 @@ function joinNetwork(request: JoinRequest, opts?: ProgressOptions<JoinProgress>)
       if (signal.cancelled) throw stopped("Stopped.");
       const current = await status();
 
-      // Healthy is the only test here that is not a proxy for something else, and
-      // the identity is asked for beside it only so the node id this flow goes on
-      // to show is one that exists rather than one it read and then lost.
-      if (current.nodeId !== null && current.node?.healthy === true) {
-        registered = current;
-        break;
-      }
-
-      // Nothing of this app's is serving, and — unlike every other reading on this
-      // line — that is now something this loop has actually been told rather than
-      // inferred: the joined process has ended without handing off, which is the
-      // only kind of end a wrapper that has done its job never produces. A join
-      // that is still working, or that has handed off and carried on out of sight,
-      // never reaches here, so this cannot put a second `join.py` on the worker's
-      // port. A read that failed is not an end and does not come here at all.
+      // The stop is read first, because it is the only thing on this line the loop
+      // has been *told* rather than left to infer. Nothing of this app's is serving:
+      // the joined process has ended without handing off, which is the only kind of
+      // end a wrapper that has done its job never produces. A join that is still
+      // working, or that has handed off and carried on out of sight, never reaches
+      // here, so this cannot put a second `join.py` on the worker's port. A read that
+      // failed is not an end and does not come here at all.
+      //
+      // Asked before the entry below for a case that is otherwise easy to misread: a
+      // machine whose join died outright leaves its identity behind, and the gateway
+      // goes on listing a node nobody is serving. Read the listing first and that
+      // machine is told the gateway cannot reach it, when what happened is that it
+      // stopped — a different sentence, and the one this state exists to say.
       const now = await joinState();
       if (now !== null && now.state === "ended") {
         if (attempts >= MAX_JOIN_ATTEMPTS) {
           // Not `network`. This machine started a join, watched it stop, and gave
-          // up after three — the gateway was never asked and never refused, so
-          // the sentence for an unanswered network is a lie here, and the one the
-          // log below is there to disprove. What is left to say is narrower and
-          // true: the process ended, and this is how.
+          // up after three — the gateway was never asked and never refused, so the
+          // sentence for an unanswered network is a lie here. What is left to say is
+          // narrower and true: the process ended, and this is how. Why it ended is in
+          // the log, which the report on this screen carries whole; a caption holds a
+          // clause, and eight lines of log is not one.
           throw new OnboardingError(
             "join-stopped",
             SENTENCE["join-stopped"],
-            (await joinLog()) || `the join ${now.code}, ${attempts} times`,
+            `the join ${now.code}, ${attempts} times`,
           );
         }
         attempts += 1;
         await spawnJoin(request);
       }
 
+      // Registered. The gateway has this node in its own list, and a node only gets
+      // there through a registration it accepted — so over there, this machine
+      // arrived.
+      //
+      // Not `healthy`, and the difference is the whole of the bug this line used to
+      // carry: the entry exists as soon as the gateway has the node, while `healthy`
+      // is its separate verdict that its health check gets through to the tunnel.
+      // Waiting for the second one here held a spinner over a step that had finished
+      // in seconds, and then blamed the network for the gateway's probe. Reachability
+      // is asked in `confirming`, below, where it is reported on the screen that
+      // already exists for it — rather than thrown at a machine that did register.
+      if (current.nodeId !== null && current.node !== null) {
+        registered = current;
+        break;
+      }
+
       if (Date.now() > DEADLINE) {
-        // The one failure here that is a failure: nothing reachable after four
-        // minutes. Which sentence it gets is decided by what the *gateway* said
-        // rather than by what this machine thinks of itself. A node the gateway is
-        // listing is one it has heard from — it registered, and it cannot be reached
-        // — which is a different failure from silence and needs different words.
-        // Asking the process instead is what put "nothing came back from the
-        // gateway" on screen for a node the gateway was listing.
-        const heard = current.nodeId !== null;
-        throw new OnboardingError(
-          heard ? "timeout" : "network",
-          SENTENCE[heard ? "timeout" : "network"],
-          (await joinLog()) || (heard ? "the gateway knows this node but cannot reach it" : "nothing registered"),
-        );
+        // Four minutes of asking, and the gateway never once listed this machine.
+        // That is the one failure left here, and it is silence: the loop leaves the
+        // moment the gateway has the node, so a node it knows and cannot route to
+        // never reaches this line — that is a registered machine with a routing
+        // problem, and it is read out once the model has answered, below.
+        //
+        // The sentence, and not the log. `detail` is rendered as a clause in the
+        // caption, and `join.log` is written for a terminal: dropped in there it
+        // arrives whole, in the caption's uppercase micro-type, and runs off the
+        // side of the sheet. Nothing is lost by leaving it out — `ShareLog` on this
+        // very screen carries the log into the report.
+        throw new OnboardingError("network", SENTENCE.network, "the gateway never listed this machine");
       }
       await wait(1000);
     }
@@ -1448,10 +1469,16 @@ function joinNetwork(request: JoinRequest, opts?: ProgressOptions<JoinProgress>)
     const answered = { prompt: question, answer, latencyMs: latencyMs ?? 0 };
     say("test-prompt", answered);
 
-    // Confirming. The gateway's own list is polled rather than asked once, because
-    // it is populated by the node's worker reaching *it*, and there is a real gap
-    // between registering and being marked healthy. A `false` at the end of it is
-    // a successful call reporting a failed check.
+    // Confirming — and the only place reachability is asked, now that `registering`
+    // stops at the gateway holding the node. `healthy` is not the entry and not the
+    // node's own word: the gateway sets it when its health check gets through to the
+    // tunnel, and it stays false until one does. So it is polled rather than asked
+    // once, because there is a real gap between the gateway accepting a registration
+    // and its probe succeeding — and on a quick tunnel there may be no such moment at
+    // all, which is the case this phase exists to report rather than to throw at.
+    //
+    // A `false` at the end of it is a successful call reporting a failed check: the
+    // machine is registered, and the screen for it says so.
     say("confirming");
     let seen = false;
     const CONFIRM_DEADLINE = Date.now() + 90_000;
