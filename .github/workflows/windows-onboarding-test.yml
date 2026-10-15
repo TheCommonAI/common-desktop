@@ -1,0 +1,112 @@
+name: Windows onboarding test
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-onboarding:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the Windows installer
+        shell: pwsh
+        run: |
+          Write-Host "Fetching latest release..."
+          $tag = (gh release view --json tagName | ConvertFrom-Json).tagName
+          Write-Host "Testing release: $tag"
+          
+          $installerUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/Common-win-x64.exe"
+          Invoke-WebRequest -Uri $installerUrl -OutFile "$env:TEMP\Common-win-x64.exe" -UseBasicParsing
+          Write-Host "Downloaded installer: $((Get-Item "$env:TEMP\Common-win-x64.exe").Length) bytes"
+
+      - name: Install Common silently
+        shell: pwsh
+        run: |
+          Write-Host "Installing Common..."
+          $proc = Start-Process -FilePath "$env:TEMP\Common-win-x64.exe" -ArgumentList "/S" -PassThru -Wait
+          Write-Host "Installer exit code: $($proc.ExitCode)"
+          Start-Sleep -Seconds 5
+          
+          # Debug: show what's in common install locations
+          Write-Host "=== Searching for Common.exe ==="
+          $searchPaths = @(
+            "$env:LOCALAPPDATA\Programs",
+            "$env:LOCALAPPDATA",
+            "$env:APPDATA",
+            "$env:ProgramFiles",
+            "${env:ProgramFiles(x86)}"
+          )
+          foreach ($p in $searchPaths) {
+            if (Test-Path $p) {
+              Write-Host "Checking $p..."
+              Get-ChildItem -Path $p -Filter "Common*" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                Write-Host "  Found dir: $($_.FullName)"
+                Get-ChildItem $_.FullName -Filter "*.exe" -ErrorAction SilentlyContinue | ForEach-Object {
+                  Write-Host "    EXE: $($_.FullName)"
+                }
+              }
+            }
+          }
+          
+          # Find common-desktop.exe (Tauri uses productName from Cargo.toml)
+          $exe = Get-ChildItem -Path $searchPaths -Filter "common-desktop.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($exe) {
+            Write-Host "Common installed at: $($exe.FullName)"
+            echo "COMMON_EXE=$($exe.FullName)" >> $env:GITHUB_ENV
+          } else {
+            Write-Host "ERROR: Could not find common-desktop.exe"
+            exit 1
+          }
+
+      - name: Check common CLI on PATH
+        shell: pwsh
+        run: |
+          # Refresh PATH
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+          
+          $cli = Get-Command common -ErrorAction SilentlyContinue
+          if ($cli) {
+            Write-Host "CLI found: $($cli.Source)"
+          } else {
+            Write-Host "WARNING: common CLI not on PATH"
+            $cliPath = "$env:USERPROFILE\.common-network\bin"
+            if (Test-Path "$cliPath\common.exe") {
+              Write-Host "CLI exists at $cliPath but not on PATH - this is a bug"
+            } else {
+              Write-Host "CLI not installed yet (may be installed during first run)"
+            }
+          }
+
+      - name: Launch app and take screenshot
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath $env:COMMON_EXE -PassThru
+          Start-Sleep -Seconds 10
+          
+          if (-not $process.HasExited) {
+            Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+            $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap($screen.Width, $screen.Height)
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($screen.Location, [System.Drawing.Point]::Empty, $screen.Size)
+            $bitmap.Save("$env:GITHUB_WORKSPACE\screenshot.png")
+            Stop-Process -Id $process.Id -Force
+            Write-Host "App launched successfully, screenshot saved"
+          } else {
+            throw "App exited immediately with code: $($process.ExitCode)"
+          }
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-artifacts
+          path: screenshot.png
+          if-no-files-found: ignore
