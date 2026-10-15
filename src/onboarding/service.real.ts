@@ -170,8 +170,14 @@ function classify(message: string): OnboardingErrorCode {
   if (/unknown model|no such model|model not found|does not exist|\b404\b/.test(text)) {
     return "not-found";
   }
+  // A 5xx is the gateway failing, and 500 as much as 502, 503 and 504 — the bare
+  // `500` used to be the one code of the four that fell through to `unknown`, which
+  // is the only code with no sentence on a screen. A self-trial's setup died on a
+  // live 500 from `/catalogue` and would have been reported as "something went
+  // wrong", which names neither the machine nor the network and so points at
+  // nothing the user can do.
   if (
-    /could not resolve|nodename nor servname|connection refused|network is unreachable|no route to host|can't reach|cannot reach|unreachable|offline|tls|certificate|bad gateway|\b50[234]\b|eof|failed to fetch|load failed/.test(
+    /could not resolve|nodename nor servname|connection refused|network is unreachable|no route to host|can't reach|cannot reach|unreachable|offline|tls|certificate|bad gateway|\b50[0234]\b|eof|failed to fetch|load failed/.test(
       text,
     )
   ) {
@@ -188,7 +194,7 @@ const SENTENCE: Record<OnboardingErrorCode, string> = {
   "permission-denied": "The system refused that.",
   network: "Nothing came back.",
   "cli-missing": "Common's command-line tool isn't installed.",
-  "join-stopped": "The join stopped on this machine.",
+  "join-stopped": "The join didn't get through.",
   "insufficient-disk": "There isn't enough room.",
   "not-found": "That model isn't available.",
   timeout: "That took too long.",
@@ -1153,6 +1159,16 @@ async function status(): Promise<Status> {
  * not a second node. */
 let joined = false;
 
+/** Where in `join.log` the join this app started began writing — the byte offset
+ *  `network_join` measures as it spawns it. `null` until an attempt is made.
+ *
+ *  Held for the same reason `joined` is, and against the same kind of error. The log
+ *  is appended to across attempts *and across runs*, so its tail is not this attempt's
+ *  tail: read without an offset it would be free to hand back the `✗` of a join that
+ *  died an hour ago and offer it as the reason this one never arrived. The offset is
+ *  what confines the read to the words this attempt wrote. */
+let joinStart: number | null = null;
+
 /** What became of the join this app started, as `backend.rs` reads it. */
 type JoinState =
   | { state: "none" }
@@ -1211,7 +1227,7 @@ async function joinState(): Promise<JoinState | null> {
  *  this machine re-registering and not a duplicate node — which is the same
  *  reason the guard before it is allowed to spawn at all. */
 async function spawnJoin(request: JoinRequest): Promise<void> {
-  const started = await read<null>("network_join", {
+  const started = await read<number>("network_join", {
     // The catalogue id, not the ollama tag: `join.py` resolves the tag from
     // the catalogue itself, and passing the id is what puts a ladder id into
     // `identity.catalogue_id` — so the node is filed under the model the
@@ -1237,11 +1253,64 @@ async function spawnJoin(request: JoinRequest): Promise<void> {
       started.detail,
     );
   }
-  // Set last, on the only path where a process was in fact started. It is what
-  // `joinState` reads first: with no attempt made there is no handle in Rust to
-  // ask about, and "nothing was started" is a different answer from "it has
+  // Both set last, on the only path where a process was in fact started. `joined`
+  // is what `joinState` reads first: with no attempt made there is no handle in
+  // Rust to ask about, and "nothing was started" is a different answer from "it has
   // stopped" — the first would spend a retry, the second is the one that should.
+  // `joinStart` is the offset that makes the log readable as *this* attempt's, and
+  // it is set beside `joined` because the two are only ever true together.
+  joinStart = started.value;
   joined = true;
+}
+
+/** The last thing this attempt's join said about a problem, or `null` if it has said
+ *  nothing that reads as one.
+ *
+ *  This answers a question the process handle cannot be asked on Windows. What this app
+ *  holds there is `common.cmd`, a batch wrapper that exits *cleanly* the moment it has
+ *  handed off to `join.py` — so a clean exit is how a join normally starts, the app sees
+ *  `HandedOff` either way, and a join that then dies out there dies unwitnessed.
+ *  `join.log` is the only account of it.
+ *
+ *  What the log cannot say is whether the process is still alive, and the caller must not
+ *  pretend otherwise. `✗` is not a death marker: `join.py` prints it from `die_with_fix`
+ *  and also from the `except` handlers in its re-registration loop, which it then carries
+ *  on running — and a node whose re-registration failed is exactly a node the gateway
+ *  stops listing, so that line is the likeliest one to be last here. An uncaught
+ *  traceback's final line does mean a death, but it is not the only shape this returns.
+ *
+ *  A line of evidence, then, and not a verdict: "this is what the join last complained
+ *  about". The sentence it is shown under is worded to be true either way.
+ *
+ *  Read only from `joinStart`, so what comes back is this attempt's words and not a dead
+ *  attempt's last rites. A `null` means the join has said nothing that reads as a problem —
+ *  which covers both "it is working" and "it died silently", two cases this file cannot
+ *  tell apart. The caller's fallback is the sentence for a gateway that never answered,
+ *  which claims nothing about this machine and is the honest thing to say about both. */
+async function joinStoppedReason(): Promise<string | null> {
+  if (joinStart === null) return null;
+  const tail = await read<string | null>("network_join_tail", { from: joinStart });
+  if (!tail.ok || tail.value === null) return null;
+  // The last line that reads as a problem, and not the first: an attempt that was retried
+  // appends rather than replaces, and the newest account is the one that says why the
+  // join is not up *now*.
+  //
+  // A failure glyph, or the line Python ends an uncaught traceback on. Not a mention of
+  // the word "error", which was this filter's first shape and was wrong: `join.py` prints
+  // one of those every half hour on a perfectly healthy node — "could not self-update
+  // (…), continuing with current version" — and offering that as the reason a join failed
+  // would be a caption whose own words say it did not matter.
+  const FAILED = /^\s*✗/;
+  // `urllib.error.HTTPError: …`, and the name has to *end* in the word, so a sentence with
+  // "error" somewhere in the middle of it is not a match. `socket.gaierror` is the one
+  // exception Python spells with a lowercase `e`.
+  const TRACEBACK_END = /^(?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*(?:Error|error)\s*:/;
+  const lines = tail.value.split("\n").filter((line) => FAILED.test(line) || TRACEBACK_END.test(line));
+  const last = lines.at(-1)?.trim();
+  if (last === undefined || last === "") return null;
+  // A clause, not a paragraph. The caption's type is small and uppercase and the sheet
+  // is narrow; past a line's worth the tail of the sentence is what the user loses.
+  return last.length > 120 ? `${last.slice(0, 119)}…` : last;
 }
 
 /** One read of the network's opinion of this node, for the confirming phase. */
@@ -1429,11 +1498,33 @@ function joinNetwork(request: JoinRequest, opts?: ProgressOptions<JoinProgress>)
         // never reaches this line — that is a registered machine with a routing
         // problem, and it is read out once the model has answered, below.
         //
-        // The sentence, and not the log. `detail` is rendered as a clause in the
-        // caption, and `join.log` is written for a terminal: dropped in there it
-        // arrives whole, in the caption's uppercase micro-type, and runs off the
-        // side of the sheet. Nothing is lost by leaving it out — `ShareLog` on this
-        // very screen carries the log into the report.
+        // Why the silence is two questions, and the log is what tells them apart. A
+        // join that failed on its way up never reached the gateway at all, and
+        // blaming the gateway for that is blaming the side that was never asked.
+        // That is not a hypothetical: a Windows self-trial's join died in under a
+        // second on `✗ ollama not found.` — the app had spawned it without Ollama's
+        // directory on its `PATH` — and the screen spent the whole four minutes
+        // saying "the gateway never listed this machine". On Windows the handle
+        // cannot be asked, so `joinStoppedReason` is the only witness there is.
+        //
+        // The half of the question the log *can* carry, and no more: it says what the
+        // join complained about, never whether the process is still up. The code below
+        // is therefore not a claim that anything stopped — the sentence it leads to is
+        // written to be true of a join that died and of one still failing out of sight.
+        //
+        // A line, and not the log. `detail` is rendered as a clause in the caption,
+        // and `join.log` is written for a terminal: dropped in there it arrives
+        // whole, in the caption's uppercase micro-type, and runs off the side of the
+        // sheet. The one line answers the question; the rest is not lost, since
+        // `ShareLog` on this very screen carries the log into the report.
+        const stoppedHere = await joinStoppedReason();
+        if (stoppedHere !== null) {
+          // The join reported a problem, and this is the last of it. The screen for this
+          // code reads that line as its second caption line, under a sentence worded to
+          // survive the log's uncertainty — see `JoinNetwork.tsx`, where the reason this
+          // is not `network` is written down at more length than a comment here could.
+          throw new OnboardingError("join-stopped", SENTENCE["join-stopped"], stoppedHere);
+        }
         throw new OnboardingError("network", SENTENCE.network, "the gateway never listed this machine");
       }
       await wait(1000);

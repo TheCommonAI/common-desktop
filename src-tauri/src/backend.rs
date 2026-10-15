@@ -112,6 +112,64 @@ fn silent(program: impl AsRef<std::ffi::OsStr>) -> Command {
     cmd
 }
 
+/// Where Ollama keeps its own executables, when the platform puts them somewhere a
+/// fresh process will not already be looking.
+///
+/// The same directory `start_ollama` already names, asked for here because a second
+/// caller needs it for a different reason.
+///
+/// Windows asks the question and the other platforms answer `None`, which is why the
+/// `cfg` is on the *body* and not on the call: the caller goes on being compiled
+/// everywhere, so the `PATH` it rewrites is type-checked on the machines this is
+/// developed on rather than only on the ones it runs on.
+#[cfg(windows)]
+fn ollama_dir() -> Option<PathBuf> {
+    let local = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty())?;
+    let dir = PathBuf::from(local).join("Programs").join("Ollama");
+    // The check that matters. The directory existing proves nothing — a half-removed
+    // install leaves it behind — so the executable is the answer.
+    dir.join("ollama.exe").is_file().then_some(dir)
+}
+
+/// Nothing is kept where a fresh process is already looking, so nothing is added.
+#[cfg(not(windows))]
+fn ollama_dir() -> Option<PathBuf> {
+    None
+}
+
+/// The environment a `common` invocation needs, which is not always the one this
+/// process was handed.
+///
+/// `PATH` is the whole of it, and it earns its place as a first act rather than a last
+/// resort. `join.py` asks `shutil.which("ollama")` before it does anything at all and
+/// exits on the answer no — so a join spawned without Ollama on its `PATH` dies in
+/// under a second, before it has reached the network. A `PATH` is read once, at process
+/// start, and this app is routinely started from a shell — or an Explorer — that was
+/// already running when Ollama was installed, so the install directory is missing from
+/// this process's own environment and therefore from every child's. The app then spends
+/// its whole four-minute budget reporting a gateway that was never asked, which is
+/// exactly what a Windows self-trial did: `✗ ollama not found.` sat in `join.log` for the
+/// entire wait while the screen said "the gateway never listed this machine".
+///
+/// Appended and not prepended, so an Ollama the user installed somewhere of their own
+/// choosing still wins the lookup; this supplies the directory only when nothing else
+/// has.
+fn cli_env(cmd: &mut Command) {
+    // Belt and braces beside `--no-color`: the CLI also honours NO_COLOR, and a
+    // stray escape sequence inside JSON is a parse error with a baffling cause.
+    cmd.env("NO_COLOR", "1");
+
+    if let Some(dir) = ollama_dir() {
+        let mut paths: Vec<PathBuf> = std::env::var_os("PATH")
+            .map(|existing| std::env::split_paths(&existing).collect())
+            .unwrap_or_default();
+        paths.push(dir);
+        if let Ok(joined) = std::env::join_paths(paths) {
+            cmd.env("PATH", joined);
+        }
+    }
+}
+
 /// A failed launch of the CLI, in the one form the interface can act on.
 ///
 /// The single most consequential thing on this side of the boundary is that a
@@ -300,9 +358,7 @@ fn run_common(verb: &str, extra: &[&str], json: bool) -> Result<String, String> 
         cmd.arg("--json");
     }
     cmd.arg(verb).args(extra);
-    // Belt and braces beside `--no-color`: the CLI also honours NO_COLOR, and a
-    // stray escape sequence inside JSON is a parse error with a baffling cause.
-    cmd.env("NO_COLOR", "1");
+    cli_env(&mut cmd);
 
     let out = cmd.output().map_err(|e| launch_error(&bin, e))?;
 
@@ -883,7 +939,7 @@ pub async fn network_ask_local(question: String, model: Option<String>) -> Resul
             cmd.arg("--model").arg(m);
         }
         cmd.arg("ask").arg(&question);
-        cmd.env("NO_COLOR", "1");
+        cli_env(&mut cmd);
 
         let out = cmd.output().map_err(|e| launch_error(&bin, e))?;
         if !out.status.success() {
@@ -1049,18 +1105,21 @@ pub async fn network_ask(question: String) -> Result<String, String> {
 /// join that fails out there, and `diagnostics` reads its tail back so a failure
 /// reaches the user as text rather than as a silent nothing.
 ///
-/// Nothing is returned but the fact that it worked. The `Child` is kept, in `Join`,
-/// rather than dropped with a pid handed back to the caller: a pid is only ever a
-/// number to be re-found, and re-finding it means a second program — `tasklist` on
-/// Windows, `kill -0` elsewhere — whose answer this process has no way to check.
-/// See `JoinState`, which is what that cost.
+/// What comes back is not the join's outcome but the log's length at the moment it
+/// started — the byte this attempt's first word lands on. It is the caller's handle on
+/// *which* join a later `network_join_tail` is reading about, and it is needed because
+/// the file outlives the attempt. The `Child` is kept, in `Join`, rather than dropped
+/// with a pid handed back to the caller: a pid is only ever a number to be re-found,
+/// and re-finding it means a second program — `tasklist` on Windows, `kill -0`
+/// elsewhere — whose answer this process has no way to check. See `JoinState`, which is
+/// what that cost.
 #[tauri::command]
 pub async fn network_join(
     app: tauri::AppHandle,
     model: Option<String>,
     name: Option<String>,
     lan: bool,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     off_thread(move || {
         let bin = common_bin();
 
@@ -1085,6 +1144,16 @@ pub async fn network_join(
             .try_clone()
             .map_err(|e| format!("couldn't duplicate the log handle: {e}"))?;
 
+        // Where this attempt begins in the file, handed back so a later read can be
+        // confined to this attempt's own bytes. The log is appended to across attempts
+        // and across runs, so without this offset a tail read is free to resurrect a
+        // `✗` from a join that died an hour ago and offer it as this one's cause —
+        // which is how a merely-slow join becomes a confident, wrong sentence.
+        let start = log
+            .metadata()
+            .map_err(|e| format!("couldn't measure {}: {e}", log_path.display()))?
+            .len();
+
         let mut cmd = silent(&bin);
         cmd.arg("--no-color").arg("--no-update").arg("join");
         if let Some(m) = model.as_deref() {
@@ -1101,7 +1170,7 @@ pub async fn network_join(
             // a GUI has no terminal to answer it with.
             cmd.arg("--auto");
         }
-        cmd.env("NO_COLOR", "1");
+        cli_env(&mut cmd);
         cmd.stdout(Stdio::from(log));
         cmd.stderr(Stdio::from(log_err));
         cmd.stdin(Stdio::null());
@@ -1118,7 +1187,7 @@ pub async fn network_join(
             .lock()
             .map_err(|_| "the join handle is poisoned".to_string())? = Some(child);
 
-        Ok(())
+        Ok(start)
     })
     .await
 }
@@ -1478,6 +1547,57 @@ fn read_identity() -> (Option<IdentitySummary>, String, Option<String>) {
         joined_at: parsed.get("joined_at").and_then(|v| v.as_f64()),
     };
     (Some(summary), shown, None)
+}
+
+/// How much of the join log a failing join is judged on. Shorter than a report's
+/// because this is read to answer one question — did it stop, and saying what — and
+/// a traceback's last frames plus a `die_with_fix` sentence are the whole of it.
+const JOIN_TAIL_LINES: usize = 20;
+
+/// The end of `join.log`, for a join that never arrived.
+///
+/// The app cannot witness a join dying on Windows: the process it holds is a batch
+/// wrapper that exits cleanly having handed off, so `network_join_state` reports
+/// `HandedOff` and has nothing to say about the join itself. The file the CLI writes is
+/// then the only account there is — which is why reading it is what turns "the gateway
+/// never listed this machine" from a guess into a report. A self-trial watched the full
+/// four minutes of that sentence with `✗ ollama not found.` sitting here the whole time,
+/// and the join had died in under a second.
+///
+/// `from` is that attempt's `start`, the byte `network_join` measured when it spawned it,
+/// so what comes back is this attempt's words and never an older attempt's. See there for
+/// why the file's history has to be excluded rather than merely tolerated.
+///
+/// `None` is a machine that has never joined — a different thing from a join that left
+/// no trace, and not a case to invent a sentence for.
+#[tauri::command]
+pub async fn network_join_tail(from: u64) -> Result<Option<String>, String> {
+    let path = home_dir()?.join(".common-network").join("join.log");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("couldn't read {}: {e}", path.display())),
+    };
+    Ok(Some(tail_from(&raw, from, JOIN_TAIL_LINES)))
+}
+
+/// The last `lines` lines of the part of `raw` that a join starting at byte `from` wrote.
+///
+/// Sliced as bytes, which is sound because the offset is one the file itself produced — and
+/// guarded all the same, because it is not sound *enough*. `from` crosses from the web layer,
+/// and a slice into the middle of a character panics, where this app can only ever afford a
+/// sentence.
+///
+/// An offset the file cannot honour — past its end, inside a character, not a number — reads
+/// as the empty tail rather than as the whole file. That is the direction to fail in: a
+/// missing answer is one the caller already has a fallback for, while an answer borrowed
+/// from a previous attempt is the exact mistake this offset exists to prevent.
+fn tail_from(raw: &str, from: u64, lines: usize) -> String {
+    let start = usize::try_from(from)
+        .ok()
+        .filter(|f| *f <= raw.len() && raw.is_char_boundary(*f))
+        .unwrap_or(raw.len());
+    tail_lines(&raw[start..], lines).trim().to_string()
 }
 
 /// The join log's size, age and tail. Its *absence* is reported as the empty
@@ -2582,5 +2702,53 @@ mod live_join {
             ),
             other => panic!("a signalled child has ended, not {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod join_log {
+    use super::*;
+
+    /// What the CLI wrote on the run this was written for, in the shape the screen
+    /// would have read it: a banner, then the first act failing.
+    const A_DEAD_ATTEMPT: &str = "✗ ollama not found.\n# install it from https://ollama.com/download, then run this again.\n";
+
+    #[test]
+    fn a_second_attempt_is_read_from_its_own_first_byte_and_not_the_first_attempts() {
+        // The whole reason `network_join` returns an offset. The log is appended to, so
+        // the previous attempt's `✗` is still in the file — and a join that is merely
+        // slow must not be handed the earlier attempt's death as its own cause.
+        let raw = format!("{A_DEAD_ATTEMPT}\n ✓ you are live · node id: 24746682\n");
+        assert_eq!(
+            tail_from(&raw, A_DEAD_ATTEMPT.len() as u64, JOIN_TAIL_LINES),
+            "✓ you are live · node id: 24746682"
+        );
+    }
+
+    #[test]
+    fn the_first_attempt_is_read_from_the_start_of_the_file() {
+        assert_eq!(
+            tail_from(A_DEAD_ATTEMPT, 0, JOIN_TAIL_LINES),
+            A_DEAD_ATTEMPT.trim()
+        );
+    }
+
+    #[test]
+    fn an_offset_the_file_cannot_honour_reads_as_nothing_rather_than_as_someone_elses_lines() {
+        // A rotated or rewritten log leaves an offset past the end of the file. Reading
+        // the whole of it there would be reading a file this attempt did not write.
+        assert_eq!(tail_from(A_DEAD_ATTEMPT, 9_999, JOIN_TAIL_LINES), "");
+        // And an offset inside a character is not a slice Rust will make. A panic here
+        // would be a blank screen where the report of the failure should be.
+        assert_eq!(tail_from(A_DEAD_ATTEMPT, 1, JOIN_TAIL_LINES), "");
+    }
+
+    #[test]
+    fn the_tail_is_the_end_of_what_this_attempt_wrote() {
+        // The failure is at the end — `die_with_fix` prints its sentence last, and a
+        // traceback ends on the exception — which is why it is a tail and not a head.
+        let long: String = (1..=40).map(|n| format!("line {n}\n")).collect();
+        let tail = tail_from(&long, 0, 3);
+        assert_eq!(tail, "line 38\nline 39\nline 40");
     }
 }
