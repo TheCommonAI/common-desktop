@@ -173,8 +173,13 @@ export default function JoinNetwork({ flow, next, back }: ScreenProps) {
         : "The network didn't answer.";
     caption = missingCli
       ? [
-          "Its command-line tool isn't installed",
-          "It arrives with the network's own installer, not with this app",
+          // The tool is no longer something the user has to go and find: this app
+          // ships it. What it still needs from outside is an interpreter to run it
+          // with, and that is the only remaining way to arrive here — so the sentence
+          // names Python and not the tool. Saying "install it yourself" would now be
+          // sending them after something they already have.
+          "Its command-line tool couldn't be started",
+          "Common ships it, and runs it with Python 3.9 or newer",
         ]
       : stopped
         ? [

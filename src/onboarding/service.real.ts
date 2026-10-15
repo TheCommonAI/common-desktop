@@ -1,6 +1,16 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 
-import { LANES, fitsHere, modelFor, tierFor } from "./models";
+import {
+  LANES,
+  LADDER_REQUIREMENTS,
+  fitsHere,
+  gb,
+  modelFor,
+  requirementFor,
+  tierFor,
+  type ModelRequirement,
+  type Requirements,
+} from "./models";
 import {
   OnboardingError,
   type DownloadProgress,
@@ -193,7 +203,7 @@ const SENTENCE: Record<OnboardingErrorCode, string> = {
   unsupported: "This machine can't be used.",
   "permission-denied": "The system refused that.",
   network: "Nothing came back.",
-  "cli-missing": "Common's command-line tool isn't installed.",
+  "cli-missing": "Common's command-line tool couldn't be started.",
   "join-stopped": "The join didn't get through.",
   "insufficient-disk": "There isn't enough room.",
   "not-found": "That model isn't available.",
@@ -364,36 +374,46 @@ function scanHardware(opts?: ProgressOptions<ScanProgress>): Task<HardwareReport
  * The catalogue's `domain_tags` for the ladder models, gathered into the app's
  * three lanes.
  *
- * This is the whole of the model-choosing policy, and it is written from the
- * catalogue rather than invented: every domain below is a tag on one of the six
- * models the ladder already carries, in
- * `src/onboarding/models.ts` and in the network's own catalogue — `math`,
- * `arithmetic`, `word-problems` and `quantitative` on the qwen2.5-math pair and
- * on mathstral, `reasoning`, `logic`, `step-by-step` and `planning` on
- * deepseek-r1 and phi4-mini-reasoning, `code`, `programming` and `debugging` on
- * the qwen2.5-coder trio, `general`, `conversation` and `writing` on gemma3,
- * llama3.1 and qwen3. So a gap the network names in any of them is a gap one of
- * these three lanes can actually answer.
+ * This is the whole of the model-choosing policy, and the sum below is only as
+ * good as this table: a domain that belongs to two lanes is counted for both and
+ * so decides nothing, and a domain that belongs to one lane but is listed under
+ * another is the answer, wrongly given. Every domain here is read from the
+ * catalogue and belongs to exactly one lane — `math`, `arithmetic`,
+ * `word-problems` and `quantitative` on the qwen2.5-math pair, deepscaler and
+ * mathstral; `code`, `programming` and `debugging` on the qwen2.5-coder trio,
+ * with `sql`, `databases` and `queries` on sqlcoder-7b; `writing` on qwen3-8b,
+ * llama3.1-8b and gemma3-12b.
+ *
+ * ── What is deliberately not here ───────────────────────────────────────────────
+ *
+ * `logic`, `reasoning`, `step-by-step` and `planning` used to sit in the math
+ * lane, and none of them is math's. `reasoning` is a tag on qwen3-8b, which is
+ * this app's *writing* model, and the other three are tags on
+ * phi4-mini-reasoning and deepseek-r1-14b, which are not in this ladder at all:
+ * they describe how a request of any kind is put, not what it is about. Counting
+ * them for Math alone meant Math was credited with eight of the catalogue's
+ * twenty domains, four of them lane-neutral — so a network whose real shortage
+ * was anywhere at all, or whose shortage was only in those, came back as short of
+ * Math, and the app sent every user it could to a lane the network did not need.
+ *
+ * `general` and `conversation` were dropped for the same reason, from the other
+ * end: the gateway itself refuses to seat a generalist on a panel
+ * (`compose_excluded_domains` in its config), so a network short of general chat
+ * is a network short of a domain all three lanes answer equally — an answer that
+ * is not evidence for one of them. Every model in the ladder that carries those
+ * tags carries `writing` with them, so nothing that was genuinely a writing gap
+ * is lost by their going.
  *
  * The catalogue's medical lane — `medical`, `clinical`, `biomedical`, on
- * meditron-7b alone — is deliberately absent, because this app has no medical
- * lane to send it to. The effect is that a network short only of medical help
- * is a network this app reads as short of nothing, which is the true statement
- * about what this app can offer it.
+ * meditron-7b alone — is absent for the older reason, which still holds: this app
+ * has no medical lane to send it to, and a network short only of medical help is
+ * a network this app reads as short of nothing, which is the true statement about
+ * what this app can offer it.
  */
 const LANE_DOMAINS: Record<Lane, readonly string[]> = {
-  math: [
-    "math",
-    "arithmetic",
-    "word-problems",
-    "quantitative",
-    "logic",
-    "reasoning",
-    "step-by-step",
-    "planning",
-  ],
+  math: ["math", "arithmetic", "word-problems", "quantitative"],
   code: ["code", "programming", "debugging", "sql", "databases", "queries"],
-  writing: ["general", "conversation", "writing"],
+  writing: ["writing"],
 };
 
 /** How short the network's worst-served lane has to be before the ask is worth
@@ -455,41 +475,80 @@ async function askNetwork(): Promise<LaneSuggestion["networkAsk"]> {
   const total = LANES.reduce((sum, lane) => sum + totals[lane], 0);
   if (total <= 0) return null;
 
-  let best: Lane = LANES[0];
+  // The lane the sum is largest for. The guard above is what makes this a winner
+  // rather than a default: every gap counted is a gap in some lane's domain, so a
+  // positive total means at least one lane holds a positive share and the two
+  // `null`s below are unreachable. Starting from no lane rather than from Math
+  // keeps that a fact about the table rather than a promise about the code —
+  // Math comes back when its share is the largest, and otherwise it does not.
+  let best: Lane | null = null;
   for (const lane of LANES) {
-    if (totals[lane] > totals[best]) best = lane;
+    if (best === null || totals[lane] > totals[best]) best = lane;
   }
+  if (best === null) return null;
   return { lane: best, demand: demandOf(totals[best] / total) };
 }
 
 /**
- * The lane this machine alone is best for.
+ * The three lanes, in this machine's order of preference for them.
  *
- * The lane whose model fits with the most room to spare — not the lane with the
- * biggest model, and not a fixed lane. Where two lanes fit equally the earlier
- * one wins, which is the order the interface lists them in, so Math is the
- * tie-break rather than an arbitrary default.
+ * Most room above the catalogue's own floor first, which is the argument the
+ * catalogue's header makes and not this app's: a model that is tight on a machine
+ * swaps and times out, and a machine asked for more than that is a machine the
+ * network cannot count on. Room is measured against the catalogue's
+ * `min_ram_gb` — the figure `common join` and `/assign` gate on — and not
+ * against `ModelSpec.bytes`, which `models.ts` introduces as an estimate for the
+ * download and the disk check.
  *
- * When nothing fits — the full rung on a machine short of the 16 GB `fitsHere`
- * asks for — this falls back to the same order and returns Math. That is a
- * machine whose own preference is not a strong claim, and the caption already
- * says as much: this is the branch where the network's ask is *accepted* rather
- * than overridden, so the fallback is rarely the answer the user sees.
+ * Where two lanes ask the same of this machine the order is the interface's, and
+ * that is a genuine tie rather than a thumb on the scale: two lanes whose models
+ * leave the same room have no claim between them.
+ *
+ * The whole order is returned rather than its head because the caller needs the
+ * runner-up as much as the winner — a machine that can carry nothing is still
+ * asked to name a lane, and the honest name is the one that asks the least of it.
  */
-function bestLaneFor(report: HardwareReport, tier: Tier): Lane {
+function lanePreference(
+  report: HardwareReport,
+  tier: Tier,
+  requirements: Requirements,
+): readonly Lane[] {
   const memory = report.memory?.totalBytes ?? 0;
-  let best: Lane = LANES[0];
-  let roomiest = -Infinity;
-  for (const lane of LANES) {
-    const model = modelFor(lane, tier);
-    if (!fitsHere(model.id, report)) continue;
-    const room = memory - model.bytes;
-    if (room > roomiest) {
-      roomiest = room;
-      best = lane;
-    }
-  }
-  return best;
+  // `null` for a lane with no known requirement, which is not the same answer as
+  // zero room and must not be made to look like one.
+  const room = (lane: Lane): number | null => {
+    const need = requirementFor(modelFor(lane, tier).id, requirements);
+    return need === null ? null : memory - gb(need.minRamGb);
+  };
+  // `sort` is stable, so lanes that tie stay in the order the interface lists
+  // them in, which is what makes the tie-break a fact about that order rather than
+  // about the sort.
+  return [...LANES].sort((first, second) => {
+    const left = room(first);
+    const right = room(second);
+    // A lane nobody knows the requirement for sorts after one that is known, and
+    // two of them stay where they are.
+    if (left === null || right === null) return left === right ? 0 : left === null ? 1 : -1;
+    return right - left;
+  });
+}
+
+/**
+ * The lane this machine alone is best for, or `null` when it can carry none.
+ *
+ * The first lane in the machine's own order that fits. `null` is the honest
+ * answer to "no model in this ladder fits this machine", and returning it rather
+ * than a lane is the point of the signature: `best` used to start at `LANES[0]`,
+ * so a machine that could carry nothing was handed Math — a lane nothing had
+ * selected, chosen because it was written first. Nothing here names a lane that
+ * was not picked.
+ */
+function bestLaneFor(report: HardwareReport, tier: Tier, requirements: Requirements): Lane | null {
+  return (
+    lanePreference(report, tier, requirements).find((lane) =>
+      fitsHere(modelFor(lane, tier).id, report, requirements),
+    ) ?? null
+  );
 }
 
 /**
@@ -500,6 +559,13 @@ function bestLaneFor(report: HardwareReport, tier: Tier): Lane {
  * The **lane** is the network's, from the gap table, because only the network
  * knows what it is short of — with the machine's own preference as the fallback
  * when the ask does not land or when the network's choice would not fit here.
+ *
+ * The fit is the catalogue's too, and not this app's: `fitsHere` reads
+ * `min_ram_gb` at the network's own headroom, from the live catalogue where it can
+ * be reached, so the lanes marked as fitting here are the lanes the network would
+ * have marked for this machine. A machine that fits none of them is told so in the
+ * only place the contract leaves for it — every option's `fits` is false, and the
+ * lane named is the one that asks least of it rather than one picked by default.
  *
  * The one rejection is a machine whose memory could not be read: without a tier
  * there is no model ladder, and without a ladder there is no recommendation to
@@ -518,18 +584,36 @@ function suggestLane(report: HardwareReport): Task<LaneSuggestion> {
     }
 
     const tier = tierFor(memory);
+    // The catalogue's requirements and the network's ask, together: neither waits
+    // on the other, and the fit below is only worth computing against the
+    // network's own figures rather than against a copy of them.
+    const [ask, requirements] = await Promise.all([askNetwork(), ladderRequirements()]);
+    const order = lanePreference(report, tier, requirements);
+
     const options: readonly LaneOption[] = LANES.map((lane: Lane) => {
       const model = modelFor(lane, tier);
-      return { lane, model, fits: fitsHere(model.id, report) };
+      return { lane, model, fits: fitsHere(model.id, report, requirements) };
     });
 
-    const byMachine = bestLaneFor(report, tier);
-    const ask = await askNetwork();
-    const askFits = ask !== null && (options.find((option) => option.lane === ask.lane)?.fits ?? false);
+    const byMachine = bestLaneFor(report, tier, requirements);
+    // What `recommended` falls back to when the network's ask does not land.
+    //
+    // A machine that can carry no lane at all is still asked for a lane — the
+    // contract types both fields as a `Lane`, and the screen's own sentence is
+    // built from one — so the answer is the head of the machine's order, which is
+    // the lane that asks the least of it. That is a weaker claim than a fit and it
+    // is not dressed up as one: every option above is `fits: false` in that case,
+    // so the screen's caption reads "will be slow here · that's allowed" rather
+    // than "your machine can run this". Math is never the answer merely for being
+    // Math — on the rung where nothing fits, Coder 7B at 8 GB is preferred to the
+    // two 10 GB models, because it asks less.
+    const machineLane = byMachine ?? order[0];
+    const askFits =
+      ask !== null && (options.find((option) => option.lane === ask.lane)?.fits ?? false);
 
     return {
-      recommended: ask !== null && askFits ? ask.lane : byMachine,
-      byMachine,
+      recommended: ask !== null && askFits ? ask.lane : machineLane,
+      byMachine: machineLane,
       // The ask is reported whether or not it was taken, because the screen's
       // caption is a sentence about the difference between the two — and when
       // they agree there is no difference to explain.
@@ -537,6 +621,57 @@ function suggestLane(report: HardwareReport): Task<LaneSuggestion> {
       options,
     };
   });
+}
+
+/**
+ * The catalogue's requirements for the ladder, as the network currently spells
+ * them, or the table in `models.ts` when the catalogue cannot be reached.
+ *
+ * The same shape as `tagFor` and for the same reason: the network's catalogue is
+ * the authority on what a model needs — it is the document `common join` and the
+ * gateway's `/assign` both read — and a `min_ram_gb` that moves there must move
+ * the app's answer with it. The table stands in when there is no gateway, no CLI
+ * or no parse, so an offline machine still gets a fit rather than no fit.
+ *
+ * Never rejects, like every other read here: this decides a caption, and a
+ * caption is not worth failing a screen over. Only the ladder's six ids are read,
+ * because the catalogue's other entries are models this app has no lane to offer
+ * and a requirement for one of those is a requirement for nothing.
+ *
+ * Field by field against the table, so a catalogue entry that has grown a new
+ * shape loses the fields it no longer carries and keeps the ones it still does.
+ */
+async function ladderRequirements(): Promise<Requirements> {
+  let raw: string;
+  try {
+    raw = await invoke<string>("network_catalogue");
+  } catch {
+    return LADDER_REQUIREMENTS;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return LADDER_REQUIREMENTS;
+  }
+  if (!Array.isArray(parsed)) return LADDER_REQUIREMENTS;
+
+  const found: Record<string, ModelRequirement> = { ...LADDER_REQUIREMENTS };
+  for (const entry of parsed) {
+    if (!isJson(entry)) continue;
+    const id = readString(entry, "id");
+    if (id === null) continue;
+    const known = LADDER_REQUIREMENTS[id];
+    if (known === undefined) continue;
+    const gpu = entry["needs_gpu"];
+    found[id] = {
+      minRamGb: readNumber(entry, "min_ram_gb") ?? known.minRamGb,
+      needsGpu: typeof gpu === "boolean" ? gpu : known.needsGpu,
+      minVramGb: readNumber(entry, "min_vram_gb") ?? known.minVramGb,
+    };
+  }
+  return found;
 }
 
 /* --------------------------------- the weights --------------------------------- */
