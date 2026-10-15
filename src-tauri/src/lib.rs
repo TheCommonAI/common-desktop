@@ -165,6 +165,10 @@ pub fn run() {
             // What the `join` this app started is doing. The join outlives the call
             // that made it, so what is held is its handle and not its answer.
             backend::network_join_state,
+            // And what it said, for the case the handle cannot answer: on Windows the
+            // wrapper exits cleanly having handed off, so a join can die without this
+            // app being able to see it. The log is the only witness.
+            backend::network_join_tail,
             // Where the weights are, for the one field of `DownloadResult` that
             // has to be a real path.
             backend::ollama_models_dir,
