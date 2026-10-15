@@ -162,14 +162,21 @@ class Cdp {
   #nextId = 1;
   #pending = new Map();
 
-  static async connect(wsUrl) {
+  static async connect(wsUrl, seconds = 30) {
     const client = new Cdp();
     client.#socket = new WebSocket(wsUrl);
     await new Promise((resolve, reject) => {
-      client.#socket.addEventListener("open", resolve, { once: true });
-      client.#socket.addEventListener("error", () => reject(new Error("the devtools socket refused the connection")), {
-        once: true,
-      });
+      // Bounded, because a socket that neither opens nor errors would otherwise
+      // park the whole step at its ceiling with nothing printed.
+      const timer = setTimeout(() => reject(new Error(`the devtools socket did not open within ${seconds}s`)), seconds * 1000);
+      client.#socket.addEventListener("open", () => {
+        clearTimeout(timer);
+        resolve();
+      }, { once: true });
+      client.#socket.addEventListener("error", () => {
+        clearTimeout(timer);
+        reject(new Error("the devtools socket refused the connection"));
+      }, { once: true });
     });
     client.#socket.addEventListener("message", (event) => client.#receive(event.data));
     return client;
@@ -191,10 +198,29 @@ class Cdp {
     else waiting.resolve(message.result);
   }
 
-  send(method, params = {}) {
+  /** Every call is bounded, and that is what makes the rest of this file's timeouts
+   *  real. Each `waitFor` checks its deadline between calls, so an `eval` that never
+   *  returns — a renderer that is wedged, or gone — defeats the deadline entirely and
+   *  the step sits at its ceiling instead. The ceiling here is generous because it
+   *  only has to be smaller than 75 minutes, not tight: a legitimate
+   *  `captureScreenshot` on a slow runner must not be mistaken for a hang. */
+  send(method, params = {}, timeoutSeconds = 120) {
     const id = this.#nextId++;
     return new Promise((resolve, reject) => {
-      this.#pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        this.#pending.delete(id);
+        reject(new Error(`${method} did not answer within ${timeoutSeconds}s`));
+      }, timeoutSeconds * 1000);
+      this.#pending.set(id, {
+        resolve: (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      });
       this.#socket.send(JSON.stringify({ id, method, params }));
     });
   }
@@ -396,29 +422,61 @@ class Trial {
 
   /* ------------------------------------ steps ------------------------------------ */
 
-  /** The wordmark, and the one thing that has to happen before touching it. */
+  /** The wordmark, and the one thing that has to happen before touching it.
+   *
+   *  The debug port answers as soon as WebView2's browser process is up, and that is
+   *  *before* the page has drawn. Run four attached 0.6s after launch and found an
+   *  empty body — no `.intro`, no `.onboarding`, no `innerText` — and this reported
+   *  it as "neither the wordmark nor the flow is on screen" about an app that was
+   *  simply still loading. So wait for the React tree to mount before asking which
+   *  screen it is, and if it never mounts, say where the page actually got to. */
   async begin() {
-    await this.cdp.send("Emulation.setEmulatedMedia", {
-      media: "",
-      features: [{ name: "prefers-reduced-motion", value: "reduce" }],
-    });
+    const deadline = Date.now() + WAIT.screen * 1000;
+    for (;;) {
+      const state = await this.cdp.eval(`({
+        href: document.location.href,
+        ready: document.readyState,
+        intro: document.querySelector(".intro") !== null,
+        onboarding: document.querySelector(".onboarding") !== null,
+      })`);
 
-    const state = await this.cdp.eval(`({
-      intro: document.querySelector(".intro") !== null,
-      onboarding: document.querySelector(".onboarding") !== null,
-    })`);
+      // Asked in this order on purpose. During the wordmark's exit both roots are
+      // mounted at once — `App.tsx:76` keeps `Onboarding` in place as the wordmark
+      // clears — so a driver that looked for the flow first would find it and leave
+      // the wordmark sitting over every click that followed.
+      if (state.intro) {
+        // `App.tsx:59` reads `prefersReducedMotion()` *inside* `begin()`, at the
+        // moment of the click, and hands straight over rather than entering a phase
+        // whose exit waits on an `animationend` that a compositor which never
+        // composites would never deliver. So the emulation has to be in effect
+        // before the click, not after it.
+        await this.cdp.send("Emulation.setEmulatedMedia", {
+          media: "",
+          features: [{ name: "prefers-reduced-motion", value: "reduce" }],
+        });
+        // 1×1 and clipped, so this one genuinely has to be called rather than
+        // pointed at.
+        await this.cdp.eval(`document.querySelector(".intro__begin").click()`);
+        note("the wordmark is up; dismissed it with motion reduced");
+        await this.waitFor(`document.querySelector(".onboarding") !== null`, WAIT.screen, "the setup flow to take over");
+        return;
+      }
 
-    if (state.intro) {
-      note("the wordmark is up; reducing motion so its exit does not depend on an animation");
-      // 1×1 and clipped, so this one genuinely has to be called rather than
-      // pointed at.
-      await this.cdp.eval(`document.querySelector(".intro__begin").click()`);
-    } else if (!state.onboarding) {
-      const text = await this.cdp.eval(BODY_TEXT).catch(() => "(page unreachable)");
-      fatal(`neither the wordmark nor the flow is on screen.\n  On screen:\n${indent(text)}`);
+      if (state.onboarding) {
+        note("the flow is already up; there is no wordmark to dismiss");
+        return;
+      }
+
+      if (Date.now() > deadline) {
+        const text = await this.cdp.eval(BODY_TEXT).catch(() => "(page unreachable)");
+        fatal(
+          `waited ${WAIT.screen}s for the app to draw anything and it never did.\n` +
+            `  the page is at ${state.href}, readyState ${state.ready}\n` +
+            `  On screen:\n${indent(text)}`,
+        );
+      }
+      await sleep(250);
     }
-
-    await this.waitFor(`document.querySelector(".onboarding") !== null`, WAIT.screen, "the setup flow to take over");
   }
 
   async welcome() {
@@ -698,32 +756,46 @@ async function launch() {
 }
 
 async function pickTarget() {
-  let targets;
-  try {
-    targets = await (await fetch(`${DEVTOOLS}/json/list`)).json();
-  } catch (error) {
-    const gone = appExit();
-    fatal(
-      `the devtools port stopped answering while asking it for the app's page (${describe(error)}).\n` +
-        (gone === null
-          ? `  The app (pid ${app?.pid}) is still running, so its webview went away without it.\n`
-          : `  The app has exited (${gone}).\n`) +
-        `  The app printed:\n${indent(appLogTail())}`,
-    );
+  const deadline = Date.now() + WAIT.launch * 1000;
+  let targets = [];
+  for (;;) {
+    try {
+      targets = await (await fetch(`${DEVTOOLS}/json/list`)).json();
+    } catch (error) {
+      const gone = appExit();
+      fatal(
+        `the devtools port stopped answering while asking it for the app's page (${describe(error)}).\n` +
+          (gone === null
+            ? `  The app (pid ${app?.pid}) is still running, so its webview went away without it.\n`
+            : `  The app has exited (${gone}).\n`) +
+          `  The app printed:\n${indent(appLogTail())}`,
+      );
+    }
+
+    // The app's origin, and it is waited for rather than merely preferred: for a
+    // moment while the webview navigates there is a page target sitting on
+    // `about:blank`, and a driver that took it would attach to nothing and then
+    // report every screen as blank. Run four was attaching 0.6s after launch, which
+    // is inside that window.
+    const appPage = targets.find((t) => t.type === "page" && String(t.url).startsWith("http://tauri.localhost"));
+    if (appPage !== undefined) return appPage;
+
+    if (Date.now() > deadline) break;
+    await sleep(250);
   }
-  // The app's own page first. The fallback is for the day Tauri changes the origin
-  // it serves from: a driver that refuses to attach because it does not recognise
-  // the URL would report a broken harness about a working app.
-  const page =
-    targets.find((t) => t.type === "page" && String(t.url).startsWith("http://tauri.localhost")) ??
-    targets.find((t) => t.type === "page" && !String(t.url).startsWith("devtools://"));
+
+  // The origin this expects never turned up. Rather than report a broken harness
+  // about a working app, take any page that is not devtools' own — that is the
+  // fallback for the day Tauri changes where it serves from.
+  const page = targets.find((t) => t.type === "page" && !String(t.url).startsWith("devtools://"));
   if (page === undefined) {
     fatal(
-      `no page target for the app. Targets seen:\n${indent(
+      `no page target for the app after ${WAIT.launch}s. Targets seen:\n${indent(
         targets.map((t) => `${t.type} ${t.url}`).join("\n") || "(none)",
       )}`,
     );
   }
+  note(`  (no http://tauri.localhost target after ${WAIT.launch}s; attaching to ${page.url} instead)`);
   return page;
 }
 
