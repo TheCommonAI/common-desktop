@@ -43,12 +43,12 @@ jobs:
     # The Rust build, a multi-gigabyte model download, a test prompt on four CPU
     # cores and the gateway's own confirmation poll all live in here.
     #
-    # This sits above the sum of the per-step ceilings below (30+25+15+5+60=135)
+    # This sits above the sum of the per-step ceilings below (30+25+15+75=145)
     # on purpose. Every step that can hang carries its own ceiling, so a hang is
     # reported against the step that hung rather than as an opaque job timeout —
     # which is exactly what the first run of this workflow cost us 23 minutes and
     # a cancelled run to learn. This one is only the outer envelope.
-    timeout-minutes: 120
+    timeout-minutes: 150
 
     steps:
       - uses: actions/checkout@v4
@@ -182,67 +182,25 @@ jobs:
           Get-ChildItem $bin | Select-Object -ExpandProperty Name
           & $common --no-color --no-update --version
 
-      # ── the app ──────────────────────────────────────────────────────────────
+      # ── the app, started and driven in one step ───────────────────────────────
       #
-      # The binary is found rather than named: Tauri v2 stopped renaming it to
-      # `productName`, so it is `common-desktop.exe`, and hardcoding either guess
-      # is a coin flip that lands on "file not found" rather than on a bug.
-      - name: Launch the app
-        shell: pwsh
-        timeout-minutes: 5
-        run: |
-          $exe = @(Get-ChildItem -Path 'src-tauri\target\release' -Filter '*.exe' -File)
-          if ($exe.Count -ne 1) { throw "expected exactly one exe in src-tauri/target/release, found $($exe.Count): $($exe.Name -join ', ')" }
-          Write-Host "app binary: $($exe[0].FullName)"
-          $out = "$env:RUNNER_TEMP\app-stdout.log"
-          $err = "$env:RUNNER_TEMP\app-stderr.log"
-          $app = Start-Process -FilePath $exe[0].FullName -WorkingDirectory $exe[0].DirectoryName -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
-          Write-Host "app pid: $($app.Id)"
-
-          # Ask the app, here, whether it is alive — do not leave this question to
-          # the driver. The first run of this workflow ended with the driver
-          # reporting "the app exited before its devtools port opened" at 0.0s, and
-          # nothing else: no stdout, no stderr, no screenshots. That is consistent
-          # with two very different stories, and the timestamps cannot tell them
-          # apart — the app dying on its own in the five seconds before the driver
-          # started, or the driver's own liveness probe (a `process.kill(pid, 0)`
-          # whose Windows behaviour is not the POSIX behaviour) being wrong and
-          # killing it. A Process object here actually knows, and the exit code
-          # names the cause: 0xC0000135 is a missing DLL, 0xC0000005 an access
-          # violation, 0xC0000142 a DLL that failed to initialise, 0 a deliberate
-          # exit.
-          Start-Sleep -Seconds 10
-          $app.Refresh()
-          if ($app.HasExited) {
-            $code = '{0:X8}' -f $app.ExitCode
-            throw "the app exited within 10s of launch — exit code 0x$code. stdout: $(if (Test-Path $out) { (Get-Content $out -Raw) } else { '<none>' }) stderr: $(if (Test-Path $err) { (Get-Content $err -Raw) } else { '<none>' })"
-          }
-          Write-Host "app is still running 10s after launch"
-
-          # And whether the devtools port the driver needs actually opened. If the
-          # app is alive and this never answers, `additionalBrowserArgs` did not
-          # take effect and that is a different bug with a different fix.
-          $deadline = (Get-Date).AddSeconds(40)
-          $up = $false
-          while ((Get-Date) -lt $deadline) {
-            try { Invoke-RestMethod -Uri 'http://127.0.0.1:9222/json/version' -TimeoutSec 3 | Out-Null; $up = $true; break }
-            catch { Start-Sleep -Seconds 2 }
-          }
-          if (-not $up) { throw 'the app is running but its devtools port never opened — additionalBrowserArgs did not take effect' }
-          Write-Host 'devtools port is up'
-
-          "TRIAL_PID=$($app.Id)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-          "TRIAL_DEVTOOLS=http://127.0.0.1:9222" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-          "TRIAL_SHOTS=trial-shots" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-          "TRIAL_APP_LOG=$err" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-
-      # The driver bounds every wait it makes (the download is allowed 30 minutes,
-      # the join 15, everything else 2). This is the backstop for the case the
-      # driver's own accounting misses — a `Runtime.evaluate` that never returns
-      # because the page is wedged.
+      # There is deliberately no "launch the app" step above this one. There was,
+      # and it is what broke run three: it started the app, confirmed the devtools
+      # port answered, and ended — and the app died five seconds later with the
+      # step's shell, because the runner puts each step in a Windows job object and
+      # children inherit membership. A process that has to outlive a step cannot be
+      # started by that step. `launch()` in the driver has the timestamps.
+      #
+      # The driver finds the binary by globbing, starts it, waits for the port, and
+      # reports the exit code and everything the app printed if it never gets there.
+      #
+      # The driver bounds every wait it makes (the launch is allowed a minute, the
+      # download 30, the join 15, everything else 2). This is the backstop for the
+      # case the driver's own accounting misses — a `Runtime.evaluate` that never
+      # returns because the page is wedged.
       - name: Drive the setup flow
         shell: pwsh
-        timeout-minutes: 60
+        timeout-minutes: 75
         run: |
           New-Item -ItemType Directory -Force -Path trial-shots | Out-Null
           node scripts/trial/drive.mjs 2>&1 | Tee-Object -FilePath trial-shots\driver.log
@@ -269,10 +227,9 @@ jobs:
         if: always()
         with:
           name: windows-self-trial
-          path: |
-            trial-shots/**
-            ${{ runner.temp }}/app-stdout.log
-            ${{ runner.temp }}/app-stderr.log
+          # The app's own stdout and stderr are written into `trial-shots/` by the
+          # driver, which now owns the process, so the glob below already covers them.
+          path: trial-shots/**
           if-no-files-found: warn
 
       # A run that registers a real node on the production network leaves it there
