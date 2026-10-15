@@ -18,6 +18,11 @@
  * speaks raw CDP over it. Node 24 has `WebSocket` and `fetch` built in, so this
  * adds no dependency to a repo that has no JS test dependencies at all.
  *
+ * This also **starts** the app rather than attaching to one a workflow step
+ * started. That looks like a detail and is not: the runner kills a step's shell and
+ * the app goes with it, which is exactly how run three failed with a healthy port
+ * and nothing listening five seconds later. `launch()` has the account.
+ *
  * The alternative — `tauri-driver`, or pywinauto clicking pixels — is worse in
  * both directions: `tauri-driver` needs an `msedgedriver.exe` matched to an
  * evergreen WebView2 runtime, and its `screenshot()` goes through the same
@@ -46,6 +51,7 @@
  * first thing this does, before any screenshot, is emulate reduced motion.
  */
 
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
@@ -54,16 +60,25 @@ import zlib from "node:zlib";
 
 const DEVTOOLS = process.env.TRIAL_DEVTOOLS ?? "http://127.0.0.1:9222";
 const SHOTS = path.resolve(process.env.TRIAL_SHOTS ?? "trial-shots");
-const APP_LOG = process.env.TRIAL_APP_LOG ?? null;
-const APP_PID = process.env.TRIAL_PID ? Number(process.env.TRIAL_PID) : null;
+/** Where `tauri build` leaves the binary. Found by globbing rather than named:
+ *  Tauri v2 stopped renaming it to `productName`, so it is `common-desktop.exe`
+ *  today, and hardcoding either guess is a coin flip that lands on "file not
+ *  found" rather than on a bug. */
+const APP_DIR = path.resolve(process.env.TRIAL_APP_DIR ?? path.join("src-tauri", "target", "release"));
+const APP_STDOUT = path.join(SHOTS, "app-stdout.log");
+const APP_STDERR = path.join(SHOTS, "app-stderr.log");
+
+/** The app process, once this file has started it. */
+let app = null;
 
 /** Seconds allowed in each state. They differ because the things being waited on
- *  do. The download is gigabytes over the runner's link and then a checksum; the
- *  join pulls a model, waits for a tunnel, asks the model a question on a
- *  CPU-only machine and then waits up to ninety seconds for the gateway to list
- *  it. Everything else is a local read or a click. */
+ *  do. The launch is the process coming up and WebView2 opening its debug port;
+ *  the download is gigabytes over the runner's link and then a checksum; the join
+ *  pulls a model, waits for a tunnel, asks the model a question on a CPU-only
+ *  machine and then waits up to ninety seconds for the gateway to list it.
+ *  Everything else is a local read or a click. */
 const WAIT = {
-  attach: 60,
+  launch: 60,
   screen: 120,
   download: 1800,
   join: 900,
@@ -99,34 +114,46 @@ function fatal(message) {
   throw error;
 }
 
-/** Whatever the app printed on its way up. `lib.rs` panics out of `.build()` if the
- *  tray fails, and that message is the only account of why there is no window. */
+/** Whatever the app printed before it went, and it is usually nothing: the release
+ *  build carries `windows_subsystem = "windows"`, so it has no console and no
+ *  stdout to inherit. An empty log here is not evidence of anything, which is why
+ *  the exit code is reported beside it. `lib.rs` panics out of `.build()` if the
+ *  tray fails, and that panic is the one thing that would appear. */
 function appLogTail(lines = 40) {
-  if (APP_LOG === null) return "(no app log configured)";
-  try {
-    const all = fs.readFileSync(APP_LOG, "utf8").split(/\r?\n/);
-    return all.slice(Math.max(0, all.length - lines)).join("\n");
-  } catch {
-    return "(no app log written)";
-  }
+  const tail = (label, file) => {
+    try {
+      const all = fs.readFileSync(file, "utf8").split(/\r?\n/);
+      const kept = all.slice(Math.max(0, all.length - lines)).join("\n").trim();
+      return `${label}: ${kept === "" ? "(empty)" : kept}`;
+    } catch {
+      return `${label}: (never written)`;
+    }
+  };
+  return `${tail("stdout", APP_STDOUT)}\n${tail("stderr", APP_STDERR)}`;
 }
 
-/* There is deliberately no liveness probe here. `process.kill(pid, 0)` is the
- * only one Node has, and on Windows it is not the POSIX call: the signal
- * argument is not honoured the same way, and it can fail for reasons that have
- * nothing to do with the process being gone. The first run of this workflow
- * declared a live app dead at 0.0s with 0-byte logs, and that probe is the
- * suspect — either it answered wrongly, or it did what Node does with an
- * unrecognised signal on Windows and ended the process outright. Neither can be
- * settled from a Mac, so the probe is gone rather than fixed.
- *
- * The question it was asking is now answered before the driver starts: the
- * workflow's launch step waits ten seconds, checks the Process object, and
- * fails with the exit code if the app is not there, then waits for the devtools
- * port itself. By the time `attach()` runs, the app is known to be alive and the
- * port is known to answer. If the port stops answering, the timeout below says
- * so, with the app's PID and whatever it printed. */
+/** Node's `fetch` reports every failure as "fetch failed" and hides the real one in
+ *  `cause`. Which one it is decides what happened: `ECONNREFUSED` means nothing was
+ *  listening at all — the app is gone — while `ECONNRESET` means something was and
+ *  closed. Printing only the message threw that away. */
+function describe(error) {
+  const code = error?.cause?.code ?? error?.code;
+  return code === undefined ? error.message : `${error.message} (${code})`;
+}
 
+/** How the app left, or `null` while it is still there.
+ *
+ *  This is not the probe that made a mess of run two. `child.exitCode` is Node's own
+ *  record of a process Node itself spawned, not a signal sent to a bare PID, so
+ *  there is nothing to misread and nothing to accidentally kill. */
+function appExit() {
+  if (app === null) return null;
+  if (app.exitCode !== null) {
+    return `0x${(app.exitCode >>> 0).toString(16).toUpperCase().padStart(8, "0")}`;
+  }
+  if (app.signalCode !== null) return app.signalCode;
+  return null;
+}
 
 /* -------------------------------- the CDP client -------------------------------- */
 
@@ -599,33 +626,91 @@ function unfilter(raw, width, height, channels) {
   return out;
 }
 
-/* ------------------------------------- attach ------------------------------------- */
+/* ------------------------------------- launch ------------------------------------- */
 
-async function attach() {
-  const deadline = Date.now() + WAIT.attach * 1000;
+/** Start the app, and stay with it for the rest of the run.
+ *
+ *  The app is started *here*, inside the driver, rather than in a workflow step of
+ *  its own — and that is the fix for run three, not a matter of taste. That run
+ *  launched the app in one step and attached to it in the next: the port answered
+ *  at 07:42:50 ("devtools port is up") and the driver's very first connection was
+ *  refused at 07:42:56. The runner puts each step's shell in a Windows job object,
+ *  children inherit membership, and the app went down with the shell that started
+ *  it, five seconds after that step said it was healthy. A process that has to
+ *  outlive a step cannot be started by that step.
+ *
+ *  Keeping the two together also puts the exit code where the question is asked. A
+ *  `Process` object in PowerShell could report `0xC0000135` and nothing else; here a
+ *  dead app is `child.exitCode` plus whatever WebView2 wrote on the way out. */
+function findApp() {
+  let names;
+  try {
+    names = fs.readdirSync(APP_DIR).filter((name) => name.toLowerCase().endsWith(".exe"));
+  } catch (error) {
+    fatal(`could not read ${APP_DIR} (${error.message}) — the build left no binary there.`);
+  }
+  if (names.length !== 1) {
+    fatal(`expected exactly one exe in ${APP_DIR}, found ${names.length}: ${names.join(", ") || "(none)"}`);
+  }
+  return path.join(APP_DIR, names[0]);
+}
+
+async function launch() {
+  const exe = findApp();
+  note(`launching ${exe}`);
+  app = spawn(exe, [], {
+    cwd: path.dirname(exe),
+    // Redirected to files rather than inherited, so the artifact keeps whatever the
+    // app manages to print even though it has no console to print it to.
+    stdio: ["ignore", fs.openSync(APP_STDOUT, "w"), fs.openSync(APP_STDERR, "w")],
+    windowsHide: true,
+  });
+  note(`app pid ${app.pid}`);
+
+  const deadline = Date.now() + WAIT.launch * 1000;
   let lastReason = "nothing answered on the devtools port";
-  note(`attaching to the app (pid ${APP_PID ?? "unknown"}) on ${DEVTOOLS}`);
   for (;;) {
+    const gone = appExit();
+    if (gone !== null) {
+      fatal(
+        `the app exited (${gone}) before its devtools port ever opened.\n` +
+          `  Windows status codes worth recognising: 0xC0000135 is a missing DLL, 0xC0000005\n` +
+          `  an access violation, 0xC0000142 a DLL that failed to initialise, 0x00000000 a\n` +
+          `  deliberate exit. The app printed:\n${indent(appLogTail())}`,
+      );
+    }
     try {
       const version = await (await fetch(`${DEVTOOLS}/json/version`)).json();
-      note(`attached to ${version.Browser}`);
+      note(`the app is up on ${DEVTOOLS} — ${version.Browser}`);
       return version;
     } catch (error) {
-      lastReason = error.message;
+      lastReason = describe(error);
     }
     if (Date.now() > deadline) {
       fatal(
-        `waited ${WAIT.attach}s for the app's devtools port at ${DEVTOOLS} and it never opened (${lastReason}).\n` +
-          `  The workflow verified this port answered before the driver started, so the app most\n` +
-          `  likely exited during the walk. pid ${APP_PID ?? "unknown"}. The app printed:\n${indent(appLogTail())}`,
+        `waited ${WAIT.launch}s for the app's devtools port at ${DEVTOOLS} and it never opened (${lastReason}).\n` +
+          `  The app is still running (pid ${app.pid}), so this is \`additionalBrowserArgs\` not taking\n` +
+          `  effect rather than a crash. The app printed:\n${indent(appLogTail())}`,
       );
     }
-    await sleep(500);
+    await sleep(250);
   }
 }
 
 async function pickTarget() {
-  const targets = await (await fetch(`${DEVTOOLS}/json/list`)).json();
+  let targets;
+  try {
+    targets = await (await fetch(`${DEVTOOLS}/json/list`)).json();
+  } catch (error) {
+    const gone = appExit();
+    fatal(
+      `the devtools port stopped answering while asking it for the app's page (${describe(error)}).\n` +
+        (gone === null
+          ? `  The app (pid ${app?.pid}) is still running, so its webview went away without it.\n`
+          : `  The app has exited (${gone}).\n`) +
+        `  The app printed:\n${indent(appLogTail())}`,
+    );
+  }
   // The app's own page first. The fallback is for the day Tauri changes the origin
   // it serves from: a driver that refuses to attach because it does not recognise
   // the URL would report a broken harness about a working app.
@@ -646,7 +731,7 @@ async function pickTarget() {
 
 async function main() {
   fs.mkdirSync(SHOTS, { recursive: true });
-  await attach();
+  await launch();
   const target = await pickTarget();
 
   const cdp = await Cdp.connect(target.webSocketDebuggerUrl);
@@ -681,10 +766,18 @@ async function main() {
     if (ending.kind === "error") process.exitCode = 1;
   } finally {
     cdp.close();
+    // The walk is over, so the app has nothing left to say. Stopping it here rather
+    // than leaving it for the runner to reap at the end of the job is what makes the
+    // `join.log` the next step copies a file nobody is still writing to.
+    if (app !== null) app.kill();
   }
 }
 
 main().catch((error) => {
+  // A failure before the walk got as far as its `finally` would otherwise leave a
+  // live app holding Node's event loop open, and the step would sit at its ceiling
+  // for 75 minutes with the real failure already printed above it.
+  if (app !== null) app.kill();
   if (error.expected) {
     note("");
     note(`TRIAL FAILED: ${error.message}`);
