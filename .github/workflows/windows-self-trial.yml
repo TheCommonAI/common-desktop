@@ -42,7 +42,13 @@ jobs:
     runs-on: windows-latest
     # The Rust build, a multi-gigabyte model download, a test prompt on four CPU
     # cores and the gateway's own confirmation poll all live in here.
-    timeout-minutes: 90
+    #
+    # This sits above the sum of the per-step ceilings below (30+25+15+5+60=135)
+    # on purpose. Every step that can hang carries its own ceiling, so a hang is
+    # reported against the step that hung rather than as an opaque job timeout —
+    # which is exactly what the first run of this workflow cost us 23 minutes and
+    # a cancelled run to learn. This one is only the outer envelope.
+    timeout-minutes: 120
 
     steps:
       - uses: actions/checkout@v4
@@ -81,6 +87,10 @@ jobs:
       # backgrounding flags so a session with nothing on the glass still renders.
       - name: Build the app with a devtools port open
         shell: pwsh
+        # A cold build is ~20 minutes; this is cache-warm at ~4. If it is not done
+        # by here it is not going to be, and the job's 90 minutes would be spent
+        # finding that out the slow way.
+        timeout-minutes: 30
         run: |
           $config = @'
           {
@@ -109,13 +119,27 @@ jobs:
       # finds `ollama` on PATH at the moment it runs, and `common join` dies
       # without cloudflared. Installing Ollama second produces an install that
       # looks complete and cannot join anything.
+      # Both halves of this are bounded on purpose. `Invoke-WebRequest` buffers the
+      # whole response and carries no timeout of its own, and `Start-Process -Wait`
+      # on an NSIS installer waits forever if the installer decides to put up a
+      # window — which on a runner with no interactive desktop it cannot draw and
+      # will not dismiss. The first run of this workflow sat on this step for 23
+      # minutes making no progress, which is a hang wearing a slow download's
+      # clothes. `--max-time` bounds the transfer, `--retry` rides out a blip, and
+      # `WaitForExit(ms)` bounds the install.
       - name: Install Ollama
         shell: pwsh
+        timeout-minutes: 25
         run: |
-          $ProgressPreference = 'SilentlyContinue'
           $setup = "$env:RUNNER_TEMP\OllamaSetup.exe"
-          Invoke-WebRequest -Uri 'https://ollama.com/download/OllamaSetup.exe' -OutFile $setup
-          Start-Process -FilePath $setup -ArgumentList '/VERYSILENT','/NORESTART' -Wait
+          curl.exe -L --fail --no-progress-meter --retry 3 --max-time 900 -o $setup 'https://ollama.com/download/OllamaSetup.exe'
+          if ($LASTEXITCODE -ne 0) { throw "downloading OllamaSetup.exe failed (curl exit $LASTEXITCODE)" }
+          Write-Host "downloaded OllamaSetup.exe: $((Get-Item $setup).Length) bytes"
+
+          $install = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT','/NORESTART' -PassThru
+          if (-not $install.WaitForExit(600000)) { $install.Kill(); throw 'OllamaSetup.exe did not finish within 10 minutes' }
+          Write-Host "OllamaSetup.exe exit code: $($install.ExitCode)"
+
           # The installer edits the registry's PATH; this process started before
           # that, so it refreshes its own copy rather than hoping.
           $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
@@ -135,11 +159,15 @@ jobs:
       # but the log shows what actually ran.
       - name: Install the network's CLI
         shell: pwsh
+        # The ceiling on this one is not decorative: `install.ps1` is the network's
+        # own script and it does its own fetching, so the driver here cannot put a
+        # timeout inside it. The step timeout is the only thing that bounds it.
+        timeout-minutes: 15
         run: |
-          $ProgressPreference = 'SilentlyContinue'
           $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
           $script = "$env:RUNNER_TEMP\common-install.ps1"
-          Invoke-WebRequest -Uri 'https://commonai.com.au/install.ps1' -OutFile $script
+          curl.exe -L --fail --no-progress-meter --retry 3 --max-time 300 -o $script 'https://commonai.com.au/install.ps1'
+          if ($LASTEXITCODE -ne 0) { throw "downloading install.ps1 failed (curl exit $LASTEXITCODE)" }
           & $script
 
           # `HOME` is deliberately left alone. The CLI installs into the default
@@ -161,6 +189,7 @@ jobs:
       # is a coin flip that lands on "file not found" rather than on a bug.
       - name: Launch the app
         shell: pwsh
+        timeout-minutes: 5
         run: |
           $exe = @(Get-ChildItem -Path 'src-tauri\target\release' -Filter '*.exe' -File)
           if ($exe.Count -ne 1) { throw "expected exactly one exe in src-tauri/target/release, found $($exe.Count): $($exe.Name -join ', ')" }
@@ -174,8 +203,13 @@ jobs:
           "TRIAL_SHOTS=trial-shots" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           "TRIAL_APP_LOG=$err" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
+      # The driver bounds every wait it makes (the download is allowed 30 minutes,
+      # the join 15, everything else 2). This is the backstop for the case the
+      # driver's own accounting misses — a `Runtime.evaluate` that never returns
+      # because the page is wedged.
       - name: Drive the setup flow
         shell: pwsh
+        timeout-minutes: 60
         run: |
           New-Item -ItemType Directory -Force -Path trial-shots | Out-Null
           node scripts/trial/drive.mjs 2>&1 | Tee-Object -FilePath trial-shots\driver.log
