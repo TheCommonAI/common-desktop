@@ -183,10 +183,17 @@ export async function contrib(): Promise<Contrib | null> {
  * Not reversible from here — the node token is discarded, so rejoining mints a
  * new identity rather than reclaiming the old one. That is why the card asks
  * first and why this is the last row in it.
+ *
+ * What comes back is what the network said about it, and it is deliberately not a
+ * fixed sentence: a machine that was deregistered and one that could only be
+ * stopped locally, because the gateway could not be reached, are different
+ * outcomes and the card says which happened. This used to return nothing at all,
+ * which left the card to assert the first of those on its own authority — and it
+ * asserted it over a command that had never been asked to do the job.
  */
-export async function leaveNetwork(): Promise<void> {
-  if (!insideApp()) return;
-  await invoke<string>("network_leave");
+export async function leaveNetwork(): Promise<string> {
+  if (!insideApp()) return "There's no network to leave — this is the browser preview.";
+  return await invoke<string>("network_leave");
 }
 
 /* --------------------------------- the report --------------------------------- */

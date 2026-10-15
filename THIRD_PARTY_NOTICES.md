@@ -5,7 +5,8 @@ See [LICENSE](LICENSE).
 
 Common Desktop is a client. It does not implement the worker protocol; it runs
 the `common` command-line tool, which is part of common-network and is licensed
-with it. Everything below is what ships inside this application.
+with it. Everything below ships inside this application, except the last section,
+which deliberately does not.
 
 ## Fonts
 
@@ -49,8 +50,40 @@ The Tauri framework and the Rust crate graph it links are statically compiled
 into the binary, under MIT or Apache-2.0 licences. `src-tauri/Cargo.lock` pins
 the exact set, and `cargo metadata` or `cargo license` enumerates their terms.
 
+## Bundled
+
+**The Common CLI** is part of
+[common-network](https://github.com/TheCommonAI/common-network) and is licensed
+with it, under AGPL-3.0-or-later — the same terms as this application, so it is
+redistributed here under that licence rather than a separate grant. The network's
+own `NOTICE` travels with it, at `src-tauri/cli-seed/NOTICE`.
+
+It is four Python files — `common.py`, `join.py`, `worker.py` and `chat.py`, 272 KB
+together — carried under the `resources` key in `src-tauri/tauri.conf.json` and
+copied into `~/.common-network` on first run, and only when nothing is there
+already. It ships rather than being fetched because common-network publishes no
+release carrying a downloadable build, so there is nothing for a first run to
+fetch. The copy placed is a starting point rather than a pinned version: the CLI
+updates itself from the network's `main` branch the first time it is run outside
+this application.
+
 ## Downloaded separately
 
+None of the following ships inside this application. Each is fetched on first run
+by `src-tauri/src/fetch.rs` — or found already installed, in which case nothing is
+fetched at all — and each stays under its own distributor's licence. The only
+entry under `resources` is the CLI above, and there is no `externalBin`, so nothing
+in this section is redistributed by Common Desktop.
+
+**CPython**, from the
+[python-build-standalone](https://github.com/astral-sh/python-build-standalone)
+project, under the Python Software Foundation Licence 2.0. It is fetched only when
+no Python 3.9 or newer is already on `PATH`, and it unpacks under
+`~/.common-network/runtime/python`. The PSF licence text travels with the
+downloaded runtime rather than with this application.
+
 **Ollama** (MIT) is installed by the user, not bundled, and is fetched from its
-own distributor. Model weights are fetched from the network and carry their own
+own distributor. It is fetched only when no Ollama is already installed, and it
+unpacks under `~/.common-network/runtime/ollama` rather than into `/Applications`
+or `Program Files`. Model weights are fetched from the network and carry their own
 licences, which vary — consult the relevant model's page.

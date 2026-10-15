@@ -125,6 +125,14 @@ export default function Settings({
   const [leaving, setLeaving] = useState(false);
   const [gone, setGone] = useState(false);
 
+  // What leaving actually did, in the network's own words, and what went wrong
+  // when it could not be asked at all. Two states rather than one because they
+  // are shown in different places: the outcome becomes the row's fact, while the
+  // failure is announced beside the buttons — which stay put, so it can be tried
+  // again.
+  const [said, setSaid] = useState<string | null>(null);
+  const [trouble, setTrouble] = useState<string | null>(null);
+
   const [identity, setIdentity] = useState<Whoami | null>(null);
   const [served, setServed] = useState<Contrib | null>(null);
 
@@ -460,7 +468,7 @@ export default function Settings({
         <div className="settings__row">
           {gone ? (
             <p className="settings__fact">
-              This machine has left the network. Rejoining would give it a new name.
+              {`${said ?? "This machine has left the network."} Rejoining would give it a new name.`}
             </p>
           ) : leaving ? (
             <>
@@ -469,20 +477,31 @@ export default function Settings({
               </p>
               <div className="settings__controls">
                 <Control
+                  // The reply is passed on rather than assumed. Leaving has more
+                  // than one ending, and the card used to assert the happiest one
+                  // over a call whose failure it threw away — see `leaveNetwork`.
                   onClick={() => {
+                    setTrouble(null);
                     leaveNetwork().then(
-                      () => {
+                      (answer) => {
+                        setSaid(answer);
                         setIdentity(null);
                         setGone(true);
                       },
-                      () => undefined,
+                      (why: unknown) => setTrouble(String(why)),
                     );
                   }}
                   arrow
                 >
                   Leave
                 </Control>
-                <Control onClick={() => setLeaving(false)} quiet>
+                <Control
+                  onClick={() => {
+                    setLeaving(false);
+                    setTrouble(null);
+                  }}
+                  quiet
+                >
                   Stay
                 </Control>
               </div>
@@ -494,6 +513,16 @@ export default function Settings({
               </Control>
             </div>
           )}
+
+          {/* Mounted from the start and filled later, like `ShareLog`'s, and for
+              the same reason: a live region that appears already holding its text
+              is missed by most screen readers. This is where a leave that could
+              not be finished is said out loud — the one thing the card was
+              previously unable to report, because the failure was discarded and
+              the success was announced in its place. */}
+          <p className="settings__said" role="status">
+            {trouble}
+          </p>
         </div>
 
         <div className="settings__controls settings__controls--last">

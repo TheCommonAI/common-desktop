@@ -1625,6 +1625,23 @@ body {
   color: var(--ink-quiet);
 }
 
+/* What the network said about leaving, and what went wrong when it could not be
+   asked. A live region, so it is mounted from the start and filled later — one
+   that appears already holding its text is missed by most screen readers — and
+   it collapses to nothing while empty rather than pushing the row down. The same
+   shape as `.share__note`, for the same reason. */
+.settings__said {
+  margin: 0.6rem 0 0;
+  min-height: 1.125rem;
+  font: 700 0.75rem/1.5 var(--font-body);
+  color: var(--ink-quiet);
+}
+
+.settings__said:empty {
+  margin: 0;
+  min-height: 0;
+}
+
 .settings__times {
   display: flex;
   flex-wrap: wrap;
@@ -1881,11 +1898,18 @@ body {
     animation: none;
   }
 
-  .rule__dot {
-    transition: none;
-  }
+  /* The gauge is left alone, and it is the only thing here that is. Its single
+     transition is a background-colour fade across marks three pixels wide:
+     nothing in it moves and nothing in it scales, so there is no motion for this
+     preference to be about, and the row inking in from the left *is* this
+     screen's subject rather than an ornament on it. Suppressing it turned the
+     download into one leap from empty to full, which is the one thing a progress
+     gauge exists not to do. Everything that travels — the opening, the steps,
+     the update card — is stopped on either side of this comment. */
 
-  /* Nothing to hold still here: `ThinkingMark` draws one frame and stops under
-     this preference rather than being animated and then suppressed, so the dots
-     land where they are and stay. */
+  /* And nothing to hold still for `ThinkingMark` or the globe: each draws a
+     single frame and stops under this preference rather than being animated and
+     then suppressed, so the dots and the sphere land where they are and stay.
+     The sphere is still draggable in that frame, which is motion the user is
+     making rather than motion being made at them. */
 }

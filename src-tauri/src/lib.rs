@@ -10,6 +10,16 @@ mod update;
 // storage plugin, so this is the only door the chats can go through.
 mod store;
 
+// The first run: fetching, checking and placing the Python runtime, the Common
+// CLI and Ollama, so that arriving without them is no longer fatal. See
+// `fetch.rs` for what it can and cannot get today.
+mod fetch;
+
+// SHA-256 for the check above. Hand-written rather than pulled in, under the
+// no-new-dependency rule in `backend.rs`'s header — see `sha256.rs` for why a
+// digest is a defensible thing to write by hand and an HTTP client is not.
+mod sha256;
+
 use tauri::{
     Manager, WindowEvent,
     image::Image,
@@ -123,8 +133,24 @@ pub fn run() {
         // program. On Windows those two answers disagree, and the disagreement cost
         // a friend a working node reported as a dead network — see `JoinState`.
         .manage(backend::Join::default())
+        // The first-run fetch that is in flight, so that a cancel can find the
+        // `curl` it means to stop. One rather than a map: a bootstrap is a
+        // one-off that installs three things in a row, and there is nothing a
+        // second concurrent one could mean.
+        .manage(fetch::Bootstrap::default())
         .setup(|app| {
             build_tray(app.handle())?;
+            // Where the bundle unpacked the seed copy of the CLI. Resolved here and
+            // nowhere else, because this is the one moment an `AppHandle` exists to
+            // ask — the commands in `backend.rs` run their work through
+            // `spawn_blocking` and have no handle to ask with, which is why the
+            // answer is stashed in a `OnceLock` for them to read.
+            if let Ok(dir) = app
+                .path()
+                .resolve("cli", tauri::path::BaseDirectory::Resource)
+            {
+                backend::use_cli_seed(dir);
+            }
             Ok(())
         })
         // Closing the window hides it. The app is a thing that lives in the menu
@@ -184,6 +210,14 @@ pub fn run() {
             // in exactly the case it exists for.
             backend::diagnostics,
             backend::save_diagnostics,
+            // The first run. First what it *would* fetch, before it fetches
+            // anything — no network, no writes, just what is already on the
+            // machine and what could be added — then the fetch itself, streamed
+            // so the screen can draw a transfer, and the way out of one, which
+            // stops the `curl` and not the app.
+            fetch::bootstrap_status,
+            fetch::bootstrap_run,
+            fetch::bootstrap_cancel,
             // Updating the app itself, from the release it is published to.
             update::update_check,
             update::update_stage,

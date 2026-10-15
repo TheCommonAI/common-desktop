@@ -38,10 +38,10 @@
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 // `Manager` is the trait that puts `path()` on the app handle, which is where a
 // report is written. `config` and `package_info` are inherent methods and need no
@@ -137,6 +137,145 @@ fn ollama_dir() -> Option<PathBuf> {
     None
 }
 
+/* ------------------------------- the CLI itself ------------------------------- */
+
+/// Where the bundle unpacked the seed copy of the CLI, if it carries one.
+///
+/// Set once, from `lib.rs`'s `setup`, because that is the only moment an
+/// `AppHandle` exists to ask for the resource directory — and because `run_common`
+/// and its four siblings are plain functions reached through `spawn_blocking`,
+/// which have no handle and could not ask for themselves.
+///
+/// A `OnceLock` rather than managed state for the same reason: `State` is
+/// reachable only from inside a command, and the callers here sit one layer below
+/// that.
+static CLI_SEED: OnceLock<PathBuf> = OnceLock::new();
+
+/// Record where the bundled seed was unpacked. Called once, at startup.
+pub fn use_cli_seed(dir: PathBuf) {
+    let _ = CLI_SEED.set(dir);
+}
+
+/// `~/.common-network`, the directory the CLI's own installer owns.
+fn cli_home(home: &Path) -> PathBuf {
+    home.join(".common-network")
+}
+
+/// The files the seed places. `worker.py` is not optional — `join.py` imports it
+/// as a sibling, and the CLI's own installer is careful to fetch the two together
+/// for exactly that reason.
+const CLI_FILES: [&str; 4] = ["common.py", "join.py", "worker.py", "chat.py"];
+
+/// Copy the bundled CLI into `~/.common-network`, over nothing.
+///
+/// Not fatal when it fails: the fallback in `cli` still finds a `common` installed
+/// the traditional way, and that is a working app.
+fn seed_cli(seed: &Path, dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    for name in CLI_FILES {
+        let to = dir.join(name);
+        if to.exists() {
+            continue;
+        }
+        std::fs::copy(seed.join(name), &to)?;
+    }
+    Ok(())
+}
+
+/// The CLI script this app runs, placing the bundled seed if the machine has none.
+///
+/// The seed is what makes arriving with nothing work at all: without it the app
+/// would have an interpreter and no program to hand it, which is precisely the
+/// state `~/.common-network` is in on a machine that has only ever run this app.
+///
+/// An existing copy always wins, and that is the same "do not clobber" rule the
+/// fetch follows for Ollama rather than a courtesy: the CLI in this directory may
+/// be a version the user installed or updated themselves, and it is the one their
+/// other tools are using.
+fn cli_script(home: &Path) -> Option<PathBuf> {
+    let dir = cli_home(home);
+    let script = dir.join("common.py");
+    if script.is_file() {
+        return Some(script);
+    }
+    let seed = CLI_SEED.get()?;
+    if let Err(e) = seed_cli(seed, &dir) {
+        // Worth a line rather than a shrug: the alternative is a first run that
+        // cannot work, with nothing anywhere saying why.
+        eprintln!("could not place the bundled CLI at {}: {e}", dir.display());
+        return None;
+    }
+    script.is_file().then_some(script)
+}
+
+/// A `common` invocation, resolved.
+///
+/// The command to run, and the path to name if it will not start.
+struct Cli {
+    cmd: Command,
+    named: PathBuf,
+}
+
+/// Build a `common` invocation, whichever way this machine can run one.
+///
+/// The invocation is `python3 <script>`, and not the `bin/common` wrapper sitting
+/// beside it, for a reason that is not stylistic. The wrapper is a shell script
+/// that resolves its own interpreter — and the ones this app was tested against
+/// resolve it from a hardcoded list of absolute system paths, never consulting
+/// `PATH`. So a Python this app fetched could sit at
+/// `~/.common-network/runtime/python/bin/python3` for the life of the install and
+/// never once be the Python the CLI ran under, which would make the fetch pure
+/// ceremony. Naming the interpreter and the script outright is also the one form
+/// that is identical on all three platforms, where the wrapper needs a POSIX shell
+/// that Windows does not have.
+///
+/// `COMMON_BIN` still wins outright: it is how somebody runs this app against a
+/// checkout, and a seed must not get in the way of that.
+fn cli() -> Result<Cli, String> {
+    if let Ok(explicit) = std::env::var("COMMON_BIN")
+        && !explicit.is_empty()
+    {
+        let path = PathBuf::from(explicit);
+        return Ok(Cli {
+            cmd: silent(&path),
+            named: path,
+        });
+    }
+
+    let home = home_dir()?;
+
+    // The interpreter first, so that a machine with no Python is not seeded with a
+    // script it could not run anyway.
+    if let Some(python) = crate::fetch::python_for_cli(&home)
+        && let Some(script) = cli_script(&home)
+    {
+        let mut cmd = silent(&python);
+        cmd.arg(&script);
+        return Ok(Cli { cmd, named: script });
+    }
+
+    // No interpreter this app can vouch for. The old path, which finds an installed
+    // `common` or falls back to the name on `PATH` — the last case is a machine
+    // where the wrapper, and whatever interpreter it can find for itself, is the
+    // only thing that can work.
+    let path = common_bin();
+    Ok(Cli {
+        cmd: silent(&path),
+        named: path,
+    })
+}
+
+/// What [`cli`] would run, for the diagnostics report.
+///
+/// The script and not the interpreter, because "which `common` is this app using"
+/// is the question the report answers, and `python3` is not an answer to it.
+fn cli_path() -> String {
+    match cli() {
+        Ok(resolved) => resolved.named.to_string_lossy().to_string(),
+        Err(_) => common_bin().to_string_lossy().to_string(),
+    }
+}
+
 /// The environment a `common` invocation needs, which is not always the one this
 /// process was handed.
 ///
@@ -154,19 +293,39 @@ fn ollama_dir() -> Option<PathBuf> {
 /// Appended and not prepended, so an Ollama the user installed somewhere of their own
 /// choosing still wins the lookup; this supplies the directory only when nothing else
 /// has.
+///
+/// There are two directories now, and the second one arrived with the seed. The
+/// `bin/common` wrapper that this app used to go through put `~/.common-network/bin`
+/// on `PATH` itself, and that is where the installer leaves `cloudflared`. Running the
+/// script directly means nothing else does, and `join.py` looks `cloudflared` up by
+/// name before it will serve anything — so without this a join would get all the way to
+/// the tunnel and stop, which is the same shape of failure the paragraph above exists
+/// to prevent.
 fn cli_env(cmd: &mut Command) {
     // Belt and braces beside `--no-color`: the CLI also honours NO_COLOR, and a
     // stray escape sequence inside JSON is a parse error with a baffling cause.
     cmd.env("NO_COLOR", "1");
 
-    if let Some(dir) = ollama_dir() {
-        let mut paths: Vec<PathBuf> = std::env::var_os("PATH")
-            .map(|existing| std::env::split_paths(&existing).collect())
-            .unwrap_or_default();
-        paths.push(dir);
-        if let Ok(joined) = std::env::join_paths(paths) {
-            cmd.env("PATH", joined);
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Ok(home) = home_dir() {
+        let bin = cli_home(&home).join("bin");
+        if bin.is_dir() {
+            dirs.push(bin);
         }
+    }
+    if let Some(dir) = ollama_dir() {
+        dirs.push(dir);
+    }
+    if dirs.is_empty() {
+        return;
+    }
+
+    let mut paths: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|existing| std::env::split_paths(&existing).collect())
+        .unwrap_or_default();
+    paths.extend(dirs);
+    if let Ok(joined) = std::env::join_paths(paths) {
+        cmd.env("PATH", joined);
     }
 }
 
@@ -350,9 +509,16 @@ fn last_json(raw: &str) -> String {
 /// `--json` must precede the verb: `rest` is an `argparse.REMAINDER`, so
 /// anything written after the verb is captured as free text and a flag there is
 /// silently ignored.
+///
+/// The suppression above is about this app's calls and not about the copy of the
+/// CLI on disk, which is worth being precise about now that the app can place one.
+/// A seeded CLI is not a frozen one: the CLI updates *itself* from the network's
+/// `main` branch whenever it is run without `--no-update`, which is what happens
+/// the moment the user runs `common` from a terminal — so a fix to the CLI reaches
+/// the machines running this app without an app release, and the seeded copy is a
+/// starting point rather than the version anybody is stuck with.
 fn run_common(verb: &str, extra: &[&str], json: bool) -> Result<String, String> {
-    let bin = common_bin();
-    let mut cmd = silent(&bin);
+    let Cli { mut cmd, named } = cli()?;
     cmd.arg("--no-color").arg("--no-update");
     if json {
         cmd.arg("--json");
@@ -360,7 +526,7 @@ fn run_common(verb: &str, extra: &[&str], json: bool) -> Result<String, String> 
     cmd.arg(verb).args(extra);
     cli_env(&mut cmd);
 
-    let out = cmd.output().map_err(|e| launch_error(&bin, e))?;
+    let out = cmd.output().map_err(|e| launch_error(&named, e))?;
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -896,10 +1062,337 @@ pub async fn network_contrib() -> Result<String, String> {
 }
 
 /// Deregister this machine and forget its identity.
+///
+/// **Why this no longer runs `common leave`.** It did, and it did nothing.
+/// `cmd_leave` in `common.py` is a tool for a *permanent* install: it runs
+/// `join.py --remove-permanent`, which dispatches to a launchd, systemd or Task
+/// Scheduler service and nothing else, and this app joins in the foreground
+/// instead. So there is no service to remove, and the verb prints "no background
+/// service found … press Ctrl+C there to leave." — with nothing deleted — and
+/// then exits 0 while saying so.
+///
+/// `run_common` reads failure off the exit status, so the zero became a success.
+/// The card said "This machine has left the network." while the identity file
+/// survived, the node stayed registered and the join went on serving — and the
+/// next read of `whoami` put the machine straight back on the card. That is the
+/// whole of "the leave network button doesn't do anything": a button reporting
+/// the truth about a command that had never been asked the right question.
+///
+/// So the teardown is done here, and it is the same three things `join.py` does
+/// when it is interrupted — stop the process, deregister the node, forget the
+/// identity — in that order, because `join.py` re-registers from its own loop
+/// and would put the node back between the second step and the third.
 #[tauri::command]
 pub async fn network_leave() -> Result<String, String> {
-    off_thread(|| run_common("leave", &[], false)).await
+    off_thread(|| {
+        let home = home_dir()?;
+        let dir = home.join(".common-network");
+
+        // Read before stopping anything. `join.py`'s own handler deletes this
+        // file, and the token inside it is the only thing that can take the node
+        // off the gateway — so a copy taken first is what lets the fallback below
+        // finish a job the signal started, and is also what tells us afterwards
+        // whether there was a job at all.
+        let credentials = identity_credentials(&dir);
+
+        let stopped = stop_join(&dir)?;
+
+        // Two ways to arrive here with work left. Nothing was running, so no
+        // handler ran and nothing was deregistered or forgotten; or something was
+        // signalled and did not stop, which on Windows is the expected shape
+        // rather than the strange one, there being no SIGTERM to deliver.
+        let gone = if dir.join("identity.json").exists() {
+            let removed = match &credentials {
+                // Best effort, and deliberately not fatal: a machine that cannot
+                // reach the gateway must still be able to leave locally, or an
+                // outage out there would strand the user on the network.
+                Some(credentials) => deregister(credentials).is_ok(),
+                // An identity that cannot be read cannot be used to deregister —
+                // but it can still be forgotten, which is the half of leaving
+                // that is this machine's to do.
+                None => false,
+            };
+            forget(&dir)?;
+            removed
+        } else {
+            // The handler got there first, and it only deletes the file after its
+            // own DELETE has been attempted. So this is the network's answer, as
+            // far as anything on this side can know it — the CLI swallows that
+            // request's failure for the same reason we do, and neither of us can
+            // see past the far side of a request that was never answered.
+            credentials.is_some()
+        };
+
+        Ok(match (credentials.is_some(), gone) {
+            (true, true) => "This machine has left the network.".to_string(),
+            (true, false) => {
+                "This machine has stopped contributing, but the network couldn't be reached to \
+                 remove it — it may stay listed until the network notices."
+                    .to_string()
+            }
+            (false, _) if stopped => "This machine has stopped contributing.".to_string(),
+            (false, _) => "This machine was not on the network.".to_string(),
+        })
+    })
+    .await
 }
+
+/* -------------------------------- leaving --------------------------------- */
+
+/// The gateway, node id and token, for the one caller allowed to spend them.
+///
+/// `read_identity` cannot return the token and that is on purpose — see
+/// `IdentitySummary`, where the reason is written down. This is a second reader
+/// rather than a widened first one, and the separation is the point: the report
+/// path cannot leak a credential by construction, while this path exists to use
+/// one, once, in a request header. Nothing it returns is ever formatted into a
+/// message that reaches the screen.
+struct Credentials {
+    gateway: String,
+    node_id: String,
+    token: String,
+}
+
+fn identity_credentials(dir: &std::path::Path) -> Option<Credentials> {
+    let raw = std::fs::read_to_string(dir.join("identity.json")).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let text = |key: &str| {
+        parsed
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    Some(Credentials {
+        gateway: text("gateway")?,
+        node_id: text("node_id")?,
+        token: text("node_token")?,
+    })
+}
+
+/// Take this node off the gateway.
+///
+/// The same `DELETE /nodes/{id}` with the same header that `join.py` makes when
+/// it is interrupted, and with the same five-second patience — the gateway is a
+/// donated machine away, and a click that hangs is worse than one that gives up
+/// and says so. `curl` rather than an HTTP client, like every other request this
+/// file makes; see the module note on new dependencies.
+fn deregister(credentials: &Credentials) -> Result<(), String> {
+    let url = format!(
+        "{}/nodes/{}",
+        credentials.gateway.trim_end_matches('/'),
+        credentials.node_id
+    );
+    let out = silent("curl")
+        .args([
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--max-time",
+            "5",
+            "--request",
+            "DELETE",
+        ])
+        .arg("--header")
+        .arg(format!("X-Common-Node-Token: {}", credentials.token))
+        .arg(&url)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("couldn't run curl: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    Err(if stderr.is_empty() {
+        format!("the gateway answered {}", out.status)
+    } else {
+        stderr
+    })
+}
+
+/// Forget this machine's identity, whether or not the network was told.
+///
+/// NotFound is success: the join's own handler removes the same file, and a race
+/// between the two is the expected case rather than a fault. A failure to unlink
+/// is not, because an identity that survives its own removal puts the machine
+/// back on the network at the next read — which is the bug this whole command
+/// exists to stop.
+fn forget(dir: &std::path::Path) -> Result<(), String> {
+    match std::fs::remove_file(dir.join("identity.json")) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("couldn't forget this machine's identity: {e}")),
+    }
+}
+
+/// Stop whatever is serving this machine, and say whether anything was found.
+///
+/// **Signalled rather than reimplemented**, because `join.py` already knows how
+/// to leave: its SIGINT/SIGTERM handler deregisters the node, clears the identity
+/// and stops the tunnel, and that is the same path Ctrl+C takes — the very thing
+/// the CLI's own "press Ctrl+C there to leave" points at. Doing it through the
+/// process means the tunnel is closed by the code that opened it, which a
+/// reimplementation here could not do without learning how the tunnel is tracked.
+fn stop_join(dir: &std::path::Path) -> Result<bool, String> {
+    let pids = join_processes(dir);
+    if pids.is_empty() {
+        return Ok(false);
+    }
+
+    let identity = dir.join("identity.json");
+    let had_identity = identity.exists();
+
+    for pid in &pids {
+        terminate(*pid);
+    }
+
+    // Waited on by looking for the file the handler removes, rather than by
+    // asking after each pid every second. That was the shape this file already
+    // grew out of: `kill -0` on Windows is a fresh `tasklist` whose answer this
+    // process cannot check, and on unix it is a subprocess a second for as long
+    // as the wait lasts. The file is one `stat`, and it is the thing the caller
+    // was going to look at next anyway.
+    //
+    // Seven seconds, because the handler's own DELETE has a five-second timeout
+    // and is attempted before the file goes. A join that never wrote an identity
+    // gets a shorter, fixed grace instead: there is nothing to watch for, and a
+    // polite signal still needs *some* time before the hard one follows it.
+    let patience = if had_identity { 70 } else { 10 };
+    for _ in 0..patience {
+        if had_identity && !identity.exists() {
+            return Ok(true);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // Still there, so no handler ran: the process could not be signalled politely
+    // (Windows has nothing that reaches Python's `SIGTERM` handler) or it is
+    // wedged. Either way nothing here is going to leave on its own now, and a
+    // machine that has been told to leave must not go on answering other
+    // people's questions because a process declined to stop.
+    for pid in &pids {
+        kill_join(*pid);
+    }
+    Ok(true)
+}
+
+/// The pids running *this* machine's join, found by the script it runs.
+///
+/// By path rather than by name: matching `join.py` alone would find a join
+/// belonging to a second account, a second install, or a stray checkout — and
+/// leaving is not something that should be able to stop somebody else's node.
+///
+/// The app holds the `Child` it spawned (see `Join`), and on unix that child *is*
+/// the join. It is not used here because it is the wrong shape for this question:
+/// it lives in memory only, so a join started by a previous run of the app —
+/// the ordinary case, a join outliving the window that started it — has no handle
+/// at all; and on Windows it is the batch wrapper, which has already exited by
+/// design. A search by path answers for every join, on either platform and from
+/// either run, and one mechanism that always answers beats two that each answer
+/// half the time.
+#[cfg(unix)]
+fn join_processes(dir: &std::path::Path) -> Vec<u32> {
+    // The whole process list, matched here rather than in the query, for the same
+    // reason the Windows branch below does it this way. `pgrep -f` takes an
+    // extended regular expression, and a home directory is a path and not a
+    // pattern: a `.` in a username is a wildcard to it, and a `+` — legal in a
+    // Linux username — makes it a malformed pattern that exits with nothing on
+    // stdout. An empty answer there is indistinguishable from "nothing is
+    // running", which is the failure this whole section exists to remove. So `ps`
+    // is asked for the list and the comparison is a plain substring test.
+    let Ok(out) = silent("ps").args(["-Ao", "pid=,command="]).output() else {
+        return Vec::new();
+    };
+    let script = dir.join("join.py").to_string_lossy().to_string();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| line.contains(&script))
+        .filter_map(|line| line.split_whitespace().next())
+        .filter_map(|pid| pid.parse::<u32>().ok())
+        .collect()
+}
+
+#[cfg(windows)]
+fn join_processes(dir: &std::path::Path) -> Vec<u32> {
+    // Every process with its command line, filtered here rather than in the
+    // query. A `Where-Object` would have to carry this machine's home directory
+    // into a PowerShell string, where a backslash, a quote or a space in a
+    // username breaks it — and a filter that quietly matches nothing looks
+    // exactly like "nothing is running", which is the failure mode this whole
+    // change is about.
+    let Ok(out) = silent("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId)\t$($_.CommandLine)\" }",
+        ])
+        .output()
+    else {
+        return Vec::new();
+    };
+    // Case-insensitively, because Windows does not distinguish the two in a path
+    // and PowerShell will not have normalised the casing it reports.
+    let script = dir.join("join.py").to_string_lossy().to_ascii_lowercase();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| line.to_ascii_lowercase().contains(&script))
+        .filter_map(|line| line.split('\t').next()?.trim().parse::<u32>().ok())
+        .collect()
+}
+
+/// Neither unix nor Windows, which are the two this app is built for. An empty
+/// answer is the honest one: nothing here knows how to look.
+#[cfg(not(any(unix, windows)))]
+fn join_processes(_dir: &std::path::Path) -> Vec<u32> {
+    Vec::new()
+}
+
+/// Ask a process to stop, so that it gets to run its own cleanup.
+#[cfg(unix)]
+fn terminate(pid: u32) {
+    // SIGTERM and not SIGKILL, which is the whole point of the exercise: the
+    // handler it triggers is what deregisters the node, forgets the identity and
+    // closes the tunnel. Ending the process outright would leave all three.
+    let _ = silent("kill").arg("-TERM").arg(pid.to_string()).status();
+}
+
+#[cfg(windows)]
+fn terminate(pid: u32) {
+    // Without `/F`, which is as close to a polite request as Windows offers. It is
+    // not SIGTERM and Python's handler does not run for it, so the caller has to
+    // be ready for the process still being there afterwards — the hard ending
+    // below and the fallback in `network_leave` are both written for that.
+    let _ = silent("taskkill")
+        .arg("/PID")
+        .arg(pid.to_string())
+        .arg("/T")
+        .status();
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminate(_pid: u32) {}
+
+/// End a process that would not go. `/T` on Windows takes the children with it,
+/// which is what stops an orphaned tunnel outliving the node it belonged to.
+#[cfg(unix)]
+fn kill_join(pid: u32) {
+    let _ = silent("kill").arg("-KILL").arg(pid.to_string()).status();
+}
+
+#[cfg(windows)]
+fn kill_join(pid: u32) {
+    let _ = silent("taskkill")
+        .arg("/PID")
+        .arg(pid.to_string())
+        .arg("/T")
+        .arg("/F")
+        .status();
+}
+
+#[cfg(not(any(unix, windows)))]
+fn kill_join(_pid: u32) {}
 
 /// Ask the local model something, through the same path the CLI uses.
 ///
@@ -927,8 +1420,10 @@ pub async fn network_ask_local(question: String, model: Option<String>) -> Resul
             ));
         }
 
-        let bin = common_bin();
-        let mut cmd = silent(&bin);
+        let Cli {
+            mut cmd,
+            named: bin,
+        } = cli()?;
         // `--local` is a top-level flag and therefore must precede the verb; see
         // the REMAINDER note on `run_common`.
         cmd.arg("--no-color")
@@ -1012,8 +1507,10 @@ pub fn network_ask_stop() {
 #[tauri::command]
 pub async fn network_ask(question: String) -> Result<String, String> {
     off_thread(move || {
-        let bin = common_bin();
-        let mut cmd = silent(&bin);
+        let Cli {
+            mut cmd,
+            named: bin,
+        } = cli()?;
         cmd.arg("--no-color").arg("--no-update").arg("--json");
         cmd.arg("ask").arg(&question);
         cmd.env("NO_COLOR", "1");
@@ -1121,7 +1618,13 @@ pub async fn network_join(
     lan: bool,
 ) -> Result<u64, String> {
     off_thread(move || {
-        let bin = common_bin();
+        // Resolved before the log is opened: a machine with neither a Python this
+        // app trusts nor an installed CLI should fail with the launch sentence,
+        // rather than leaving behind a join log describing a join that never began.
+        let Cli {
+            mut cmd,
+            named: bin,
+        } = cli()?;
 
         let home = home_dir().map_err(|_| "no home to write the join log to".to_string())?;
         let dir = home.join(".common-network");
@@ -1154,7 +1657,6 @@ pub async fn network_join(
             .map_err(|e| format!("couldn't measure {}: {e}", log_path.display()))?
             .len();
 
-        let mut cmd = silent(&bin);
         cmd.arg("--no-color").arg("--no-update").arg("join");
         if let Some(m) = model.as_deref() {
             cmd.arg("--model").arg(m);
@@ -1473,7 +1975,7 @@ pub async fn diagnostics(app: tauri::AppHandle) -> Result<Diagnostics, String> {
             os_platform: os.platform,
             os_version: os.version,
             cli_version: cli_version(),
-            cli_path: common_bin().to_string_lossy().to_string(),
+            cli_path: cli_path(),
             gateway: gateway_base(),
             joined,
             identity_path,
@@ -1659,12 +2161,8 @@ fn tail_lines(text: &str, lines: usize) -> String {
 /// installed. `--no-update` keeps the call from reaching GitHub — this is the one
 /// process this module starts that is allowed to be slow, and it is still local.
 fn cli_version() -> Option<String> {
-    let bin = common_bin();
-    let out = silent(&bin)
-        .arg("--no-update")
-        .arg("--version")
-        .output()
-        .ok()?;
+    let Cli { mut cmd, .. } = cli().ok()?;
+    let out = cmd.arg("--no-update").arg("--version").output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -2750,5 +3248,85 @@ mod join_log {
         let long: String = (1..=40).map(|n| format!("line {n}\n")).collect();
         let tail = tail_from(&long, 0, 3);
         assert_eq!(tail, "line 38\nline 39\nline 40");
+    }
+}
+
+/// Placing the bundled CLI, which is the one thing standing between a machine that
+/// has never had the toolchain and a first run that works.
+#[cfg(test)]
+mod seed {
+    use super::*;
+
+    /// A scratch directory of this test's own, so two tests cannot collide.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("common-seed-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
+    }
+
+    fn bundle(name: &str) -> PathBuf {
+        let from = scratch(name);
+        for file in CLI_FILES {
+            std::fs::write(from.join(file), b"a stand-in payload").expect("a stand-in payload");
+        }
+        from
+    }
+
+    #[test]
+    fn every_file_the_cli_needs_is_placed() {
+        let to = scratch("every-file-home");
+
+        seed_cli(&bundle("every-file-bundle"), &to).expect("the seed places");
+
+        for name in CLI_FILES {
+            assert!(
+                to.join(name).is_file(),
+                "{name} was not placed, and a `common` missing it is a `common` that \
+                 cannot run"
+            );
+        }
+    }
+
+    /// `join.py` imports `worker.py` as a sibling — which is why the CLI's own
+    /// installer fetches the two together rather than one at a time. A seed that placed
+    /// one and not the other would give a join that starts, prints nothing, and dies on
+    /// the import.
+    #[test]
+    fn the_worker_travels_with_the_join_that_imports_it() {
+        assert!(CLI_FILES.contains(&"join.py"));
+        assert!(CLI_FILES.contains(&"worker.py"));
+    }
+
+    /// The rule that matters more than the placing does. `~/.common-network` may hold a
+    /// CLI the user installed, or one their own `common` has since updated — and the app
+    /// writing over it would be the same failure the fetch avoids for Ollama, where a
+    /// second copy is a copy with none of the models.
+    #[test]
+    fn a_machine_that_already_has_the_cli_keeps_the_one_it_has() {
+        let to = scratch("no-clobber-home");
+        std::fs::write(to.join("common.py"), b"the version this machine updated to")
+            .expect("an existing copy");
+
+        seed_cli(&bundle("no-clobber-bundle"), &to).expect("the seed runs");
+
+        assert_eq!(
+            std::fs::read(to.join("common.py")).expect("read it back"),
+            b"the version this machine updated to",
+            "the seed overwrote a working install"
+        );
+    }
+
+    /// A directory that is not there yet is the ordinary case and not the edge one: it
+    /// is what `~/.common-network` looks like on a machine that has only ever run this
+    /// app. So the seed makes it rather than failing on it.
+    #[test]
+    fn the_home_the_cli_lives_in_is_made_when_it_is_not_there() {
+        let to = scratch("makes-home-home").join(".common-network");
+
+        seed_cli(&bundle("makes-home-bundle"), &to)
+            .expect("the seed places into a directory that is not there yet");
+
+        assert!(to.join("common.py").is_file());
     }
 }
