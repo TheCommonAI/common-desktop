@@ -30,8 +30,8 @@ import { refused, useTask } from "../use-task";
  * report of this machine, this is `ShareLog`. Two of them do say "it will not
  * connect", and they are different failures: one is the gateway not being able to
  * route here, which is a firewall and not a bug report; the other is the gateway
- * never answering at all. The third is on this side of the glass entirely — the
- * join stopped — and saying "the network didn't answer" about it is what this
+ * never answering at all. The third is nearer this side of the glass — the join
+ * never got through — and saying "the network didn't answer" about it is what this
  * screen used to do to a Windows machine whose node was listed in `/peers`, which
  * is the mistake the split below exists to prevent. Which of the three is showing
  * is decided by the error's `code`, and the detail line under each is whatever
@@ -155,20 +155,21 @@ export default function JoinNetwork({ flow, next, back }: ScreenProps) {
     // detail line: the detail is the same sentence with a path on it, and the path
     // is in the log the Share control carries.
     //
-    // A join that stopped did reach the network, or was trying to, and the app gave
-    // up on the *process*. Saying "nothing came back from the gateway" there is the
-    // wrong way round: it blames the far side for something this machine did, and
-    // it is what a Windows machine was told while its node sat in `/peers`. The
-    // detail is the fact that says which it was, and it arrives by two roads: the
-    // exit code of a wrapper that failed to hand off, or — on Windows, where the
-    // handle sees nothing and `join.log` is the only witness — the last line of the
-    // log that reads as a death.
+    // A join that did not get through reached the network, or was trying to, and the
+    // app has given up on it. Saying "nothing came back from the gateway" there is the
+    // wrong way round: it blames the far side for something this machine may have done,
+    // and it is what a Windows machine was told while its node sat in `/peers`. The
+    // detail is the fact that says which it was, and it arrives by two roads: the exit
+    // code of a wrapper that failed to hand off, or — on Windows, where the handle sees
+    // nothing and `join.log` is the only witness — the last line of the log that reads
+    // as a failure. Neither road establishes that the process is *dead*, so the
+    // sentence claims only that it did not get through.
     const missingCli = state.error.code === "cli-missing";
     const stopped = state.error.code === "join-stopped";
     statement = missingCli
       ? "Common isn't fully installed."
       : stopped
-        ? "The join stopped on this machine."
+        ? "The join didn't get through."
         : "The network didn't answer.";
     caption = missingCli
       ? [
@@ -177,10 +178,15 @@ export default function JoinNetwork({ flow, next, back }: ScreenProps) {
         ]
       : stopped
         ? [
-            // What the app actually knows, and no more. Whether the node reached
-            // the network is the gateway's answer to give, not this line's to
-            // assume — and assuming it wrongly is the bug this state was added for.
-            "It didn't stay running",
+            // What the app actually knows, and no more — which here is less than "it
+            // stopped". Two roads reach this state and only one of them witnessed a
+            // death: the exit code of a wrapper that failed to hand off, and, on
+            // Windows, the last line of `join.log` that reads as one. The log cannot
+            // separate a dead join from a live one that is failing, because `join.py`
+            // prints the same `✗` for a re-registration it survives as for a failure it
+            // does not. So the clause says only what both roads support: this join did
+            // not get through, and the line below is the last thing it said about why.
+            "Its join reported a problem",
             state.error.detail ?? null,
           ]
         : [

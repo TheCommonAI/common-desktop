@@ -96,7 +96,7 @@ const TERMINAL = [
   { kind: "registered", match: /^You're registered\.$/ },
   { kind: "error", match: /^The network didn't answer\.$/ },
   { kind: "error", match: /^Common isn't fully installed\.$/ },
-  { kind: "error", match: /^The join stopped on this machine\.$/ },
+  { kind: "error", match: /^The join didn't get through\.$/ },
 ];
 
 /* ---------------------------------- logging ---------------------------------- */

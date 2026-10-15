@@ -510,7 +510,7 @@ function joinNetwork(
             injected === "cli-missing"
               ? "Couldn't start the join."
               : stopped
-                ? "The join stopped on this machine."
+                ? "The join didn't get through."
                 : "The network didn't answer.",
             // The exit code is what the real path puts on this line, and the stopped
             // screen has a caption slot for it. Without one the preview would show

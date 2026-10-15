@@ -186,7 +186,7 @@ const SENTENCE: Record<OnboardingErrorCode, string> = {
   "permission-denied": "The system refused that.",
   network: "Nothing came back.",
   "cli-missing": "Common's command-line tool isn't installed.",
-  "join-stopped": "The join stopped on this machine.",
+  "join-stopped": "The join didn't get through.",
   "insufficient-disk": "There isn't enough room.",
   "not-found": "That model isn't available.",
   timeout: "That took too long.",
@@ -1255,18 +1255,27 @@ async function spawnJoin(request: JoinRequest): Promise<void> {
   joined = true;
 }
 
-/** The last thing this attempt's join said before it stopped, or `null` if it has said
- *  nothing that reads as a death.
+/** The last thing this attempt's join said about a problem, or `null` if it has said
+ *  nothing that reads as one.
  *
- *  This is the answer to a question the process handle cannot be asked on Windows. What
- *  this app holds there is `common.cmd`, a batch wrapper that exits *cleanly* the moment
- *  it has handed off to `join.py` — so a clean exit is how a join normally starts, the
- *  app sees `HandedOff` either way, and a join that then dies out there dies unwitnessed.
- *  `join.log` is the only account of it, and a good one: `join.py`'s `die_with_fix` leads
- *  with `✗`, and an uncaught traceback ends on the line naming the exception.
+ *  This answers a question the process handle cannot be asked on Windows. What this app
+ *  holds there is `common.cmd`, a batch wrapper that exits *cleanly* the moment it has
+ *  handed off to `join.py` — so a clean exit is how a join normally starts, the app sees
+ *  `HandedOff` either way, and a join that then dies out there dies unwitnessed.
+ *  `join.log` is the only account of it.
+ *
+ *  What the log cannot say is whether the process is still alive, and the caller must not
+ *  pretend otherwise. `✗` is not a death marker: `join.py` prints it from `die_with_fix`
+ *  and also from the `except` handlers in its re-registration loop, which it then carries
+ *  on running — and a node whose re-registration failed is exactly a node the gateway
+ *  stops listing, so that line is the likeliest one to be last here. An uncaught
+ *  traceback's final line does mean a death, but it is not the only shape this returns.
+ *
+ *  A line of evidence, then, and not a verdict: "this is what the join last complained
+ *  about". The sentence it is shown under is worded to be true either way.
  *
  *  Read only from `joinStart`, so what comes back is this attempt's words and not a dead
- *  attempt's last rites. A `null` means the join has said nothing that reads as a death —
+ *  attempt's last rites. A `null` means the join has said nothing that reads as a problem —
  *  which covers both "it is working" and "it died silently", two cases this file cannot
  *  tell apart. The caller's fallback is the sentence for a gateway that never answered,
  *  which claims nothing about this machine and is the honest thing to say about both. */
@@ -1274,11 +1283,21 @@ async function joinStoppedReason(): Promise<string | null> {
   if (joinStart === null) return null;
   const tail = await read<string | null>("network_join_tail", { from: joinStart });
   if (!tail.ok || tail.value === null) return null;
-  // The last line that reads as a death, and not the first: an attempt that was retried
+  // The last line that reads as a problem, and not the first: an attempt that was retried
   // appends rather than replaces, and the newest account is the one that says why the
-  // join is not up *now*. The `✗` is `die_with_fix` speaking; a bare `error` catches the
-  // tracebacks it does not speak for — `HTTPError`, `gaierror` and the rest.
-  const lines = tail.value.split("\n").filter((line) => /^\s*✗/.test(line) || /error/i.test(line));
+  // join is not up *now*.
+  //
+  // A failure glyph, or the line Python ends an uncaught traceback on. Not a mention of
+  // the word "error", which was this filter's first shape and was wrong: `join.py` prints
+  // one of those every half hour on a perfectly healthy node — "could not self-update
+  // (…), continuing with current version" — and offering that as the reason a join failed
+  // would be a caption whose own words say it did not matter.
+  const FAILED = /^\s*✗/;
+  // `urllib.error.HTTPError: …`, and the name has to *end* in the word, so a sentence with
+  // "error" somewhere in the middle of it is not a match. `socket.gaierror` is the one
+  // exception Python spells with a lowercase `e`.
+  const TRACEBACK_END = /^(?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*(?:Error|error)\s*:/;
+  const lines = tail.value.split("\n").filter((line) => FAILED.test(line) || TRACEBACK_END.test(line));
   const last = lines.at(-1)?.trim();
   if (last === undefined || last === "") return null;
   // A clause, not a paragraph. The caption's type is small and uppercase and the sheet
@@ -1472,13 +1491,18 @@ function joinNetwork(request: JoinRequest, opts?: ProgressOptions<JoinProgress>)
         // problem, and it is read out once the model has answered, below.
         //
         // Why the silence is two questions, and the log is what tells them apart. A
-        // join that died at its first act never reached the gateway at all, and
+        // join that failed on its way up never reached the gateway at all, and
         // blaming the gateway for that is blaming the side that was never asked.
         // That is not a hypothetical: a Windows self-trial's join died in under a
         // second on `✗ ollama not found.` — the app had spawned it without Ollama's
         // directory on its `PATH` — and the screen spent the whole four minutes
         // saying "the gateway never listed this machine". On Windows the handle
         // cannot be asked, so `joinStoppedReason` is the only witness there is.
+        //
+        // The half of the question the log *can* carry, and no more: it says what the
+        // join complained about, never whether the process is still up. The code below
+        // is therefore not a claim that anything stopped — the sentence it leads to is
+        // written to be true of a join that died and of one still failing out of sight.
         //
         // A line, and not the log. `detail` is rendered as a clause in the caption,
         // and `join.log` is written for a terminal: dropped in there it arrives
@@ -1487,10 +1511,10 @@ function joinNetwork(request: JoinRequest, opts?: ProgressOptions<JoinProgress>)
         // `ShareLog` on this very screen carries the log into the report.
         const stoppedHere = await joinStoppedReason();
         if (stoppedHere !== null) {
-          // The join stopped, and this is what it said on the way down. The screen
-          // for this code exists and reads the detail as its second caption line —
-          // see `JoinNetwork.tsx`, where the reason this is not `network` is written
-          // down at more length than a comment here could carry.
+          // The join reported a problem, and this is the last of it. The screen for this
+          // code reads that line as its second caption line, under a sentence worded to
+          // survive the log's uncertainty — see `JoinNetwork.tsx`, where the reason this
+          // is not `network` is written down at more length than a comment here could.
           throw new OnboardingError("join-stopped", SENTENCE["join-stopped"], stoppedHere);
         }
         throw new OnboardingError("network", SENTENCE.network, "the gateway never listed this machine");
