@@ -111,15 +111,22 @@ function appLogTail(lines = 40) {
   }
 }
 
-function appIsRunning() {
-  if (APP_PID === null) return true;
-  try {
-    process.kill(APP_PID, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
+/* There is deliberately no liveness probe here. `process.kill(pid, 0)` is the
+ * only one Node has, and on Windows it is not the POSIX call: the signal
+ * argument is not honoured the same way, and it can fail for reasons that have
+ * nothing to do with the process being gone. The first run of this workflow
+ * declared a live app dead at 0.0s with 0-byte logs, and that probe is the
+ * suspect — either it answered wrongly, or it did what Node does with an
+ * unrecognised signal on Windows and ended the process outright. Neither can be
+ * settled from a Mac, so the probe is gone rather than fixed.
+ *
+ * The question it was asking is now answered before the driver starts: the
+ * workflow's launch step waits ten seconds, checks the Process object, and
+ * fails with the exit code if the app is not there, then waits for the devtools
+ * port itself. By the time `attach()` runs, the app is known to be alive and the
+ * port is known to answer. If the port stops answering, the timeout below says
+ * so, with the app's PID and whatever it printed. */
+
 
 /* -------------------------------- the CDP client -------------------------------- */
 
@@ -597,10 +604,8 @@ function unfilter(raw, width, height, channels) {
 async function attach() {
   const deadline = Date.now() + WAIT.attach * 1000;
   let lastReason = "nothing answered on the devtools port";
+  note(`attaching to the app (pid ${APP_PID ?? "unknown"}) on ${DEVTOOLS}`);
   for (;;) {
-    if (!appIsRunning()) {
-      fatal(`the app exited before its devtools port opened.\n${indent(appLogTail())}`);
-    }
     try {
       const version = await (await fetch(`${DEVTOOLS}/json/version`)).json();
       note(`attached to ${version.Browser}`);
@@ -611,7 +616,8 @@ async function attach() {
     if (Date.now() > deadline) {
       fatal(
         `waited ${WAIT.attach}s for the app's devtools port at ${DEVTOOLS} and it never opened (${lastReason}).\n` +
-          `  The app printed:\n${indent(appLogTail())}`,
+          `  The workflow verified this port answered before the driver started, so the app most\n` +
+          `  likely exited during the walk. pid ${APP_PID ?? "unknown"}. The app printed:\n${indent(appLogTail())}`,
       );
     }
     await sleep(500);
