@@ -162,8 +162,14 @@ function classify(message: string): OnboardingErrorCode {
   }
   if (/timed out|timeout|deadline exceeded|took too long/.test(text)) return "timeout";
   if (/not found|does not exist|no such|unknown model|404/.test(text)) return "not-found";
+  // A 5xx is the gateway failing, and 500 as much as 502, 503 and 504 — the bare
+  // `500` used to be the one code of the four that fell through to `unknown`, which
+  // is the only code with no sentence on a screen. A self-trial's setup died on a
+  // live 500 from `/catalogue` and would have been reported as "something went
+  // wrong", which names neither the machine nor the network and so points at
+  // nothing the user can do.
   if (
-    /could not resolve|nodename nor servname|connection refused|network is unreachable|no route to host|can't reach|cannot reach|unreachable|offline|tls|certificate|bad gateway|\b50[234]\b|eof|failed to fetch|load failed/.test(
+    /could not resolve|nodename nor servname|connection refused|network is unreachable|no route to host|can't reach|cannot reach|unreachable|offline|tls|certificate|bad gateway|\b50[0234]\b|eof|failed to fetch|load failed/.test(
       text,
     )
   ) {
