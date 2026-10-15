@@ -159,7 +159,10 @@ export default function JoinNetwork({ flow, next, back }: ScreenProps) {
     // up on the *process*. Saying "nothing came back from the gateway" there is the
     // wrong way round: it blames the far side for something this machine did, and
     // it is what a Windows machine was told while its node sat in `/peers`. The
-    // detail carries the exit code, which is the fact that says which it was.
+    // detail is the fact that says which it was, and it arrives by two roads: the
+    // exit code of a wrapper that failed to hand off, or — on Windows, where the
+    // handle sees nothing and `join.log` is the only witness — the last line of the
+    // log that reads as a death.
     const missingCli = state.error.code === "cli-missing";
     const stopped = state.error.code === "join-stopped";
     statement = missingCli
