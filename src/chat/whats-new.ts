@@ -25,6 +25,10 @@
  * The order within a version is the order the changes matter, most first.
  */
 const NOTES: Record<string, readonly string[]> = {
+  "0.2.6": [
+    "On Windows, setup could stop at its last step. The join could not find Ollama on the machine, even with Ollama installed and running, so the machine ran the whole setup and then never joined the network. It finds it now.",
+    "A join that does fail is better described: the app no longer blames the model catalogue for a problem that was somewhere else entirely.",
+  ],
   "0.2.5": [
     "On Windows, a machine could join the network, answer questions, and still be told the network had not replied. The app was misreading its own process as one that had stopped; that is fixed, and when a join really does stop the app now says so instead of blaming the network.",
     "Common now tells you when a new version is waiting. It looks for one more often than once a day, and it opens a card the moment it finds one rather than leaving a line in the rail to be noticed — and if you would rather not now, it asks again next time you open the app.",
