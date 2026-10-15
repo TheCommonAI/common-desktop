@@ -1,0 +1,218 @@
+name: Windows self-trial
+# The app set itself up on a real Windows machine, start to finish, photographed.
+#
+# ── What this answers ─────────────────────────────────────────────────────────
+#
+# A friend's Windows machine reached the network — its node was listed in
+# `/peers`, its join log ended "you are live" — and the app told them "It took too
+# long to answer." No unit test can see that bug: the evidence is a screen, and
+# the failure is a screen that says the wrong thing. This runs the whole setup
+# flow against the real CLI and the real gateway and keeps a picture of every
+# step, so the answer to "does it work on Windows?" is a folder of screenshots
+# rather than an opinion.
+#
+# It is dispatch-only, and deliberately its own file. `build.yml` is what
+# `publish-preview.yml` counts jobs in to decide whether a release may go out;
+# adding a job there would change that count and make a trial a release gate.
+# Nothing here runs on a push or a pull request.
+#
+# ── What makes it go red ──────────────────────────────────────────────────────
+#
+# A screen that never renders, a step that never advances, an error ending, or a
+# frame that is a single flat colour. It does *not* go red on "You're registered."
+# — a GitHub runner is a cloud IP behind a quick tunnel, and the gateway's health
+# probe crossing into it is exactly the hop that failed for the friend. Failing on
+# someone else's unreachable tunnel would make this useless as a signal.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The page in the webview fetches `/api/tags` and `/api/ps` straight from Ollama,
+  # and its origin is `http://tauri.localhost` — not one Ollama allows by default.
+  # Without this both fetches are refused, which the app survives but which turns
+  # the byte count and the loading phase into guesses. Job-level, so the daemon
+  # started below inherits it.
+  OLLAMA_ORIGINS: http://tauri.localhost,http://localhost,http://127.0.0.1
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    # The Rust build, a multi-gigabyte model download, a test prompt on four CPU
+    # cores and the gateway's own confirmation poll all live in here.
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      # `install.ps1` shells out to `python` and bails if it is not on PATH.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # ── the app, with a devtools port ───────────────────────────────────────
+      #
+      # Two things about this config are load-bearing and neither is obvious.
+      #
+      # `additionalBrowserArgs` **replaces** wry's defaults rather than adding to
+      # them, so the three `--disable-features` are restated — drop them and the
+      # app ships a webview with WebView2's own context menus and SmartScreen
+      # filter turned back on.
+      #
+      # `app.windows` is **restated whole** because Tauri merges configs with
+      # `json_patch`, which merges objects per key and replaces arrays wholesale.
+      # A partial window object would silently drop `title`, `width`, `height`,
+      # `backgroundColor`, `titleBarStyle` and `hiddenTitle`. **If `tauri.conf.json`
+      # gains a window key, it has to be added here too.**
+      #
+      # The rest is what makes a window on a runner drivable and photographable:
+      # the debugging port, `--remote-allow-origins` because Chrome 111 and later
+      # answer a devtools socket with an unlisted `Origin` with a 403, and the two
+      # backgrounding flags so a session with nothing on the glass still renders.
+      - name: Build the app with a devtools port open
+        shell: pwsh
+        run: |
+          $config = @'
+          {
+            "bundle": { "createUpdaterArtifacts": false },
+            "app": {
+              "windows": [
+                {
+                  "title": "Common",
+                  "width": 800,
+                  "height": 600,
+                  "backgroundColor": "#292928",
+                  "titleBarStyle": "Transparent",
+                  "hiddenTitle": true,
+                  "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=9222 --remote-allow-origins=* --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --force-device-scale-factor=1"
+                }
+              ]
+            }
+          }
+          '@
+          $config | Out-File -Encoding utf8 trial-config.json
+          npm run tauri build -- --bundles nsis --config trial-config.json
+
+      # ── Ollama, before the CLI ───────────────────────────────────────────────
+      #
+      # The order is the point. `install.ps1` only fetches `cloudflared.exe` if it
+      # finds `ollama` on PATH at the moment it runs, and `common join` dies
+      # without cloudflared. Installing Ollama second produces an install that
+      # looks complete and cannot join anything.
+      - name: Install Ollama
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $setup = "$env:RUNNER_TEMP\OllamaSetup.exe"
+          Invoke-WebRequest -Uri 'https://ollama.com/download/OllamaSetup.exe' -OutFile $setup
+          Start-Process -FilePath $setup -ArgumentList '/VERYSILENT','/NORESTART' -Wait
+          # The installer edits the registry's PATH; this process started before
+          # that, so it refreshes its own copy rather than hoping.
+          $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
+          if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) { throw 'ollama is not on PATH after installing it' }
+          ollama --version
+          Start-Process -FilePath 'ollama' -ArgumentList 'serve' -WindowStyle Hidden
+          $deadline = (Get-Date).AddMinutes(2)
+          while ((Get-Date) -lt $deadline) {
+            try { Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/version' -TimeoutSec 3 | Out-Null; break }
+            catch { Start-Sleep -Seconds 2 }
+          }
+          Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/version' | ConvertTo-Json -Compress
+
+      # ── the real CLI, from the network's own installer ──────────────────────
+      #
+      # Downloaded to a file and run, rather than piped into `iex`: same trust,
+      # but the log shows what actually ran.
+      - name: Install the network's CLI
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
+          $script = "$env:RUNNER_TEMP\common-install.ps1"
+          Invoke-WebRequest -Uri 'https://commonai.com.au/install.ps1' -OutFile $script
+          & $script
+
+          # `HOME` is deliberately left alone. The CLI installs into the default
+          # home, and that is exactly where `common_bin()` looks first; moving it
+          # would put the binary, the identity and the weights in three different
+          # places and break all three at once.
+          $bin = "$env:USERPROFILE\.common-network\bin"
+          $common = "$bin\common.cmd"
+          if (-not (Test-Path $common)) { throw "the CLI installer did not write $common" }
+          # The one assertion that proves the ordering above was right.
+          if (-not (Test-Path "$bin\cloudflared.exe")) { throw "cloudflared is missing — install.ps1 did not see Ollama" }
+          Get-ChildItem $bin | Select-Object -ExpandProperty Name
+          & $common --no-color --no-update --version
+
+      # ── the app ──────────────────────────────────────────────────────────────
+      #
+      # The binary is found rather than named: Tauri v2 stopped renaming it to
+      # `productName`, so it is `common-desktop.exe`, and hardcoding either guess
+      # is a coin flip that lands on "file not found" rather than on a bug.
+      - name: Launch the app
+        shell: pwsh
+        run: |
+          $exe = @(Get-ChildItem -Path 'src-tauri\target\release' -Filter '*.exe' -File)
+          if ($exe.Count -ne 1) { throw "expected exactly one exe in src-tauri/target/release, found $($exe.Count): $($exe.Name -join ', ')" }
+          Write-Host "app binary: $($exe[0].FullName)"
+          $out = "$env:RUNNER_TEMP\app-stdout.log"
+          $err = "$env:RUNNER_TEMP\app-stderr.log"
+          $app = Start-Process -FilePath $exe[0].FullName -WorkingDirectory $exe[0].DirectoryName -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+          Write-Host "app pid: $($app.Id)"
+          "TRIAL_PID=$($app.Id)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "TRIAL_DEVTOOLS=http://127.0.0.1:9222" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "TRIAL_SHOTS=trial-shots" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "TRIAL_APP_LOG=$err" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Drive the setup flow
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path trial-shots | Out-Null
+          node scripts/trial/drive.mjs 2>&1 | Tee-Object -FilePath trial-shots\driver.log
+          $code = $LASTEXITCODE
+          Get-Content trial-shots\driver.log |
+            Select-String -Pattern 'TRIAL RESULT|TRIAL FAILED|TRIAL SHOTS|join:' |
+            ForEach-Object { $_.Line } |
+            Add-Content $env:GITHUB_STEP_SUMMARY
+          if ($code -ne 0) { exit $code }
+
+      # ── whatever happened, keep the record and tidy up ──────────────────────
+      - name: Collect what the app left behind
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path trial-shots | Out-Null
+          $dir = "$env:USERPROFILE\.common-network"
+          # The app's own account of the join — the file the friend could never
+          # send us. `identity.json` sits beside it and holds a bearer node token,
+          # so it is deliberately not copied and never uploaded.
+          if (Test-Path "$dir\join.log") { Copy-Item "$dir\join.log" trial-shots\join.log }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-self-trial
+          path: |
+            trial-shots/**
+            ${{ runner.temp }}/app-stdout.log
+            ${{ runner.temp }}/app-stderr.log
+          if-no-files-found: warn
+
+      # A run that registers a real node on the production network leaves it there
+      # otherwise, and the runner is destroyed the moment the job ends.
+      - name: Leave the network
+        if: always()
+        shell: pwsh
+        run: |
+          $common = "$env:USERPROFILE\.common-network\bin\common.cmd"
+          if (Test-Path $common) { & $common --no-color --no-update leave }
