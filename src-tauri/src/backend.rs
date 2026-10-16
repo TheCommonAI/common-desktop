@@ -239,29 +239,41 @@ fn seed_cli(seed: &Path, dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The CLI script this app runs, placing the bundled seed if the machine has none.
+/// The CLI script this app runs, keeping the bundled seed in place on the way.
 ///
 /// The seed is what makes arriving with nothing work at all: without it the app
 /// would have an interpreter and no program to hand it, which is precisely the
 /// state `~/.common-network` is in on a machine that has only ever run this app.
 ///
-/// An existing copy always wins, and that is the same "do not clobber" rule the
-/// fetch follows for Ollama rather than a courtesy: the CLI in this directory may
-/// be a version the user installed or updated themselves, and it is the one their
-/// other tools are using.
+/// The seed is consulted on every launch, and not only when `common.py` is absent.
+/// Returning early on an existing `common.py` looked like the "do not clobber" rule
+/// and was really a way to skip the repair entirely, which cost a release. This
+/// machine had `common.py` at 0.1.7 and no `runtime.py` beside it, so `join.py`
+/// imported `~/.common-network/runtime/` — the directory the llama.cpp runtime
+/// unpacks into, which Python is perfectly happy to import as a namespace package —
+/// and died on `module 'runtime' has no attribute 'is_installable'`. Nothing in the
+/// app's logs said so, because nothing had been attempted. The five files travel
+/// together or the CLI does not run.
+///
+/// What may be overwritten is still not decided here: `seed_cli` places what is
+/// missing and replaces only what is strictly older, so a user whose own `common`
+/// has moved ahead of the bundle keeps the copy they have.
 fn cli_script(home: &Path) -> Option<PathBuf> {
+    place_cli(CLI_SEED.get().map(PathBuf::as_path), home)
+}
+
+/// `cli_script` with the seed passed in, so the rule above can be tested without a
+/// process-global `OnceLock` and without an app around it.
+fn place_cli(seed: Option<&Path>, home: &Path) -> Option<PathBuf> {
     let dir = cli_home(home);
-    let script = dir.join("common.py");
-    if script.is_file() {
-        return Some(script);
-    }
-    let seed = CLI_SEED.get()?;
-    if let Err(e) = seed_cli(seed, &dir) {
-        // Worth a line rather than a shrug: the alternative is a first run that
-        // cannot work, with nothing anywhere saying why.
+    if let Some(seed) = seed
+        && let Err(e) = seed_cli(seed, &dir)
+    {
+        // Worth a line rather than a shrug: a seed that could not be placed is a
+        // first run that cannot work, with nothing anywhere saying why.
         eprintln!("could not place the bundled CLI at {}: {e}", dir.display());
-        return None;
     }
+    let script = dir.join("common.py");
     script.is_file().then_some(script)
 }
 
@@ -3328,6 +3340,51 @@ mod seed {
             std::fs::write(from.join(file), b"a stand-in payload").expect("a stand-in payload");
         }
         from
+    }
+
+    /// The bug that made the previous release's fix unreachable. `cli_script` used to
+    /// return as soon as `common.py` was there, so on every machine that already had a
+    /// CLI the seed was never consulted — and a bundled `runtime.py` could not reach
+    /// the one install that was missing it.
+    #[test]
+    fn an_existing_cli_does_not_stop_a_missing_sibling_being_placed() {
+        let home = scratch("existing-cli-home");
+        let dir = cli_home(&home);
+        std::fs::create_dir_all(&dir).expect("the directory the CLI lives in");
+        std::fs::write(dir.join("common.py"), "VERSION = \"0.1.7\"\n").expect("an install");
+
+        let found = place_cli(
+            Some(&versioned_bundle("existing-cli-bundle", "0.1.7")),
+            &home,
+        )
+        .expect("the script the app will run");
+
+        assert_eq!(found, dir.join("common.py"));
+        assert!(
+            dir.join("runtime.py").is_file(),
+            "join.py imports runtime as a sibling, so without the file it imports the \
+             runtime/ directory the llama.cpp build unpacks into instead, and dies on \
+             `module 'runtime' has no attribute 'is_installable'`"
+        );
+    }
+
+    /// And a seed that cannot be placed must not take a working install with it. The
+    /// old error path returned `None`, which the caller reads as "there is no CLI on
+    /// this machine" — true of a first run, and false here.
+    #[test]
+    fn a_seed_that_cannot_be_placed_leaves_the_install_that_is_already_there() {
+        let home = scratch("failed-seed-home");
+        let dir = cli_home(&home);
+        std::fs::create_dir_all(&dir).expect("the directory the CLI lives in");
+        std::fs::write(dir.join("common.py"), "VERSION = \"0.1.7\"\n").expect("an install");
+
+        let nowhere = scratch("failed-seed-bundle").join("nothing-was-unpacked-here");
+
+        assert_eq!(
+            place_cli(Some(&nowhere), &home),
+            Some(dir.join("common.py")),
+            "a seed that could not be placed made the app forget the CLI it already has"
+        );
     }
 
     #[test]
