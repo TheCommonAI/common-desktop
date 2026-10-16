@@ -246,6 +246,27 @@ export interface JoinResult {
   publicKeyFingerprint: string;
 }
 
+/**
+ * What came of asking a machine that has *already* been set up to serve again.
+ *
+ * Deliberately not a `JoinResult`. There is no test prompt here and no
+ * fingerprint to report, and filling those fields with plausible-looking values
+ * would be inventing proof on the one screen whose subject is proof. What a
+ * reconnect establishes is narrower: this node is registered again.
+ */
+export interface EnsureJoinedResult {
+  nodeId: string;
+  /** Read back after the wait, so it is the node this machine actually has now
+   *  rather than the one the request named. */
+  nodeName: string;
+  /** What this machine is now serving as. Echoed from the request rather than
+   *  read back, exactly as `JoinResult` echoes it: these are what the join was
+   *  started with, and the caller that built the request is where they are
+   *  confirmed. */
+  lane: Lane;
+  modelId: string;
+}
+
 /* ---------------------------------- tasks ---------------------------------- */
 
 export interface ProgressOptions<P> {
@@ -318,6 +339,27 @@ export interface OnboardingService {
     request: JoinRequest,
     opts?: ProgressOptions<JoinProgress>,
   ): Task<JoinResult>;
+
+  /**
+   * Put a machine that has already been set up back on the network.
+   *
+   * The difference from `joinNetwork` is what it does *not* do: no model load,
+   * no test prompt, and no fingerprint to report. It takes the same idempotency
+   * guard — a join this app started and has not seen end is reused, and a node
+   * the gateway can already reach is not re-registered — and then waits only
+   * until the gateway has this node in its own list.
+   *
+   * For the case this exists for: `common join` is a foreground process, so
+   * rebooting the laptop kills it. `identity.json` survives, which means the
+   * node token survives with it, so re-running the join reclaims the same node
+   * rather than minting a second. Reconnecting is safe by the CLI's design.
+   *
+   * Reachability is *not* established here. A registered node the gateway cannot
+   * route to is a real state with its own sentence, and the caller asks that
+   * question separately — `chat/rejoin.ts`, against the same read the rail and
+   * Settings already show.
+   */
+  ensureJoined(request: JoinRequest): Task<EnsureJoinedResult>;
 }
 
 /**
