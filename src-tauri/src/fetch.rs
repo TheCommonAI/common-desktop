@@ -525,10 +525,29 @@ fn parse_python_version(text: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
-/// The oldest Python the CLI is run under. 3.9 is the floor the CLI itself
-/// documents; anything older is not a runtime this app should prefer to one it
-/// fetched.
-const MIN_PYTHON: (u32, u32) = (3, 9);
+/// The oldest Python the CLI is run under.
+///
+/// 3.10, because `common.py` annotates with `dict | None`, which Python evaluates
+/// when the `def` is executed and which is a `TypeError` on anything older.
+///
+/// This said 3.9, with a comment claiming that was the floor the CLI documented. The
+/// CLI moved past it and this did not follow, so the app accepted `/usr/bin/python3`
+/// — 3.9.6 on a stock macOS, and the `python3` a Finder-launched `.app` finds first,
+/// since it inherits `PATH=/usr/bin:/bin:/usr/sbin:/sbin` — and handed it a script
+/// that died on its own type annotation before reaching a single line of its own
+/// logic. The `bin/common` wrapper has searched for `>= (3, 10)` since the day it was
+/// written; this is the app finally agreeing with it.
+const MIN_PYTHON: (u32, u32) = (3, 10);
+
+/// Whether a version this app read off a `Python 3.x.y` line is one the CLI can run
+/// under.
+///
+/// Split out so the floor can be tested without an interpreter to hand, and so both
+/// callers cannot drift apart on it: one of them decides what the user is told and
+/// the other decides what the CLI is actually run with.
+fn python_is_supported(version: (u32, u32)) -> bool {
+    version.0 == 3 && version >= MIN_PYTHON
+}
 
 /// A Python the CLI could run under, on `PATH` or fetched by a previous run.
 ///
@@ -550,9 +569,8 @@ fn python_present(home: &Path) -> Option<String> {
         let Some(text) = reported_version(name, &["--version"]) else {
             continue;
         };
-        if let Some((major, minor)) = parse_python_version(&text)
-            && major == 3
-            && (major, minor) >= MIN_PYTHON
+        if let Some(version) = parse_python_version(&text)
+            && python_is_supported(version)
         {
             return Some(format!("{name} on PATH ({text})"));
         }
@@ -587,9 +605,8 @@ pub fn python_for_cli(home: &Path) -> Option<PathBuf> {
         let Some(text) = reported_version(name, &["--version"]) else {
             continue;
         };
-        if let Some((major, minor)) = parse_python_version(&text)
-            && major == 3
-            && (major, minor) >= MIN_PYTHON
+        if let Some(version) = parse_python_version(&text)
+            && python_is_supported(version)
         {
             return Some(PathBuf::from(name));
         }
@@ -1587,6 +1604,26 @@ mod tests {
         assert_eq!(parse_python_version("Python"), None);
         assert_eq!(parse_python_version(""), None);
         assert_eq!(parse_python_version("Python three.twelve"), None);
+    }
+
+    /// Parsing a 3.9 and accepting a 3.9 are two different questions, and the app got
+    /// the second one wrong for as long as `common.py` has needed 3.10.
+    ///
+    /// 3.9 is the case worth naming: it is not an exotic version to refuse, it is
+    /// `/usr/bin/python3` on a stock macOS and the first `python3` a Finder-launched
+    /// `.app` can see. Refusing it is what sends the lookup on to a runtime that can
+    /// actually run the CLI.
+    #[test]
+    fn a_python_older_than_the_cli_needs_is_refused() {
+        assert!(!python_is_supported((3, 9)));
+        assert!(!python_is_supported((3, 8)));
+        assert!(!python_is_supported((2, 7)));
+        assert!(python_is_supported((3, 10)));
+        assert!(python_is_supported((3, 14)));
+        // A Python 4 is not a Python this app has been taught to reason about, and
+        // guessing that it behaves like the last 3 would be the same mistake in the
+        // other direction.
+        assert!(!python_is_supported((4, 0)));
     }
 
     /// The move that is allowed to look at an existing destination, pinned on a
