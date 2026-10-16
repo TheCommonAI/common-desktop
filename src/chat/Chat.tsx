@@ -16,6 +16,7 @@ import {
 import { promptFor } from "./context";
 import { NO_ANSWER, stoppedAfter, type ChatMessage } from "./messages";
 import { askNetwork, gatewaySeesUs, stopAsk, type NetworkAnswer } from "./backend";
+import { useRejoin } from "./useRejoin";
 import {
   lookForUpdate,
   restartIntoUpdate,
@@ -135,24 +136,51 @@ export default function Chat() {
 
   const active = chats.list.find((chat) => chat.id === chats.activeId) ?? chats.list[0];
 
+  /**
+   * Read whether the gateway can reach this machine.
+   *
+   * A callback rather than the body of one effect, because the answer is allowed
+   * to change and three things now ask again: the window coming back, the end of
+   * a reconnect, and the mount below. It used to be read once, on the way in, and
+   * never again — which is most of why a machine that lost its join on a reboot
+   * went on showing whatever it had been showing at launch.
+   *
+   * Not guarded against an unmount, which the effect it replaces was. React 19
+   * dropped the warning about setting state on a gone component, and this is the
+   * root screen: unmounting it means the app is closing. The update check below
+   * makes the same call for the same reason.
+   */
+  const refreshSeen = useCallback(
+    () =>
+      gatewaySeesUs().then(
+        (answer) => setSeen(answer),
+        // A gateway that will not answer is the unseen state, not an error this
+        // screen has anything to say about: the conversation works either way.
+        () => setSeen(false),
+      ),
+    [],
+  );
+
   useEffect(() => {
-    // The read outlives a fast unmount, so the write is guarded rather than the
-    // call. This also covers StrictMode's discarded first effect.
-    let live = true;
-    gatewaySeesUs().then(
-      (answer) => {
-        if (live) setSeen(answer);
-      },
-      // A gateway that will not answer is the unseen state, not an error this
-      // screen has anything to say about: the conversation works either way.
-      () => {
-        if (live) setSeen(false);
-      },
-    );
-    return () => {
-      live = false;
+    void refreshSeen();
+  }, [refreshSeen]);
+
+  /**
+   * And again whenever the window comes back.
+   *
+   * The case a launch-time read cannot cover, and the one the report this feature
+   * came from is about: a laptop that was asleep, or an app left in the tray,
+   * wakes up with whatever was serving it gone. The update check below wakes on
+   * the same event for the same reason; this is the half of that reading which is
+   * about the network rather than about the release feed.
+   */
+  useEffect(() => {
+    const onWake = () => {
+      if (document.visibilityState === "visible") void refreshSeen();
     };
-  }, []);
+    document.addEventListener("visibilitychange", onWake);
+    return () => document.removeEventListener("visibilitychange", onWake);
+  }, [refreshSeen]);
 
   /**
    * The chats on disk, once, on the way in.
@@ -203,6 +231,32 @@ export default function Chat() {
     onDisk.current = chats.list;
     saveConversations(chats.list);
   }, [chats.list]);
+
+  /**
+   * The reconnect, and its automatic half.
+   *
+   * Mount-time rather than Rust's `setup()`, and the reason is that this is where
+   * the service's reuse guard already behaves correctly: this process has started
+   * no join, so the guard asks the gateway whether it can reach this machine and
+   * starts a join only when it cannot. Doing it from `setup()` would mean
+   * re-deriving the gate, the identity check and the node token in Rust, for no
+   * gain over letting the code that already owns them decide.
+   *
+   * `onStart` blanks the reading rather than leaving it: a rail that went on
+   * saying Connected while the machine was in the middle of coming back would be
+   * claiming routing this app had not established. `onSettled` hands the verdict
+   * back to the one piece of state the rail and the Settings card both read.
+   *
+   * The automatic pass runs once per process — see `useRejoin` — which matters
+   * because the window is hidden rather than unmounted when the app is left in the
+   * tray, and because StrictMode fires a mount effect twice in development.
+   */
+  const blankSeen = useCallback(() => setSeen(null), []);
+  const rejoin = useRejoin({ onStart: blankSeen, onSettled: setSeen });
+  const { auto: rejoinOnLaunch } = rejoin;
+  useEffect(() => {
+    rejoinOnLaunch();
+  }, [rejoinOnLaunch]);
 
   /**
    * Look for a new version, on the way in and whenever the window comes back.
@@ -508,6 +562,7 @@ export default function Chat() {
     <section className="chat" aria-label="Chat">
       <Sidebar
         seen={seen}
+        rejoin={rejoin.state}
         chats={chats.list}
         activeId={chats.activeId}
         onSelect={selectChat}
@@ -533,6 +588,8 @@ export default function Chat() {
         open={settings}
         onClose={() => setSettings(false)}
         seen={seen}
+        rejoin={rejoin.state}
+        onReconnect={rejoin.manual}
         version={version}
         offer={offer}
         onCheck={checkForUpdate}

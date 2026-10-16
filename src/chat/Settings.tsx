@@ -7,6 +7,7 @@ import Control from "../onboarding/parts/Control";
 import TimeField from "../onboarding/parts/TimeField";
 import { onboardingService, type Lane, type ResourceLimits } from "../onboarding/service";
 import { contrib, leaveNetwork, whoami, type Contrib, type Whoami } from "./backend";
+import { networkFact, type Rejoin } from "./rejoin";
 import { busy, type UpdateOffer } from "./updates";
 import { findPlace, readPlace, type Place } from "./geo";
 import Globe from "./Globe";
@@ -47,6 +48,12 @@ export interface SettingsProps {
    *  Passed in rather than asked again, so the card and the rail cannot
    *  disagree. */
   seen: boolean | null;
+  /** What this app has done about it. Passed in for the same reason: one answer
+   *  to "can the gateway reach us" and one to "what did we do about it". */
+  rejoin: Rejoin;
+  /** Put this machine back on the network, because the user asked it to. Not the
+   *  automatic pass — see `mayRejoinNow` for why the two differ. */
+  onReconnect: () => void;
   /** The version running. Always known, whether or not a check ever ran. */
   version: string;
   /** What is known about a newer version. Owned by the chat, because the bar in
@@ -97,6 +104,8 @@ export default function Settings({
   open,
   onClose,
   seen,
+  rejoin,
+  onReconnect,
   version,
   offer,
   onCheck,
@@ -401,15 +410,21 @@ export default function Settings({
           )}
         </div>
 
+        {/* The row the user came here for when something has gone wrong.
+            `common join` is a foreground process, so anything that ends it — a
+            reboot, a crash, a killed shell — leaves this machine with an identity
+            on disk and nothing serving. Until now the card could only say so. The
+            button is the way back: the app re-runs the join, and `join.py` sends
+            the token in `identity.json` back on the registration, so this reclaims
+            its own node rather than minting a second.
+
+            Manual, and therefore ungated. The automatic pass at launch respects
+            the user's quiet hours — see `mayRejoinNow` — but a button somebody
+            pressed is an instruction rather than a suggestion, and a control that
+            silently declined to act would be worse than no control. */}
         <div className="settings__row">
           <p className="settings__label">The network</p>
-          <p className="settings__fact">
-            {seen === null
-              ? "Checking whether the gateway can see this machine"
-              : seen
-                ? "The gateway can reach this machine"
-                : "The gateway can't reach this machine right now"}
-          </p>
+          <p className="settings__fact">{networkFact(seen, rejoin)}</p>
           {served !== null && (
             <p className="settings__fact">
               {served.requestsServed === 1
@@ -417,6 +432,29 @@ export default function Settings({
                 : `Answered ${served.requestsServed} questions`}
             </p>
           )}
+          <div className="settings__controls">
+            <Control onClick={onReconnect} quiet disabled={rejoin.kind === "working"}>
+              {rejoin.kind === "working" ? "Reconnecting…" : "Reconnect"}
+            </Control>
+          </div>
+
+          {/* Mounted from the start and filled later, like the leave row's below
+              and `ShareLog`'s, and for the same reason: a live region that appears
+              already holding its text is missed by most screen readers. What goes
+              here is the evidence rather than the sentence — the detail the join
+              carried, which is the half a user pastes into a report and the half
+              the fact above has no room for.
+
+              With the sentence as the fallback, because not every failure carries
+              evidence: `network` and `timeout` arrive with no detail at all, and a
+              region that held its breath for those would leave the card's whole
+              answer to "why isn't it connecting" unread — visibly on screen and
+              silent to a reader. `networkFact` is asked rather than a second
+              sentence written here, so the two cannot come to different
+              conclusions about one machine. */}
+          <p className="settings__said" role="status">
+            {rejoin.kind === "failed" ? (rejoin.detail ?? networkFact(seen, rejoin)) : ""}
+          </p>
         </div>
 
         {/* The same report the join screen offers at the moment it fails, kept

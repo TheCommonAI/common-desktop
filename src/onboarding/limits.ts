@@ -45,3 +45,49 @@ export function capChoiceOf(cap: ResourceLimits["cap"]): (typeof CAP_CHOICES)[nu
     ) ?? null
   );
 }
+
+/** The hour the quiet window ends, if `now` is inside it — `null` when it is not.
+ *
+ *  `end` earlier than `start` means the window crosses midnight, which the
+ *  contract calls the normal case, and reading it as two windows would leave the
+ *  evening half uncovered and the morning half missing. So the comparison is one
+ *  of two, chosen by which way round the ends are.
+ *
+ *  A window whose ends are equal covers nothing. It is a window of zero minutes,
+ *  and the other reading — "always quiet" — would turn a pair of times the user
+ *  dragged onto each other into a machine that never serves again, silently, with
+ *  the setting still on screen looking like a schedule.
+ *
+ *  Local wall clock, because that is what the stored value is: the contract says
+ *  "local wall-clock HH:MM", and quiet hours are a claim about the user's night
+ *  rather than about UTC. `Date`'s own getters are already local, so this needs no
+ *  timezone arithmetic — which is the point, since there is none here to get
+ *  wrong.
+ *
+ *  Returns the *stored* end rather than a formatted one, so a sentence built from
+ *  it shows the user the clock they set. */
+export function quietUntil(quiet: ResourceLimits["quietHours"], now: Date): string | null {
+  if (quiet === null) return null;
+  const start = minutesOf(quiet.start);
+  const end = minutesOf(quiet.end);
+  if (start === null || end === null || start === end) return null;
+  const at = now.getHours() * 60 + now.getMinutes();
+  const inside = start < end ? at >= start && at < end : at >= start || at < end;
+  return inside ? quiet.end : null;
+}
+
+/** "HH:MM" as minutes past midnight, or `null` for anything that is not a time.
+ *
+ *  Bounded as well as shaped: `flow.readLimits` accepts `25:99`, which matches
+ *  the pattern and is not a time, and a window built from it would compare
+ *  against a minute count that cannot occur. `null` here means the window is not
+ *  one this app can reason about, and `quietUntil` reads that as "no window"
+ *  rather than as "quiet forever" — the failure that leaves a machine serving. */
+function minutesOf(clock: string): number | null {
+  const match = /^(\d{2}):(\d{2})$/.exec(clock);
+  if (match === null) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours > 23 || minutes > 59) return null;
+  return hours * 60 + minutes;
+}

@@ -16,6 +16,7 @@ import {
   type DownloadProgress,
   type DownloadRequest,
   type DownloadResult,
+  type EnsureJoinedResult,
   type HardwareReport,
   type JoinProgress,
   type JoinRequest,
@@ -1240,7 +1241,7 @@ const TEST_PROMPT = "What is the capital of France?";
  *  fields anything here reads. `null` for anything that does not parse: every
  *  caller of this treats an unreadable status as "not registered", which is the
  *  safe direction — it costs a redundant join, never a wrong node. */
-interface Status {
+export interface Status {
   joined: boolean;
   name: string | null;
   nodeId: string | null;
@@ -1305,7 +1306,7 @@ let joined = false;
 let joinStart: number | null = null;
 
 /** What became of the join this app started, as `backend.rs` reads it. */
-type JoinState =
+export type JoinState =
   | { state: "none" }
   | { state: "running" }
   | { state: "handedOff" }
@@ -1361,6 +1362,37 @@ async function joinState(): Promise<JoinState | null> {
  *  in `identity.json` rather than minting a second one, so a second attempt is
  *  this machine re-registering and not a duplicate node — which is the same
  *  reason the guard before it is allowed to spawn at all. */
+/**
+ * Whether this machine has to start a join, or is already serving one.
+ *
+ * The one rule the whole feature rests on, and the reason it is a named function
+ * rather than a line inside `awaitServing`: getting it wrong puts a second
+ * `join.py` on the worker's port, and the two ways of getting it wrong are both
+ * quiet. Read a live join as ended and a working node is restarted underneath
+ * itself; read a dead one as live and a machine that is not serving is never
+ * started again. `tests/rejoin.test.mjs` pins it against this source rather than
+ * against a copy, so the rule cannot drift while the test goes on passing.
+ *
+ * The first clause asks *for a state* rather than for the absence of `"ended"`,
+ * which is the whole of why `handedOff` and `running` count and `none` does not.
+ *
+ * `start === null` is "the process read failed" — `joinState` returns it only
+ * when this process did start something and the read then threw — and the answer
+ * there is spawn, decided by the second clause alone: a failed read cannot show a
+ * join to be live, so it is not evidence for leaving a machine alone. It is the
+ * safe direction to be wrong in, because `join.py` reclaims its own node from the
+ * token on disk rather than minting a second, and the opposite error is the
+ * reported bug — a machine that is not serving and is never started again. Where
+ * `null` does mean *do not act* is the retry inside `awaitServing`, which spends
+ * an attempt only on a confirmed end; that distinction lives there, not here.
+ */
+export function shouldSpawn(known: Status, start: JoinState | null): boolean {
+  const serving =
+    (start !== null && start.state !== "none" && start.state !== "ended") ||
+    (known.nodeId !== null && known.node?.healthy === true);
+  return !serving;
+}
+
 async function spawnJoin(request: JoinRequest): Promise<void> {
   const started = await read<number>("network_join", {
     // The catalogue id, not the ollama tag: `join.py` resolves the tag from
@@ -1454,6 +1486,220 @@ async function healthy(): Promise<boolean> {
   return current.node !== null && current.node.healthy;
 }
 
+/** The phase emitter a join hands to the screen it is running behind. */
+type Say = (phase: JoinProgress["phase"], answered?: JoinProgress["answered"]) => void;
+
+/** How long a first join waits for the gateway to list this machine. Four
+ *  minutes, and unchanged: it covers a cold model coming off disk on a slow
+ *  machine, and a first run is the one time that is a reasonable thing to wait
+ *  through. */
+const JOIN_DEADLINE_MS = 240_000;
+
+/** How often the wait asks. One second, which is a compromise the gateway
+ *  sets: polling faster asks a service that is already being asked by everyone
+ *  else, and polling slower makes a node that arrived in two seconds look like
+ *  one that arrived in four. */
+const JOIN_POLL_MS = 1000;
+
+/** A reconnect's budget, and it is nothing like four minutes. There is no model
+ *  to load here and no weights to verify — `join.py` is being started and asked
+ *  to register a token that is already on disk. Ninety seconds is generous for
+ *  that, and the point of the shorter number is that a user who pressed a button
+ *  is owed an answer while they are still looking at it. */
+const RECONNECT_DEADLINE_MS = 90_000;
+
+/** And asked less often, because this one is waiting on a single round trip to
+ *  the gateway rather than on a model. */
+const RECONNECT_POLL_MS = 2500;
+
+/**
+ * Register, and wait until the gateway has this node in its own list.
+ *
+ * The half of a join that is about *arriving*, split out because a reconnect
+ * needs exactly this and none of what follows it. `joinNetwork` goes on to load
+ * the model, prove it answers, and confirm reachability, and every one of those
+ * belongs to a machine being set up. A machine coming back after a reboot has
+ * the weights on disk and the node token written already — it needs to register
+ * again, which is what this does.
+ *
+ * ── Guard one: something is already serving ──────────────────────────────────
+ *
+ * Three cases, and only the middle one is subtle.
+ *
+ * — A join **this app started and has not seen end** is reused. That is the
+ *   retry path: a `"confirming"` that did not come good must not put a second
+ *   `join.py` on the same port. It is asked as "not ended" rather than as
+ *   "alive" because on Windows the process this app holds is a wrapper that
+ *   hands off and leaves — so it has always already ended, and a question
+ *   phrased as "is it alive" can only ever answer no. See `joinState`.
+ *
+ * — An identity **and** a gateway that can reach it is reused. Checking the
+ *   identity alone would be wrong, and this is the hole the second clause
+ *   closes: a `join.py` killed outright — a crash, a `kill -9`, a reboot —
+ *   leaves `identity.json` behind while the process is gone, so an identity
+ *   on disk is not evidence that anything is serving. What it *is* evidence
+ *   of is a node token, and `join.py` sends that token back on the next
+ *   registration to reclaim its own node rather than minting a second one —
+ *   which is why spawning again here is safe rather than a duplicate.
+ *
+ * — Otherwise, spawn. Which is the fresh case, and also the stale one.
+ *
+ * ── The wait, in one part: registering ───────────────────────────────────────
+ *
+ * It ends when the gateway has this node in its list — `node`, and not the
+ * identity appearing on disk. The identity is a *file*, written by whichever
+ * join registered last, and it outlives the process that wrote it: reading
+ * `nodeId !== null` as "registered" is what once let a join that had died twelve
+ * seconds in look exactly like one that had succeeded — through a model load and
+ * a ninety-second confirming poll, on a node that had been gone before either
+ * began. The token that file holds is what lets a new attempt reclaim the same
+ * node rather than mint a second, but reclaiming is not the same as having it.
+ * So the identity is asked for beside the entry, and only for the node id this
+ * flow goes on to show; the gateway's own list is what says this machine
+ * arrived.
+ *
+ * Listing, and deliberately not `healthy` — which is the correction here.
+ * Registration and reachability are two questions and the gateway keeps two
+ * fields for them: its entry appears once it has accepted a registration, and
+ * `healthy` turns true only when its own health check has passed against the
+ * tunnel. This phase used to ask the second question for four minutes and then
+ * report the answer as a network failure. A friend's Windows machine was told
+ * "it took too long to answer" while its node sat in `/peers` and its own log
+ * said "you are live" — and it never reached the model load or the test prompt,
+ * which is everything the rest of this flow exists to do. Asking reachability
+ * later does not drop it: `joinNetwork` asks it in `confirming`, where a `false`
+ * is reported rather than thrown and the screen has a state for it.
+ *
+ * Which is why a death is retried here instead of surfacing as an error. A
+ * join dies young on the far side's slowness rather than this machine's, and
+ * the cure for that is another attempt — spent only on a *confirmed* end, so
+ * a join that is merely slow keeps its attempt and keeps its port. See
+ * `MAX_JOIN_ATTEMPTS`.
+ *
+ * On Windows "confirmed end" is narrower than it sounds, and that is the
+ * point: the wrapper's exit says nothing about the join, so the only end this
+ * loop can witness there is a wrapper that failed to hand off. Everything
+ * after that is the gateway's to notice — which is what the screen has always
+ * claimed, and what this loop used to contradict.
+ */
+async function awaitServing(
+  request: JoinRequest,
+  signal: Signal,
+  say: Say,
+  opts: { deadlineMs: number; intervalMs: number },
+): Promise<Status> {
+  say("registering");
+
+  const known = await status();
+  const start = await joinState();
+  const spawning = shouldSpawn(known, start);
+  if (spawning) await spawnJoin(request);
+
+  // Measured from here and not from the top of the function, which is where the
+  // original put it too: starting a join is an invoke, and a budget that
+  // included it would be a budget that quietly shrinks on a slow machine for a
+  // reason that has nothing to do with the network.
+  const deadline = Date.now() + opts.deadlineMs;
+  let registered: Status | null = null;
+  // An attempt is only spent on a join this call actually started. Reusing one
+  // that was already serving leaves the count at zero, so a machine whose join
+  // dies later in the wait gets all three.
+  let attempts = spawning ? 1 : 0;
+  for (;;) {
+    if (signal.cancelled) throw stopped("Stopped.");
+    const current = await status();
+
+    // The stop is read first, because it is the only thing on this line the loop
+    // has been *told* rather than left to infer. Nothing of this app's is serving:
+    // the joined process has ended without handing off, which is the only kind of
+    // end a wrapper that has done its job never produces. A join that is still
+    // working, or that has handed off and carried on out of sight, never reaches
+    // here, so this cannot put a second `join.py` on the worker's port. A read that
+    // failed is not an end and does not come here at all.
+    //
+    // Asked before the entry below for a case that is otherwise easy to misread: a
+    // machine whose join died outright leaves its identity behind, and the gateway
+    // goes on listing a node nobody is serving. Read the listing first and that
+    // machine is told the gateway cannot reach it, when what happened is that it
+    // stopped — a different sentence, and the one this state exists to say.
+    const now = await joinState();
+    if (now !== null && now.state === "ended") {
+      if (attempts >= MAX_JOIN_ATTEMPTS) {
+        // Not `network`. This machine started a join, watched it stop, and gave
+        // up after three — the gateway was never asked and never refused, so the
+        // sentence for an unanswered network is a lie here. What is left to say is
+        // narrower and true: the process ended, and this is how. Why it ended is in
+        // the log, which the report on this screen carries whole; a caption holds a
+        // clause, and eight lines of log is not one.
+        throw new OnboardingError(
+          "join-stopped",
+          SENTENCE["join-stopped"],
+          `the join ${now.code}, ${attempts} times`,
+        );
+      }
+      attempts += 1;
+      await spawnJoin(request);
+    }
+
+    // Registered. The gateway has this node in its own list, and a node only gets
+    // there through a registration it accepted — so over there, this machine
+    // arrived.
+    //
+    // Not `healthy`, and the difference is the whole of the bug this line used to
+    // carry: the entry exists as soon as the gateway has the node, while `healthy`
+    // is its separate verdict that its health check gets through to the tunnel.
+    // Waiting for the second one here held a spinner over a step that had finished
+    // in seconds, and then blamed the network for the gateway's probe. Reachability
+    // is asked in `confirming`, below, where it is reported on the screen that
+    // already exists for it — rather than thrown at a machine that did register.
+    if (current.nodeId !== null && current.node !== null) {
+      registered = current;
+      break;
+    }
+
+    if (Date.now() > deadline) {
+      // The budget spent, and the gateway never once listed this machine.
+      // That is the one failure left here, and it is silence: the loop leaves the
+      // moment the gateway has the node, so a node it knows and cannot route to
+      // never reaches this line — that is a registered machine with a routing
+      // problem, and it is read out once the model has answered, in `joinNetwork`.
+      //
+      // Why the silence is two questions, and the log is what tells them apart. A
+      // join that failed on its way up never reached the gateway at all, and
+      // blaming the gateway for that is blaming the side that was never asked.
+      // That is not a hypothetical: a Windows self-trial's join died in under a
+      // second on `✗ ollama not found.` — the app had spawned it without Ollama's
+      // directory on its `PATH` — and the screen spent the whole four minutes
+      // saying "the gateway never listed this machine". On Windows the handle
+      // cannot be asked, so `joinStoppedReason` is the only witness there is.
+      //
+      // The half of the question the log *can* carry, and no more: it says what the
+      // join complained about, never whether the process is still up. The code below
+      // is therefore not a claim that anything stopped — the sentence it leads to is
+      // written to be true of a join that died and of one still failing out of sight.
+      //
+      // A line, and not the log. `detail` is rendered as a clause in the caption,
+      // and `join.log` is written for a terminal: dropped in there it arrives
+      // whole, in the caption's uppercase micro-type, and runs off the side of the
+      // sheet. The one line answers the question; the rest is not lost, since
+      // `ShareLog` on this very screen carries the log into the report.
+      const stoppedHere = await joinStoppedReason();
+      if (stoppedHere !== null) {
+        // The join reported a problem, and this is the last of it. The screen for this
+        // code reads that line as its second caption line, under a sentence worded to
+        // survive the log's uncertainty — see `JoinNetwork.tsx`, where the reason this
+        // is not `network` is written down at more length than a comment here could.
+        throw new OnboardingError("join-stopped", SENTENCE["join-stopped"], stoppedHere);
+      }
+      throw new OnboardingError("network", SENTENCE.network, "the gateway never listed this machine");
+    }
+    await wait(opts.intervalMs);
+  }
+
+  if (signal.cancelled) throw stopped("Stopped.");
+  return registered;
+}
+
 /**
  * Register, prove the model answers here, and confirm the network can see it.
  *
@@ -1489,183 +1735,17 @@ async function healthy(): Promise<boolean> {
  */
 function joinNetwork(request: JoinRequest, opts?: ProgressOptions<JoinProgress>): Task<JoinResult> {
   return start(async (signal) => {
-    const say = (phase: JoinProgress["phase"], answered?: JoinProgress["answered"]) =>
+    const say: Say = (phase, answered) =>
       opts?.onProgress?.(answered === undefined ? { phase } : { phase, answered });
 
-    say("registering");
-
-    /**
-     * Guard one: something is already serving.
-     *
-     * Three cases, and only the middle one is subtle.
-     *
-     * — A join **this app started and has not seen end** is reused. That is the
-     *   retry path: a `"confirming"` that did not come good must not put a second
-     *   `join.py` on the same port. It is asked as "not ended" rather than as
-     *   "alive" because on Windows the process this app holds is a wrapper that
-     *   hands off and leaves — so it has always already ended, and a question
-     *   phrased as "is it alive" can only ever answer no. See `joinState`.
-     *
-     * — An identity **and** a gateway that can reach it is reused. Checking the
-     *   identity alone would be wrong, and this is the hole the second clause
-     *   closes: a `join.py` killed outright — a crash, a `kill -9`, a reboot —
-     *   leaves `identity.json` behind while the process is gone, so an identity
-     *   on disk is not evidence that anything is serving. What it *is* evidence
-     *   of is a node token, and `join.py` sends that token back on the next
-     *   registration to reclaim its own node rather than minting a second one —
-     *   which is why spawning again here is safe rather than a duplicate.
-     *
-     * — Otherwise, spawn. Which is the fresh case, and also the stale one.
-     */
-    const known = await status();
-    const start = await joinState();
-    const already = (start !== null && start.state !== "none" && start.state !== "ended") ||
-      (known.nodeId !== null && known.node?.healthy === true);
-    if (!already) await spawnJoin(request);
-
-    /**
-     * The wait, in three parts, each ending on evidence rather than on a timer.
-     *
-     * **registering** ends when the gateway has this node in its list — `node`, and
-     * not the identity appearing on disk. The identity is a *file*, written by
-     * whichever join registered last, and it outlives the process that wrote it:
-     * reading `nodeId !== null` as "registered" is what once let a join that had
-     * died twelve seconds in look exactly like one that had succeeded — through a
-     * model load and a ninety-second confirming poll, on a node that had been gone
-     * before either began. The token that file holds is what lets a new attempt
-     * reclaim the same node rather than mint a second, but reclaiming is not the
-     * same as having it. So the identity is asked for beside the entry, and only for
-     * the node id this flow goes on to show; the gateway's own list is what says
-     * this machine arrived.
-     *
-     * Listing, and deliberately not `healthy` — which is the correction here.
-     * Registration and reachability are two questions and the gateway keeps two
-     * fields for them: its entry appears once it has accepted a registration, and
-     * `healthy` turns true only when its own health check has passed against the
-     * tunnel. This phase used to ask the second question for four minutes and then
-     * report the answer as a network failure. A friend's Windows machine was told
-     * "it took too long to answer" while its node sat in `/peers` and its own log
-     * said "you are live" — and it never reached the model load or the test prompt,
-     * which is everything the rest of this flow exists to do. Asking reachability
-     * later does not drop it: **confirming**, below, asks it on the gateway's own
-     * answer, where a `false` is reported rather than thrown and the screen has a
-     * state for it.
-     *
-     * Which is why a death is retried here instead of surfacing as an error. A
-     * join dies young on the far side's slowness rather than this machine's, and
-     * the cure for that is another attempt — spent only on a *confirmed* end, so
-     * a join that is merely slow keeps its attempt and keeps its port. See
-     * `MAX_JOIN_ATTEMPTS`.
-     *
-     * On Windows "confirmed end" is narrower than it sounds, and that is the
-     * point: the wrapper's exit says nothing about the join, so the only end this
-     * loop can witness there is a wrapper that failed to hand off. Everything
-     * after that is the gateway's to notice — which is what the screen has always
-     * claimed, and what this loop used to contradict.
-     *
-     * **loading-model** and **test-prompt** are the same wait seen two ways, and
-     * which one is shown is decided by whether the model is already in memory —
-     * `/api/ps` is ollama's list of loaded models, so a cold start says
-     * `loading-model` (and the caption, "{size} from disk into memory", is
-     * literally what is happening) and a warm one goes straight to "your machine
-     * is answering it". **confirming** is the gateway's own answer, polled,
-     * because nothing else can give it.
-     */
-    const DEADLINE = Date.now() + 240_000;
-    let registered: Status | null = null;
-    let attempts = already ? 0 : 1;
-    for (;;) {
-      if (signal.cancelled) throw stopped("Stopped.");
-      const current = await status();
-
-      // The stop is read first, because it is the only thing on this line the loop
-      // has been *told* rather than left to infer. Nothing of this app's is serving:
-      // the joined process has ended without handing off, which is the only kind of
-      // end a wrapper that has done its job never produces. A join that is still
-      // working, or that has handed off and carried on out of sight, never reaches
-      // here, so this cannot put a second `join.py` on the worker's port. A read that
-      // failed is not an end and does not come here at all.
-      //
-      // Asked before the entry below for a case that is otherwise easy to misread: a
-      // machine whose join died outright leaves its identity behind, and the gateway
-      // goes on listing a node nobody is serving. Read the listing first and that
-      // machine is told the gateway cannot reach it, when what happened is that it
-      // stopped — a different sentence, and the one this state exists to say.
-      const now = await joinState();
-      if (now !== null && now.state === "ended") {
-        if (attempts >= MAX_JOIN_ATTEMPTS) {
-          // Not `network`. This machine started a join, watched it stop, and gave
-          // up after three — the gateway was never asked and never refused, so the
-          // sentence for an unanswered network is a lie here. What is left to say is
-          // narrower and true: the process ended, and this is how. Why it ended is in
-          // the log, which the report on this screen carries whole; a caption holds a
-          // clause, and eight lines of log is not one.
-          throw new OnboardingError(
-            "join-stopped",
-            SENTENCE["join-stopped"],
-            `the join ${now.code}, ${attempts} times`,
-          );
-        }
-        attempts += 1;
-        await spawnJoin(request);
-      }
-
-      // Registered. The gateway has this node in its own list, and a node only gets
-      // there through a registration it accepted — so over there, this machine
-      // arrived.
-      //
-      // Not `healthy`, and the difference is the whole of the bug this line used to
-      // carry: the entry exists as soon as the gateway has the node, while `healthy`
-      // is its separate verdict that its health check gets through to the tunnel.
-      // Waiting for the second one here held a spinner over a step that had finished
-      // in seconds, and then blamed the network for the gateway's probe. Reachability
-      // is asked in `confirming`, below, where it is reported on the screen that
-      // already exists for it — rather than thrown at a machine that did register.
-      if (current.nodeId !== null && current.node !== null) {
-        registered = current;
-        break;
-      }
-
-      if (Date.now() > DEADLINE) {
-        // Four minutes of asking, and the gateway never once listed this machine.
-        // That is the one failure left here, and it is silence: the loop leaves the
-        // moment the gateway has the node, so a node it knows and cannot route to
-        // never reaches this line — that is a registered machine with a routing
-        // problem, and it is read out once the model has answered, below.
-        //
-        // Why the silence is two questions, and the log is what tells them apart. A
-        // join that failed on its way up never reached the gateway at all, and
-        // blaming the gateway for that is blaming the side that was never asked.
-        // That is not a hypothetical: a Windows self-trial's join died in under a
-        // second on `✗ ollama not found.` — the app had spawned it without Ollama's
-        // directory on its `PATH` — and the screen spent the whole four minutes
-        // saying "the gateway never listed this machine". On Windows the handle
-        // cannot be asked, so `joinStoppedReason` is the only witness there is.
-        //
-        // The half of the question the log *can* carry, and no more: it says what the
-        // join complained about, never whether the process is still up. The code below
-        // is therefore not a claim that anything stopped — the sentence it leads to is
-        // written to be true of a join that died and of one still failing out of sight.
-        //
-        // A line, and not the log. `detail` is rendered as a clause in the caption,
-        // and `join.log` is written for a terminal: dropped in there it arrives
-        // whole, in the caption's uppercase micro-type, and runs off the side of the
-        // sheet. The one line answers the question; the rest is not lost, since
-        // `ShareLog` on this very screen carries the log into the report.
-        const stoppedHere = await joinStoppedReason();
-        if (stoppedHere !== null) {
-          // The join reported a problem, and this is the last of it. The screen for this
-          // code reads that line as its second caption line, under a sentence worded to
-          // survive the log's uncertainty — see `JoinNetwork.tsx`, where the reason this
-          // is not `network` is written down at more length than a comment here could.
-          throw new OnboardingError("join-stopped", SENTENCE["join-stopped"], stoppedHere);
-        }
-        throw new OnboardingError("network", SENTENCE.network, "the gateway never listed this machine");
-      }
-      await wait(1000);
-    }
-
-    if (signal.cancelled) throw stopped("Stopped.");
+    // Register, and wait until the gateway has this machine in its own list. The
+    // reasoning — the reuse guard, why the listing and not `healthy`, why a young
+    // death is retried rather than reported — is all in `awaitServing`, which the
+    // reconnect path calls too.
+    const registered = await awaitServing(request, signal, say, {
+      deadlineMs: JOIN_DEADLINE_MS,
+      intervalMs: JOIN_POLL_MS,
+    });
 
     const tag = await tagFor(request.modelId);
     if (signal.cancelled) throw stopped("Stopped.");
@@ -1747,6 +1827,49 @@ function joinNetwork(request: JoinRequest, opts?: ProgressOptions<JoinProgress>)
   });
 }
 
+/**
+ * Put a machine that has already been set up back on the network.
+ *
+ * The whole of a reconnect: the guard `joinNetwork` opens with, and then only the
+ * wait for the gateway to list this machine. What it leaves out is everything
+ * that makes a first run a first run — warming the model, proving it answers with
+ * a test prompt, and holding on for up to ninety more seconds while the gateway's
+ * own health check catches up. A machine coming back after a reboot has the
+ * weights on disk and the node token written already, and the user who pressed the
+ * button is owed an answer sooner than four minutes.
+ *
+ * Reachability is deliberately not settled here. `EnsureJoinedResult` reports that
+ * this node registered again, which is a fact about this machine; whether the
+ * gateway can *route* to it is the gateway's answer, and asking for it here would
+ * put a second opinion beside the one the rail and Settings already read through
+ * `gatewaySeesUs()`. Two reads that can disagree is how a screen ends up saying
+ * Connected over a machine nobody can reach.
+ */
+function ensureJoined(request: JoinRequest): Task<EnsureJoinedResult> {
+  return start(async (signal) => {
+    // No phase emitter, because there is nothing to emit to: a reconnect from the
+    // chat is one state on one row of Settings rather than the six-step sequence
+    // the onboarding screen draws. Passing a no-op rather than threading a
+    // progress channel down from a surface that would discard it.
+    const registered = await awaitServing(request, signal, () => {}, {
+      deadlineMs: RECONNECT_DEADLINE_MS,
+      intervalMs: RECONNECT_POLL_MS,
+    });
+
+    // Read again rather than trusting the registration read, for the same reason
+    // `joinNetwork` does: the join may have reclaimed an older identity or minted
+    // a new one in the meantime. `registered` is the fallback for a status read
+    // that stopped answering.
+    const final = await status();
+    return {
+      nodeId: final.nodeId ?? registered.nodeId ?? "",
+      nodeName: final.name ?? registered.name ?? "this machine",
+      lane: request.lane,
+      modelId: request.modelId,
+    };
+  });
+}
+
 const wait = (milliseconds: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 
@@ -1767,5 +1890,5 @@ async function modelIsLoaded(tag: string | null): Promise<boolean> {
 /* ---------------------------------- the seam ---------------------------------- */
 
 export function createRealService(): OnboardingService {
-  return { scanHardware, suggestLane, downloadModel, setLimits, joinNetwork };
+  return { scanHardware, suggestLane, downloadModel, setLimits, joinNetwork, ensureJoined };
 }

@@ -3,6 +3,7 @@ import {
   type DownloadProgress,
   type DownloadRequest,
   type DownloadResult,
+  type EnsureJoinedResult,
   type HardwareReport,
   type JoinProgress,
   type JoinRequest,
@@ -544,8 +545,67 @@ function joinNetwork(
   };
 }
 
+/** The reconnect, in the preview's terms: the registration beat, and then a node.
+ *
+ *  Shorter than `joinNetwork` by the two beats that are the difference being
+ *  modelled — nothing is loaded into memory and nothing is asked of the model,
+ *  because a machine coming back after a reboot has the weights on disk and the
+ *  identity written already. */
+function ensureJoined(request: JoinRequest): Task<EnsureJoinedResult> {
+  const j = job();
+  const d = deferred<EnsureJoinedResult>();
+  const settle = settler(j);
+
+  j.after(REGISTER_MS, () => {
+    settle(() => {
+      // The same two non-network failures `joinNetwork` can be handed, because a
+      // reconnect fails the same two ways. A missing CLI and a join that stopped
+      // are properties of *this machine*, and a preview that could only draw the
+      // network's sentence for them would be showing the wrong screen for a
+      // failure the real service deliberately does not call a network one.
+      const injected =
+        takeFailure("network") ??
+        takeFailure("timeout") ??
+        takeFailure("cli-missing") ??
+        takeFailure("join-stopped");
+      if (injected) {
+        const stopped = injected === "join-stopped";
+        d.reject(
+          failure(
+            injected,
+            injected === "cli-missing"
+              ? "Couldn't start the join."
+              : stopped
+                ? "The join didn't get through."
+                : "The network didn't answer.",
+            stopped ? "the join exit code 1" : undefined,
+          ),
+        );
+        return;
+      }
+      // The same machine the join above reports, because it is the same machine:
+      // a reconnect reclaims this node rather than minting a second one, which is
+      // the property the whole feature rests on. A second name here would make the
+      // preview quietly contradict the thing it exists to demonstrate.
+      d.resolve({
+        nodeId: "c-9f3a",
+        nodeName: "studio.local",
+        lane: request.lane,
+        modelId: request.modelId,
+      });
+    });
+  });
+
+  return {
+    result: d.promise,
+    cancel() {
+      settle(() => d.reject(failure("cancelled", "Stopped.")));
+    },
+  };
+}
+
 export function createStubService(): OnboardingService {
-  return { scanHardware, suggestLane, downloadModel, setLimits, joinNetwork };
+  return { scanHardware, suggestLane, downloadModel, setLimits, joinNetwork, ensureJoined };
 }
 
 /* The stub is the only part of the app that cannot be reached from the UI, so

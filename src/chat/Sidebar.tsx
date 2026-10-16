@@ -1,4 +1,5 @@
 import { titleFor, type Conversation } from "./conversations";
+import type { Rejoin } from "./rejoin";
 import { askFor, type UpdateOffer } from "./updates";
 
 /**
@@ -60,6 +61,9 @@ export interface SidebarProps {
    *  has not read, which is why this is three-valued rather than defaulting to
    *  "connected" and correcting itself a moment later. */
   seen: boolean | null;
+  /** What this app has done about a reading it did not like. Owned by the chat, so
+   *  the foot and the Settings row cannot disagree. */
+  rejoin: Rejoin;
   /** Every chat this machine has, newest first. Never empty — `Chat` seeds one
    *  rather than let the rail draw a list with nothing in it. */
   chats: readonly Conversation[];
@@ -99,8 +103,29 @@ function updateBar(
   };
 }
 
+/** What the foot says, and which bar it draws.
+ *
+ *  The reconnect states are read first because they are newer news than the
+ *  reading underneath them. While a reconnect is in flight the reading is
+ *  deliberately blank — `Chat` clears it so the rail cannot go on saying
+ *  Connected over routing nobody has established — and a failure is a more recent
+ *  fact than the unseen state it caused. Silence and the resting state both fall
+ *  through to the ordinary reading, which is genuinely the same claim: the gateway
+ *  cannot reach this machine right now.
+ *
+ *  The label is short on purpose. This is a foot with room for one or two words,
+ *  and the reason behind a `waiting` or a `failed` is a sentence on the Settings
+ *  row that owns the control — the rail stays a display. */
+function foot(seen: boolean | null, rejoin: Rejoin): { state: string; label: string } {
+  if (rejoin.kind === "working") return { state: "checking", label: "Reconnecting" };
+  if (rejoin.kind === "failed") return { state: "unseen", label: "Couldn't reconnect" };
+  if (seen === null) return { state: "checking", label: "Checking" };
+  return seen ? { state: "seen", label: "Connected" } : { state: "unseen", label: "Not seen" };
+}
+
 export default function Sidebar({
   seen,
+  rejoin,
   chats,
   activeId,
   onSelect,
@@ -111,7 +136,7 @@ export default function Sidebar({
   onInstall,
   onRestart,
 }: SidebarProps) {
-  const state = seen === null ? "checking" : seen ? "seen" : "unseen";
+  const { state, label } = foot(seen, rejoin);
   const bar = updateBar(offer, onInstall, onRestart);
 
   return (
@@ -231,7 +256,7 @@ export default function Sidebar({
       <div className={`chat__foot chat__foot--${state}`}>
         <span className="chat__foot-bar" aria-hidden="true" />
         <span className="chat__label" role="status">
-          {state === "checking" ? "Checking" : state === "seen" ? "Connected" : "Not seen"}
+          {label}
         </span>
         <button
           type="button"
