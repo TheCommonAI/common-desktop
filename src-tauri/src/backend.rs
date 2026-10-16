@@ -161,20 +161,77 @@ fn cli_home(home: &Path) -> PathBuf {
     home.join(".common-network")
 }
 
-/// The files the seed places. `worker.py` is not optional — `join.py` imports it
-/// as a sibling, and the CLI's own installer is careful to fetch the two together
-/// for exactly that reason.
-const CLI_FILES: [&str; 4] = ["common.py", "join.py", "worker.py", "chat.py"];
+/// The files the seed places.
+///
+/// The siblings are neither optional nor decoration. `join.py` imports `worker.py`
+/// and `runtime.py` as siblings, which is why the CLI's own installer fetches them
+/// together rather than one at a time. `runtime.py` arrived with the llama.cpp
+/// migration and was missing from this list until 0.2.9 — a seed without it is a
+/// bundled CLI that cannot be imported at all, on the one machine that has nothing
+/// else to fall back on.
+const CLI_FILES: [&str; 5] = ["common.py", "join.py", "worker.py", "runtime.py", "chat.py"];
 
-/// Copy the bundled CLI into `~/.common-network`, over nothing.
+/// The `(major, minor, patch)` in a CLI file's `VERSION = "0.1.7"` line.
+///
+/// Read rather than executed, because this app may be looking at a CLI written for a
+/// version of itself that no longer exists and must not run it to find out. Scoped to
+/// the first line that begins with `VERSION`, so the string appearing inside prose or
+/// a changelog cannot be mistaken for the declaration.
+///
+/// `None` is not an error. It means this copy cannot be judged, and every caller
+/// treats that as a reason to overwrite nothing.
+fn declared_version(source: &str) -> Option<(u32, u32, u32)> {
+    let line = source
+        .lines()
+        .find(|line| line.trim_start().starts_with("VERSION"))?;
+    let rest = line.split('"').nth(1)?;
+    let mut parts = rest.trim().split('.');
+    let major = parts.next()?.trim().parse().ok()?;
+    let minor = parts.next()?.trim().parse().ok()?;
+    let patch = parts.next()?.trim().parse().ok()?;
+    Some((major, minor, patch))
+}
+
+/// Whether the bundled CLI is strictly newer than the one already in place.
+///
+/// The seed moves as one and is compared by `common.py`'s version, because
+/// `runtime.py` and `worker.py` carry no `VERSION` line — they are the siblings of a
+/// versioned CLI, not versions of their own.
+///
+/// Anything unjudgeable answers `false`, and that direction is the point. An existing
+/// install is the user's: it may be one their own `common` has since updated from
+/// `main`, and replacing it with a bundle this app cannot prove is newer would be a
+/// downgrade wearing the costume of a fix.
+fn seed_is_newer(seed: &Path, dir: &Path) -> bool {
+    let Ok(installed) = std::fs::read_to_string(dir.join("common.py")) else {
+        return true; // nothing is there to protect
+    };
+    let Ok(bundled) = std::fs::read_to_string(seed.join("common.py")) else {
+        return false;
+    };
+    match (declared_version(&bundled), declared_version(&installed)) {
+        (Some(bundled), Some(installed)) => bundled > installed,
+        _ => false,
+    }
+}
+
+/// Copy the bundled CLI into `~/.common-network`, over nothing that is newer.
 ///
 /// Not fatal when it fails: the fallback in `cli` still finds a `common` installed
 /// the traditional way, and that is a working app.
+///
+/// "Over nothing" once meant *literally* nothing, and that turned out to be a bug
+/// with a long tail: this app runs the CLI with `--no-update`, so a machine that took
+/// the seed once could never take a newer one — not from here, and not from the CLI's
+/// own self-update either. This machine sat on 0.1.3 across three releases that way,
+/// including one whose entire purpose was to make a failure legible. So an install
+/// older than the bundle is now replaced, and anything else is left exactly as found.
 fn seed_cli(seed: &Path, dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
+    let replace = seed_is_newer(seed, dir);
     for name in CLI_FILES {
         let to = dir.join(name);
-        if to.exists() {
+        if to.exists() && !replace {
             continue;
         }
         std::fs::copy(seed.join(name), &to)?;
@@ -3298,6 +3355,15 @@ mod seed {
         assert!(CLI_FILES.contains(&"worker.py"));
     }
 
+    /// The same argument as the worker's, one migration later. `runtime.py` arrived
+    /// with llama.cpp and `join.py` imports it as a sibling; it was absent from
+    /// `CLI_FILES` until 0.2.9, which made the bundled CLI one that could not be
+    /// imported — on exactly the machine that has no other copy to fall back on.
+    #[test]
+    fn the_runtime_travels_with_the_join_that_imports_it() {
+        assert!(CLI_FILES.contains(&"runtime.py"));
+    }
+
     /// The rule that matters more than the placing does. `~/.common-network` may hold a
     /// CLI the user installed, or one their own `common` has since updated — and the app
     /// writing over it would be the same failure the fetch avoids for Ollama, where a
@@ -3314,6 +3380,80 @@ mod seed {
             std::fs::read(to.join("common.py")).expect("read it back"),
             b"the version this machine updated to",
             "the seed overwrote a working install"
+        );
+    }
+
+    /// Reading a version, and the two ways it fails to be readable. The second case
+    /// is the one that matters: the CLI's own docstring says "The Common Network
+    /// Alpha (v0.1.7)", which must not be read as a declaration.
+    #[test]
+    fn a_version_is_read_from_the_declaration_and_not_from_prose() {
+        assert_eq!(declared_version("VERSION = \"0.1.7\"\n"), Some((0, 1, 7)));
+        assert_eq!(
+            declared_version("#!/usr/bin/env python3\nVERSION = \"1.10.2\"\n"),
+            Some((1, 10, 2))
+        );
+        assert_eq!(
+            declared_version("The Common Network Alpha (v0.1.7).\n"),
+            None
+        );
+        assert_eq!(declared_version(""), None);
+    }
+
+    /// A bundle that declares a version, which is what the replacement rule reads.
+    fn versioned_bundle(name: &str, version: &str) -> PathBuf {
+        let from = scratch(name);
+        for file in CLI_FILES {
+            std::fs::write(
+                from.join(file),
+                format!("#!/usr/bin/env python3\nVERSION = \"{version}\"\n"),
+            )
+            .expect("a versioned payload");
+        }
+        from
+    }
+
+    /// The bug that kept this machine's CLI stale across three releases. The app runs
+    /// the CLI with `--no-update`, so without the seed moving an install forward,
+    /// nothing can: not the app, and not the CLI's own self-update.
+    #[test]
+    fn an_older_cli_is_replaced_by_the_bundled_one() {
+        let to = scratch("older-home");
+        std::fs::write(to.join("common.py"), "VERSION = \"0.1.3\"\n").expect("an old install");
+        std::fs::write(to.join("worker.py"), "VERSION = \"0.1.3\"\n").expect("an old sibling");
+
+        seed_cli(&versioned_bundle("older-bundle", "0.1.7"), &to).expect("the seed runs");
+
+        for name in ["common.py", "worker.py"] {
+            let placed = std::fs::read_to_string(to.join(name)).expect("read it back");
+            assert_eq!(
+                declared_version(&placed),
+                Some((0, 1, 7)),
+                "{name} was not carried forward with the rest of the seed"
+            );
+        }
+    }
+
+    /// And the direction that was already the rule, which the change above must not
+    /// have cost: a copy newer than the bundle is the user's own. A seed that
+    /// downgraded it would take a working CLI away and call it a fix.
+    #[test]
+    fn a_copy_newer_than_the_bundle_is_left_alone() {
+        let to = scratch("newer-home");
+        std::fs::write(to.join("common.py"), "VERSION = \"0.2.0\"\n").expect("a newer install");
+
+        seed_cli(&versioned_bundle("newer-bundle", "0.1.7"), &to).expect("the seed runs");
+
+        assert_eq!(
+            std::fs::read_to_string(to.join("common.py")).expect("read it back"),
+            "VERSION = \"0.2.0\"\n",
+            "the seed overwrote a copy newer than its own"
+        );
+        // Leaving the newer script alone is not a reason to leave the directory
+        // incomplete: a missing sibling is still placed.
+        assert!(
+            to.join("runtime.py").is_file(),
+            "a newer common.py stopped the missing siblings from being placed"
         );
     }
 
