@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { defaultLimits, patchStoredFlow, readStoredFlow, tierOf, type FlowState } from "../onboarding/flow";
+import { defaultLimits, patchStoredFlow, readStoredFlow, type FlowState } from "../onboarding/flow";
 import { CAP_CHOICES, CONTRIBUTE_CHOICES, DEFAULT_QUIET, QUIET_CHOICES, capChoiceOf } from "../onboarding/limits";
-import { LANES, LANE_LABEL, findModel, modelFor } from "../onboarding/models";
+import { MODEL_LADDER, TIERS, findModel, modelFor } from "../onboarding/models";
 import Choices from "../onboarding/parts/Choices";
 import Control from "../onboarding/parts/Control";
 import TimeField from "../onboarding/parts/TimeField";
-import { onboardingService, type Lane, type ResourceLimits } from "../onboarding/service";
+import { onboardingService, type ResourceLimits, type Tier } from "../onboarding/service";
 import { contrib, leaveNetwork, whoami, type Contrib, type Whoami } from "./backend";
 import { networkFact, type Rejoin } from "./rejoin";
 import { busy, type UpdateOffer } from "./updates";
@@ -127,7 +127,6 @@ export default function Settings({
   const [quiet, setQuiet] = useState<ResourceLimits["quietHours"]>(
     () => (flow?.limits ?? defaultLimits(flow?.hardware ?? null)).quietHours,
   );
-  const [lane, setLane] = useState<Lane | null>(() => flow?.lane ?? null);
   const [modelId, setModelId] = useState<string | null>(() => flow?.modelId ?? null);
 
   const [hatched, setHatched] = useState(false);
@@ -261,13 +260,14 @@ export default function Settings({
     }, HOLD_MS);
   };
 
-  const choose = (next: Lane) => {
-    // The same ladder the flow used, so switching a lane in here lands on the
-    // same model the flow would have picked for this machine.
-    const model = modelFor(next, flow === null ? "full" : (tierOf(flow) ?? "full"));
-    setLane(next);
+  const choose = (next: Tier) => {
+    // The same four the flow offered, and picked by rung rather than by name: the
+    // ladder has one axis, so a rung *is* a model and there is nothing here for the
+    // user to get wrong. The record written is the one the flow wrote, so the next
+    // reconnect serves what this row now says.
+    const model = modelFor(next);
     setModelId(model.id);
-    patchStoredFlow({ lane: next, modelId: model.id });
+    patchStoredFlow({ modelId: model.id });
   };
 
   /* -------------------------------- the facts ------------------------------- */
@@ -297,9 +297,9 @@ export default function Settings({
         <p className="settings__fact">
           {nodeName === null
             ? "Not registered with the network"
-            : lane === null
+            : model === null
               ? nodeName
-              : `${nodeName} · the ${LANE_LABEL[lane]} lane`}
+              : `${nodeName} · serving ${model.label}`}
         </p>
 
         {/* The hatch. A button that looks exactly like the sentence around it —
@@ -339,11 +339,11 @@ export default function Settings({
           <div className="settings__hatch-open">
             <Choices
               label="Model"
-              name="settings-lane"
-              value={lane}
-              choices={LANES.map((name) => ({
-                value: name,
-                label: LANE_LABEL[name],
+              name="settings-model"
+              value={model?.tier ?? null}
+              choices={TIERS.map((tier) => ({
+                value: tier,
+                label: MODEL_LADDER[tier].label,
               }))}
               onChange={choose}
             />

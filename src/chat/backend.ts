@@ -146,7 +146,7 @@ export interface Contrib {
  *
  * `common whoami --json` prints the literal `null` when it has never joined, so
  * a missing identity is a `null` return and not a throw — the card then shows
- * the lane it chose locally and says nothing about a name it does not have.
+ * the model it chose locally and says nothing about a name it does not have.
  */
 export async function whoami(): Promise<Whoami | null> {
   if (!insideApp()) return null;

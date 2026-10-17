@@ -16,12 +16,12 @@ import type { FlowState } from "./flow";
  * reported now.
  */
 
-export type StepId = "welcome" | "scan" | "lane" | "limits" | "join";
+export type StepId = "welcome" | "scan" | "model" | "limits" | "join";
 
 export const STEP_ORDER: readonly StepId[] = [
   "welcome",
   "scan",
-  "lane",
+  "model",
   "limits",
   "join",
 ];

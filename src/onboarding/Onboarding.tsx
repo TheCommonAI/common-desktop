@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, type ComponentType } from "react";
 import { INITIAL_FLOW, readProgress, writeProgress, type FlowState, type Progress } from "./flow";
 import HardwareScan from "./screens/HardwareScan";
 import JoinNetwork from "./screens/JoinNetwork";
-import PickLane from "./screens/PickLane";
+import PickModel from "./screens/PickModel";
 import ResourceLimits from "./screens/ResourceLimits";
 import Welcome from "./screens/Welcome";
 import { STEP_ORDER, type ScreenProps, type StepId } from "./steps";
@@ -22,7 +22,7 @@ import { STEP_ORDER, type ScreenProps, type StepId } from "./steps";
 const SCREENS: Readonly<Record<StepId, ComponentType<ScreenProps>>> = {
   welcome: Welcome,
   scan: HardwareScan,
-  lane: PickLane,
+  model: PickModel,
   limits: ResourceLimits,
   join: JoinNetwork,
 };

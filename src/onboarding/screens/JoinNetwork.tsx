@@ -4,7 +4,7 @@ import ThinkingMark from "../../chat/ThinkingMark";
 import { preparingSentences } from "../../provision";
 import { useProvision } from "../../useProvision";
 import { formatBytes, formatLatency } from "../copy";
-import { LANE_LABEL, findModel } from "../models";
+import { findModel } from "../models";
 import Control from "../parts/Control";
 import Statement from "../parts/Statement";
 import { onboardingService, type JoinProgress, type JoinResult, type ModelSpec } from "../service";
@@ -136,11 +136,10 @@ export default function JoinNetwork({ flow, next, back }: ScreenProps) {
   const provision = useProvision();
 
   const { state, run } = useTask<JoinResult, JoinProgress>((opts) =>
-    flow.lane === null || flow.modelId === null
+    flow.modelId === null
       ? refused<JoinResult>("Nothing to join with.")
       : onboardingService.joinNetwork(
           {
-            lane: flow.lane,
             modelId: flow.modelId,
             // The step machine will not have let the user here without an
             // answer, so this fallback is unreachable; it exists so that the
@@ -184,7 +183,7 @@ export default function JoinNetwork({ flow, next, back }: ScreenProps) {
     const join = state.value;
     if (join.gatewaySeen) {
       live = true;
-      statement = `You're live in the ${LANE_LABEL[join.lane]} lane.`;
+      statement = "You're live.";
       caption = [`Node ${join.nodeId}`, label];
     } else {
       // A successful call reporting a failed check. The node is registered —
