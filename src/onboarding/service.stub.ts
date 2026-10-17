@@ -5,9 +5,8 @@ import {
   type JoinProgress,
   type JoinRequest,
   type JoinResult,
-  type Lane,
-  type LaneOption,
-  type LaneSuggestion,
+  type ModelOption,
+  type ModelSuggestion,
   type OnboardingService,
   type OnboardingErrorCode,
   type ProgressOptions,
@@ -15,7 +14,7 @@ import {
   type ScanProgress,
   type Task,
 } from "./service";
-import { LANES, findModel, fitsHere, gb, modelFor, tierFor } from "./models";
+import { TIERS, findModel, fitsHere, gb, largestFitting, modelFor, tierFor } from "./models";
 
 /**
  * The stub.
@@ -47,10 +46,9 @@ import { LANES, findModel, fitsHere, gb, modelFor, tierFor } from "./models";
  * `findModel()`. Set a field, walk the flow again:
  *
  *   commonStub.options.freeDiskBytes = gb(3)      // no room for the weights
- *   commonStub.options.memoryBytes = gb(8)       // the light tier
+ *   commonStub.options.memoryBytes = gb(8)       // the 8 GB ceiling
+ *   commonStub.options.memoryBytes = gb(2)       // nothing fits: the floor at a squeeze
  *   commonStub.options.onBattery = true          // the battery-derived default
- *   commonStub.options.networkAskLane = "code"   // the lane conflict
- *   commonStub.options.networkAskLane = null     // the unreachable-ask caption
  *   commonStub.options.gatewayUnreachable = true // the failed verification
  *   commonStub.options.fail = "network"          // a rejection somewhere
  *   commonStub.options.fail = "cli-missing"      // the install that isn't there
@@ -59,21 +57,21 @@ import { LANES, findModel, fitsHere, gb, modelFor, tierFor } from "./models";
  *   commonStub.options.speed = 0                 // no waiting at all
  *
  * The console is no use for a screen that has already read its options by the
- * time it opens — the hardware scan and the lane suggestion both start on
+ * time it opens — the hardware scan and the model suggestion both start on
  * arrival. So in development the same fields are also read from storage at
  * load, which reaches every screen: set `common.stub` to a JSON object, reload,
  * and the flow runs with it. Same field names, same values.
  */
 
 export interface StubOptions {
-  /** Reported total memory. Below ~9 GB the light tier is chosen. */
+  /** Reported total memory, and the only input the recommendation has: it decides
+   *  which rung is named, whether that rung is the comfortable one, and — below
+   *  about 2.5 GB — whether anything in the ladder fits at all. */
   memoryBytes: number;
   /** Reported free disk. Set below the model size to reach the blocked state. */
   freeDiskBytes: number;
   /** Reported power source. Drives the limits screen's default. */
   onBattery: boolean;
-  /** The lane the network asks for, or `null` for an ask that did not land. */
-  networkAskLane: Lane | null;
   /** Whether the gateway fails to confirm it can see this node. */
   gatewayUnreachable: boolean;
   /** Reads that came back unreadable. The contract says a failed read is `null`
@@ -91,7 +89,6 @@ export const stubOptions: StubOptions = {
   memoryBytes: gb(16),
   freeDiskBytes: gb(118),
   onBattery: false,
-  networkAskLane: "math",
   gatewayUnreachable: false,
   unreadable: [],
   fail: null,
@@ -203,7 +200,7 @@ function report(): HardwareReport {
 /* --------------------------------- the work --------------------------------- */
 
 const SCAN_FIELD_MS = 420;
-const ASK_MS = 1100;
+const CHOICE_MS = 1100;
 const SAVE_MS = 700;
 
 const TEST_PROMPT = { prompt: "What is 17 × 24?", answer: "408", latencyMs: 1400 };
@@ -239,12 +236,19 @@ function scanHardware(opts?: ProgressOptions<ScanProgress>): Task<HardwareReport
   };
 }
 
-function suggestLane(hardware: HardwareReport): Task<LaneSuggestion> {
+/** The model choice, and it is the real one's arithmetic rather than an imitation
+ *  of it — the same `largestFitting` over the same `TIERS`, the same fall to the
+ *  floor when nothing is comfortable, and the same refusal when the memory read
+ *  failed. What the stub supplies instead of a network is `fitsHere`'s default
+ *  table, which is the answer the real service falls back to offline; so the two
+ *  agree except when the live catalogue has moved, and that is a difference worth
+ *  being able to see from the preview. */
+function suggestModel(hardware: HardwareReport): Task<ModelSuggestion> {
   const j = job();
-  const d = deferred<LaneSuggestion>();
+  const d = deferred<ModelSuggestion>();
   const settle = settler(j);
 
-  j.after(ASK_MS, () => {
+  j.after(CHOICE_MS, () => {
     settle(() => {
       const memory = hardware.memory?.totalBytes;
       // This call can reject for exactly one reason, and `fail` is documented as
@@ -258,33 +262,28 @@ function suggestLane(hardware: HardwareReport): Task<LaneSuggestion> {
       }
       if (memory === undefined) {
         // The one thing this call will not guess at: without memory there is no
-        // tier, and without a tier there is no recommendation to make.
+        // rung to name, and no amount of network would supply the figure. Set
+        // `unreadable` to `["memory"]` to reach it.
         d.reject(
           failure("permission-denied", "The system wouldn't say how much memory there is."),
         );
         return;
       }
 
-      const tier = tierFor(memory);
-      const options: readonly LaneOption[] = LANES.map((lane: Lane) => {
-        const model = modelFor(lane, tier);
-        return { lane, model, fits: fitsHere(model.id, hardware) };
+      const options: readonly ModelOption[] = TIERS.map((tier) => {
+        const model = modelFor(tier);
+        return { model, fits: fitsHere(model.id, hardware) };
       });
 
-      // The machine's own pick. A machine that has been read successfully is
-      // taken to be a numbers machine, which is the least surprising thing a
-      // stub can say and the thing the screenshots were drawn against.
-      const byMachine: Lane = "math";
+      // The machine's own pick, which is now the whole of the pick: the largest
+      // rung it carries with headroom, or the floor when it carries none. A 16 GB
+      // machine — the stub's default — takes the ceiling, so the preview opens on
+      // the 9B; drop `memoryBytes` to 8 GB for the 4B, or to 2 GB for the floor
+      // with `fits: false` under it.
+      const comfortable = largestFitting(hardware);
+      const model = modelFor(comfortable ?? tierFor(memory));
 
-      const ask = stubOptions.networkAskLane;
-      const askFits = ask !== null && (options.find((o) => o.lane === ask)?.fits ?? false);
-
-      d.resolve({
-        recommended: askFits && ask !== null ? ask : byMachine,
-        byMachine,
-        networkAsk: ask === null ? null : { lane: ask, demand: "high" },
-        options,
-      });
+      d.resolve({ model, fits: comfortable !== null, options });
     });
   });
 
@@ -426,7 +425,6 @@ function joinNetwork(
       d.resolve({
         nodeId: "c-9f3a",
         nodeName: "studio.local",
-        lane: request.lane,
         modelId: request.modelId,
         testPrompt: TEST_PROMPT,
         gatewaySeen: !stubOptions.gatewayUnreachable,
@@ -488,7 +486,6 @@ function ensureJoined(request: JoinRequest): Task<EnsureJoinedResult> {
       d.resolve({
         nodeId: "c-9f3a",
         nodeName: "studio.local",
-        lane: request.lane,
         modelId: request.modelId,
       });
     });
@@ -503,7 +500,7 @@ function ensureJoined(request: JoinRequest): Task<EnsureJoinedResult> {
 }
 
 export function createStubService(): OnboardingService {
-  return { scanHardware, suggestLane, setLimits, joinNetwork, ensureJoined };
+  return { scanHardware, suggestModel, setLimits, joinNetwork, ensureJoined };
 }
 
 /* The stub is the only part of the app that cannot be reached from the UI, so

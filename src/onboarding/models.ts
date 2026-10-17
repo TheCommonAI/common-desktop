@@ -1,4 +1,4 @@
-import type { HardwareReport, Lane, ModelSpec, Tier } from "./service";
+import type { HardwareReport, ModelSpec, Tier } from "./service";
 
 /**
  * The model ladder.
@@ -7,6 +7,22 @@ import type { HardwareReport, Lane, ModelSpec, Tier } from "./service";
  * flow needs before a download starts are the sizes, and those are estimates
  * good enough for the disk check and for telling the user what they are about
  * to spend. The authoritative figure is whatever the download reports.
+ *
+ * ── What the ladder is now ───────────────────────────────────────────────────────
+ *
+ * One family at four sizes, and no lanes. The network used to carry a specialist
+ * per lane — a math model, a coding model, a writing model — so this file was a
+ * table of three columns and the flow asked the user which lane they were for.
+ * The catalogue is now prism-ml's Ternary Bonsai 2 family: a single general
+ * line, quantised to 1.58-bit ternary weights and packed as Q2_0, sized so that
+ * every realistic donor machine holds a node. The 2B is the floor, the 4B the
+ * default mid-tier, the 9B the ceiling.
+ *
+ * That leaves the ladder with one axis, which is memory. The lane screen went
+ * with the lanes: with one family, every lane would have resolved to the same
+ * weights, and a control that changes nothing is worse than no control. The
+ * sentence that screen carried — what this machine will run — is now the whole
+ * of what it says.
  */
 
 /** Gigabytes as they are printed on the box — decimal, 10⁹. The whole interface
@@ -16,79 +32,64 @@ export function gb(n: number): number {
   return Math.round(n * 1e9);
 }
 
-/** The three lanes in the order the interface lists them. */
-export const LANES: readonly Lane[] = ["math", "code", "writing"];
+/** The four rungs, smallest first. Every loop over the ladder reads this rather
+ *  than restating the order, so "step down to the next smaller one" cannot drift
+ *  from "the order they are listed in". */
+export const TIERS: readonly Tier[] = ["2b", "4b", "8b", "9b"];
 
-/** The lane's name as it appears mid-sentence: "You're live in the Math lane." */
-export const LANE_LABEL: Record<Lane, string> = {
-  math: "Math",
-  code: "Code",
-  writing: "Writing",
-};
-
-const FULL: Record<Lane, ModelSpec> = {
-  math: {
-    id: "qwen2.5-math-7b",
-    label: "Qwen2.5 Math 7B",
-    lane: "math",
-    tier: "full",
-    bytes: gb(4.4),
+/**
+ * The four, at the ids the catalogue files them under.
+ *
+ * The ids are the network's and not this app's: `spawnJoin` sends one of these
+ * straight to `common join --model`, which looks it up in the catalogue to find
+ * the weights. An id that is not in the catalogue is not an error there — it is
+ * read as an Ollama registry tag instead, which is how a retired id would quietly
+ * provision the wrong model. These four are the catalogue's own, read out of
+ * `catalogue/catalogue.seed.yaml` on `main`.
+ *
+ * `bytes` is the real `Content-Length` of the pinned file on Hugging Face, read
+ * on 2026-10-17, and it is here rather than derived from the parameter count
+ * because the two disagree by enough to matter to a disk check: the 9B is 9.0B
+ * parameters in 2.56 GB, which is the ternary packing and not a rounding error.
+ * The catalogue's own prose rounds these to 0.5, 1.2 and 2.4 GB.
+ */
+const LADDER: Record<Tier, ModelSpec> = {
+  "2b": {
+    id: "bonsai2-2b",
+    label: "Bonsai 2 2B",
+    tier: "2b",
+    bytes: gb(0.55),
   },
-  code: {
-    id: "qwen2.5-coder-7b",
-    label: "Qwen2.5 Coder 7B",
-    lane: "code",
-    tier: "full",
-    bytes: gb(4.2),
+  "4b": {
+    id: "bonsai2-4b",
+    label: "Bonsai 2 4B",
+    tier: "4b",
+    bytes: gb(1.21),
   },
-  writing: {
-    id: "qwen3-8b",
-    label: "Qwen3 8B",
-    lane: "writing",
-    tier: "full",
-    bytes: gb(5.2),
+  "8b": {
+    id: "bonsai-8b",
+    label: "Bonsai 8B",
+    tier: "8b",
+    bytes: gb(2.31),
   },
-};
-
-const LIGHT: Record<Lane, ModelSpec> = {
-  math: {
-    id: "qwen2.5-math-1.5b",
-    label: "Qwen2.5 Math 1.5B",
-    lane: "math",
-    tier: "light",
-    bytes: gb(1.1),
-  },
-  code: {
-    id: "qwen2.5-coder-1.5b",
-    label: "Qwen2.5 Coder 1.5B",
-    lane: "code",
-    tier: "light",
-    bytes: gb(1.1),
-  },
-  writing: {
-    id: "llama3.2-3b",
-    label: "Llama 3.2 3B",
-    lane: "writing",
-    tier: "light",
-    bytes: gb(2.0),
+  "9b": {
+    id: "bonsai2-9b",
+    label: "Bonsai 2 9B",
+    tier: "9b",
+    bytes: gb(2.56),
   },
 };
 
-export const MODEL_CATALOG: Readonly<Record<Tier, Readonly<Record<Lane, ModelSpec>>>> = {
-  full: FULL,
-  light: LIGHT,
-};
+export const MODEL_LADDER: Readonly<Record<Tier, ModelSpec>> = LADDER;
 
-export function modelFor(lane: Lane, tier: Tier): ModelSpec {
-  return MODEL_CATALOG[tier][lane];
+export function modelFor(tier: Tier): ModelSpec {
+  return MODEL_LADDER[tier];
 }
 
 export function findModel(id: string): ModelSpec | null {
-  for (const tier of ["full", "light"] as const) {
-    for (const lane of LANES) {
-      const model = MODEL_CATALOG[tier][lane];
-      if (model.id === id) return model;
-    }
+  for (const tier of TIERS) {
+    const model = MODEL_LADDER[tier];
+    if (model.id === id) return model;
   }
   return null;
 }
@@ -100,15 +101,17 @@ export function findModel(id: string): ModelSpec | null {
  *
  * The network's own three gates — `min_ram_gb`, `needs_gpu`, `min_vram_gb` — and
  * not this app's opinion of them. They are what `common join` fits a machine
- * against and what the gateway's `/assign` gates on, so a lane this app
- * recommends is a lane the network would also have given this machine. Anything
+ * against and what the gateway's `/assign` gates on, so a rung this app
+ * recommends is a rung the network would also have given this machine. Anything
  * invented here would be a second, quieter policy that disagrees with the one
  * the machine is about to be held to.
  */
 export interface ModelRequirement {
   /** The catalogue's `min_ram_gb`, in decimal GB as a model card is written —
    *  the same unit `gb()` and `tierFor` are in. This is a floor for the whole
-   *  machine's memory, not a figure for the weights alone. */
+   *  machine's memory, not a figure for the weights alone: the 9B's file is
+   *  2.56 GB and the catalogue asks for 5 GB, because the weights sit alongside a
+   *  KV cache and a runtime with its own opinion about how much room to leave. */
   minRamGb: number;
   /** The catalogue's `needs_gpu`. Carried because the catalogue carries it, and
    *  read by nothing: see `fitsHere` for why this report cannot refuse a model
@@ -124,27 +127,25 @@ export interface ModelRequirement {
 export type Requirements = Readonly<Record<string, ModelRequirement>>;
 
 /**
- * The ladder's six, as the network's catalogue spells them.
+ * The ladder's four, as the network's catalogue spells them.
  *
- * Read out of the live catalogue, the same way `LADDER_TAGS` in
- * `service.real.ts` reads the tags out of it, and kept for the same reason: the
- * fit has to be decidable before the gateway can be reached, and a `min_ram_gb`
- * that moved in the catalogue is a fit that moved with it. `service.real.ts`
- * asks the catalogue first and falls back to this table.
+ * Read out of the live catalogue, the same way `ladderRequirements` in
+ * `service.real.ts` reads them, and kept for the same reason: the fit has to be
+ * decidable before the gateway can be reached, and a `min_ram_gb` that moved in
+ * the catalogue is a fit that moved with it. `service.real.ts` asks the catalogue
+ * first and falls back to this table.
  *
- * `min_ram_gb` is the ladder's real shape, and it is not the 16 GB the app used
- * to demand: 10 GB for the two 7B–8B models at the top, 8 GB for Coder 7B, 4 GB
- * for Llama 3.2 3B and 3 GB for the two 1.5B models. The top of the ladder is
- * reachable on a 16 GB machine and, with the headroom `fitsHere` applies, on
- * anything from about 12.5 GB up.
+ * Two of these are a real floor and two are nearly free: 5 GB for the 9B and 4 GB
+ * for the 8B, which is where the ladder bites, against 3 GB and 2 GB for the two
+ * smaller ones that almost any machine clears. That is the opposite shape to the
+ * ladder this replaces, where the top of it was reachable only from about 12.5 GB
+ * up — at these figures a machine with 8 GB of memory carries the ceiling.
  */
 export const LADDER_REQUIREMENTS: Requirements = {
-  "qwen2.5-math-7b": { minRamGb: 10, needsGpu: false, minVramGb: 0 },
-  "qwen2.5-math-1.5b": { minRamGb: 3, needsGpu: false, minVramGb: 0 },
-  "qwen2.5-coder-7b": { minRamGb: 8, needsGpu: false, minVramGb: 0 },
-  "qwen2.5-coder-1.5b": { minRamGb: 3, needsGpu: false, minVramGb: 0 },
-  "qwen3-8b": { minRamGb: 10, needsGpu: false, minVramGb: 0 },
-  "llama3.2-3b": { minRamGb: 4, needsGpu: false, minVramGb: 0 },
+  "bonsai2-2b": { minRamGb: 2, needsGpu: false, minVramGb: 0 },
+  "bonsai2-4b": { minRamGb: 3, needsGpu: false, minVramGb: 0 },
+  "bonsai-8b": { minRamGb: 4, needsGpu: false, minVramGb: 0 },
+  "bonsai2-9b": { minRamGb: 5, needsGpu: false, minVramGb: 0 },
 };
 
 /** What the catalogue asks for one model: the caller's answer when it has one,
@@ -173,15 +174,24 @@ const HEADROOM = 0.8;
 /**
  * The rung of the ladder this much memory gets.
  *
- * Only the low end changes the answer. At 8 GB or below the machine takes the
- * light models; everything above takes the full ones — a 7B model at four bits
- * fits comfortably in 12 GB — and where the memory is tight for them the lane
- * screen says so plainly rather than quietly downgrading the user's choice.
- * The threshold carries about 12% of tolerance because 8 GB is reported both as
- * 8×10⁹ and as 8 GiB depending on the reader.
+ * The largest one the catalogue's floors allow at the catalogue's headroom, and
+ * the smallest rung when even that does not clear — because this ladder has a
+ * bottom, unlike the specialist one it replaces. A machine with less than 2.5 GB
+ * of memory is a machine no catalogued model fits, and the honest answer there is
+ * the 2B with `fits` false rather than no answer at all.
+ *
+ * This reads the table above and not the live catalogue, deliberately: the tier is
+ * a fact about the machine and has to be available to a screen that has not
+ * reached the network yet. `fitsHere` is where the network's own figures are
+ * applied, and the gap between the two is what `suggestModel` exists to close.
  */
 export function tierFor(totalMemoryBytes: number): Tier {
-  return totalMemoryBytes <= gb(9) ? "light" : "full";
+  let best: Tier = TIERS[0];
+  for (const tier of TIERS) {
+    const need = LADDER_REQUIREMENTS[modelFor(tier).id];
+    if (need !== undefined && totalMemoryBytes * HEADROOM >= gb(need.minRamGb)) best = tier;
+  }
+  return best;
 }
 
 /**
@@ -214,16 +224,9 @@ export function tierFor(totalMemoryBytes: number): Tier {
  *   it as 0 turned "I don't know" into "4 GB short" and is what made the app
  *   pick Math everywhere.
  *
- * It remains deliberately stricter than `tierFor`, and the gap between the two
- * is the point: the tier is what the machine *can* run and `fits` is what it can
- * run comfortably, so a 9.5 GB machine is on the full rung while none of the
- * full models fit it — the case the lane screen's caption describes as "will be
- * slow here, that's allowed", and the case `bestLaneFor` has to answer without
- * pretending a lane fits.
- *
- * The third parameter is how the live catalogue's figures reach this test. It
- * is optional so that a caller with no catalogue — the browser stub, a test —
- * still compiles and still answers from the table.
+ * The third parameter is how the live catalogue's figures reach this test. It is
+ * optional so that a caller with no catalogue — the browser stub, a test — still
+ * compiles and still answers from the table.
  */
 export function fitsHere(
   modelId: string,
@@ -239,9 +242,9 @@ export function fitsHere(
   // The catalogue's memory floor, at the catalogue's headroom. Both sides are
   // decimal GB, which is the one place `gb()` exists for.
   const memory = hardware.memory?.totalBytes;
-  // No memory figure cannot be shown to clear a floor of 3 GB or more, so it
-  // does not clear one. Unreachable from the lane screen — `suggestLane` refuses
-  // to run at all without this — and the conservative answer for anyone else.
+  // No memory figure cannot be shown to clear a floor of 2 GB or more, so it does
+  // not clear one. Unreachable from the model screen — `suggestModel` refuses to
+  // run at all without this — and the conservative answer for anyone else.
   if (memory === undefined) return false;
   if (memory * HEADROOM < gb(need.minRamGb)) return false;
 
@@ -255,4 +258,27 @@ export function fitsHere(
   // Unreadable, not zero: see the header.
   if (vram === null) return true;
   return vram >= gb(need.minVramGb);
+}
+
+/**
+ * The biggest rung this machine carries comfortably, or `null` when it carries
+ * none.
+ *
+ * Stepping down rather than computing a bound, because `fitsHere` is the one place
+ * that decides what "fits" means and a second copy of that arithmetic here would
+ * be a second answer. The rungs are in ascending order of what they ask — 2, 3, 4,
+ * 5 GB — so the first one from the top that fits is also the largest that does.
+ * `null` is the honest answer to "no model in this ladder fits", and returning it
+ * rather than the floor is the point of the signature: the caller gets to tell
+ * "the smallest one, at a squeeze" apart from "the biggest one that is
+ * comfortable", and those are two different sentences on screen.
+ */
+export function largestFitting(
+  hardware: HardwareReport,
+  requirements: Requirements = LADDER_REQUIREMENTS,
+): Tier | null {
+  for (const tier of [...TIERS].reverse()) {
+    if (fitsHere(modelFor(tier).id, hardware, requirements)) return tier;
+  }
+  return null;
 }

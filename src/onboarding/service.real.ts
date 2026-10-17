@@ -2,12 +2,11 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { provisionNow, startProvisioning } from "../provision";
 import {
-  LANES,
   LADDER_REQUIREMENTS,
+  TIERS,
   fitsHere,
-  gb,
+  largestFitting,
   modelFor,
-  requirementFor,
   tierFor,
   type ModelRequirement,
   type Requirements,
@@ -19,9 +18,8 @@ import {
   type JoinProgress,
   type JoinRequest,
   type JoinResult,
-  type Lane,
-  type LaneOption,
-  type LaneSuggestion,
+  type ModelOption,
+  type ModelSuggestion,
   type OnboardingErrorCode,
   type OnboardingService,
   type Platform,
@@ -30,7 +28,6 @@ import {
   type ResourceLimits,
   type ScanProgress,
   type Task,
-  type Tier,
 } from "./service";
 
 /**
@@ -349,211 +346,36 @@ function scanHardware(opts?: ProgressOptions<ScanProgress>): Task<HardwareReport
   });
 }
 
-/* ---------------------------------- the lanes ---------------------------------- */
+/* ------------------------------- the model choice ------------------------------- */
 
 /**
- * The catalogue's `domain_tags` for the ladder models, gathered into the app's
- * three lanes.
+ * What this machine should run.
  *
- * This is the whole of the model-choosing policy, and the sum below is only as
- * good as this table: a domain that belongs to two lanes is counted for both and
- * so decides nothing, and a domain that belongs to one lane but is listed under
- * another is the answer, wrongly given. Every domain here is read from the
- * catalogue and belongs to exactly one lane — `math`, `arithmetic`,
- * `word-problems` and `quantitative` on the qwen2.5-math pair, deepscaler and
- * mathstral; `code`, `programming` and `debugging` on the qwen2.5-coder trio,
- * with `sql`, `databases` and `queries` on sqlcoder-7b; `writing` on qwen3-8b,
- * llama3.1-8b and gemma3-12b.
+ * The whole recommendation, and it is about this machine alone. The catalogue is
+ * still consulted — `ladderRequirements` reads the network's own `min_ram_gb`, so a
+ * floor that moves there moves the fit with it — but it is consulted for figures
+ * and not for an opinion. There used to be a second half to this: the gateway's gap
+ * table decided which lane was worth joining, and that overrode the machine's own
+ * answer when the two disagreed. It cannot any more, and the reason is the
+ * catalogue rather than the protocol — with one family at four sizes there is
+ * nothing for the network to choose between, because every machine that joins is
+ * running the same weights at a different size. Asking would be asking a question
+ * with one answer in it.
  *
- * ── What is deliberately not here ───────────────────────────────────────────────
+ * What is left is the catalogue's own argument, which is about memory: run the
+ * largest rung this machine carries with headroom, and the floor of the ladder when
+ * it carries none. `tierFor` answers that from the table; this recomputes it
+ * against the live figures so the two cannot disagree, and reports `fits`
+ * separately so the screen can tell "the biggest that is comfortable" apart from
+ * "the floor, at a squeeze". Those are two different sentences and a machine on the
+ * edge is owed the second one.
  *
- * `logic`, `reasoning`, `step-by-step` and `planning` used to sit in the math
- * lane, and none of them is math's. `reasoning` is a tag on qwen3-8b, which is
- * this app's *writing* model, and the other three are tags on
- * phi4-mini-reasoning and deepseek-r1-14b, which are not in this ladder at all:
- * they describe how a request of any kind is put, not what it is about. Counting
- * them for Math alone meant Math was credited with eight of the catalogue's
- * twenty domains, four of them lane-neutral — so a network whose real shortage
- * was anywhere at all, or whose shortage was only in those, came back as short of
- * Math, and the app sent every user it could to a lane the network did not need.
- *
- * `general` and `conversation` were dropped for the same reason, from the other
- * end: the gateway itself refuses to seat a generalist on a panel
- * (`compose_excluded_domains` in its config), so a network short of general chat
- * is a network short of a domain all three lanes answer equally — an answer that
- * is not evidence for one of them. Every model in the ladder that carries those
- * tags carries `writing` with them, so nothing that was genuinely a writing gap
- * is lost by their going.
- *
- * The catalogue's medical lane — `medical`, `clinical`, `biomedical`, on
- * meditron-7b alone — is absent for the older reason, which still holds: this app
- * has no medical lane to send it to, and a network short only of medical help is
- * a network this app reads as short of nothing, which is the true statement about
- * what this app can offer it.
+ * The one rejection is a machine whose memory could not be read: without it there is
+ * no rung to name, and no amount of network will supply the figure. That is
+ * `permission-denied` rather than `unknown` because the screen offers hand-entry for
+ * it, and hand-entry is a real fix for exactly this.
  */
-const LANE_DOMAINS: Record<Lane, readonly string[]> = {
-  math: ["math", "arithmetic", "word-problems", "quantitative"],
-  code: ["code", "programming", "debugging", "sql", "databases", "queries"],
-  writing: ["writing"],
-};
-
-/** How short the network's worst-served lane has to be before the ask is worth
- *  overriding the machine's own preference for. A share of the total gap, so it
- *  is a statement about the network's own shape rather than about a count that
- *  moves every day. */
-function demandOf(share: number): "high" | "medium" | "low" {
-  if (share >= 0.5) return "high";
-  if (share >= 0.25) return "medium";
-  return "low";
-}
-
-/**
- * What the network is short of, or `null`.
- *
- * Never rejects. The contract is explicit that an ask which does not land is
- * not an error, and the reason is in the shape of the thing: this is one clause
- * of one caption, and a network that cannot be reached is a network this machine
- * can still choose a lane for. Every failure below — a refused connection, a
- * document that will not parse, a gap table where nothing is actually short —
- * collapses to the same `null`, because the caller does the same thing about all
- * of them.
- *
- * The lane is picked by summing the gap over the domains that lane's models
- * cover, which is why the table above is the whole policy. The domain the
- * network names is not itself a lane, and treating it as one would mean the app
- * had a `word-problems` lane it could not staff.
- */
-async function askNetwork(): Promise<LaneSuggestion["networkAsk"]> {
-  let raw: string;
-  try {
-    raw = await invoke<string>("network_recommend");
-  } catch {
-    return null;
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  if (!isJson(parsed) || !Array.isArray(parsed.domain_gaps)) return null;
-
-  const totals: Record<Lane, number> = { math: 0, code: 0, writing: 0 };
-  for (const entry of parsed.domain_gaps) {
-    if (!isJson(entry)) continue;
-    const domain = readString(entry, "domain");
-    const gap = readNumber(entry, "gap");
-    // A domain at zero, or in deficit, is not a gap — it is a domain the network
-    // has covered. Including them would make the sum a measure of how much
-    // traffic there is rather than of how short the network is.
-    if (domain === null || gap === null || gap <= 0) continue;
-    for (const lane of LANES) {
-      if (LANE_DOMAINS[lane].includes(domain)) totals[lane] += gap;
-    }
-  }
-
-  const total = LANES.reduce((sum, lane) => sum + totals[lane], 0);
-  if (total <= 0) return null;
-
-  // The lane the sum is largest for. The guard above is what makes this a winner
-  // rather than a default: every gap counted is a gap in some lane's domain, so a
-  // positive total means at least one lane holds a positive share and the two
-  // `null`s below are unreachable. Starting from no lane rather than from Math
-  // keeps that a fact about the table rather than a promise about the code —
-  // Math comes back when its share is the largest, and otherwise it does not.
-  let best: Lane | null = null;
-  for (const lane of LANES) {
-    if (best === null || totals[lane] > totals[best]) best = lane;
-  }
-  if (best === null) return null;
-  return { lane: best, demand: demandOf(totals[best] / total) };
-}
-
-/**
- * The three lanes, in this machine's order of preference for them.
- *
- * Most room above the catalogue's own floor first, which is the argument the
- * catalogue's header makes and not this app's: a model that is tight on a machine
- * swaps and times out, and a machine asked for more than that is a machine the
- * network cannot count on. Room is measured against the catalogue's
- * `min_ram_gb` — the figure `common join` and `/assign` gate on — and not
- * against `ModelSpec.bytes`, which `models.ts` introduces as an estimate for the
- * download and the disk check.
- *
- * Where two lanes ask the same of this machine the order is the interface's, and
- * that is a genuine tie rather than a thumb on the scale: two lanes whose models
- * leave the same room have no claim between them.
- *
- * The whole order is returned rather than its head because the caller needs the
- * runner-up as much as the winner — a machine that can carry nothing is still
- * asked to name a lane, and the honest name is the one that asks the least of it.
- */
-function lanePreference(
-  report: HardwareReport,
-  tier: Tier,
-  requirements: Requirements,
-): readonly Lane[] {
-  const memory = report.memory?.totalBytes ?? 0;
-  // `null` for a lane with no known requirement, which is not the same answer as
-  // zero room and must not be made to look like one.
-  const room = (lane: Lane): number | null => {
-    const need = requirementFor(modelFor(lane, tier).id, requirements);
-    return need === null ? null : memory - gb(need.minRamGb);
-  };
-  // `sort` is stable, so lanes that tie stay in the order the interface lists
-  // them in, which is what makes the tie-break a fact about that order rather than
-  // about the sort.
-  return [...LANES].sort((first, second) => {
-    const left = room(first);
-    const right = room(second);
-    // A lane nobody knows the requirement for sorts after one that is known, and
-    // two of them stay where they are.
-    if (left === null || right === null) return left === right ? 0 : left === null ? 1 : -1;
-    return right - left;
-  });
-}
-
-/**
- * The lane this machine alone is best for, or `null` when it can carry none.
- *
- * The first lane in the machine's own order that fits. `null` is the honest
- * answer to "no model in this ladder fits this machine", and returning it rather
- * than a lane is the point of the signature: `best` used to start at `LANES[0]`,
- * so a machine that could carry nothing was handed Math — a lane nothing had
- * selected, chosen because it was written first. Nothing here names a lane that
- * was not picked.
- */
-function bestLaneFor(report: HardwareReport, tier: Tier, requirements: Requirements): Lane | null {
-  return (
-    lanePreference(report, tier, requirements).find((lane) =>
-      fitsHere(modelFor(lane, tier).id, report, requirements),
-    ) ?? null
-  );
-}
-
-/**
- * Fit the machine, then let the network override it.
- *
- * The division of labour is the point. The **tier** is the machine's, from
- * `tierFor(memory)`, because only this machine knows how much memory it has.
- * The **lane** is the network's, from the gap table, because only the network
- * knows what it is short of — with the machine's own preference as the fallback
- * when the ask does not land or when the network's choice would not fit here.
- *
- * The fit is the catalogue's too, and not this app's: `fitsHere` reads
- * `min_ram_gb` at the network's own headroom, from the live catalogue where it can
- * be reached, so the lanes marked as fitting here are the lanes the network would
- * have marked for this machine. A machine that fits none of them is told so in the
- * only place the contract leaves for it — every option's `fits` is false, and the
- * lane named is the one that asks least of it rather than one picked by default.
- *
- * The one rejection is a machine whose memory could not be read: without a tier
- * there is no model ladder, and without a ladder there is no recommendation to
- * make. That is `permission-denied` rather than `unknown` because the screen
- * offers hand-entry for it, and hand-entry is a real fix for exactly this.
- */
-function suggestLane(report: HardwareReport): Task<LaneSuggestion> {
+function suggestModel(report: HardwareReport): Task<ModelSuggestion> {
   return start(async () => {
     const memory = report.memory?.totalBytes;
     if (memory === undefined) {
@@ -564,60 +386,44 @@ function suggestLane(report: HardwareReport): Task<LaneSuggestion> {
       );
     }
 
-    const tier = tierFor(memory);
-    // The catalogue's requirements and the network's ask, together: neither waits
-    // on the other, and the fit below is only worth computing against the
-    // network's own figures rather than against a copy of them.
-    const [ask, requirements] = await Promise.all([askNetwork(), ladderRequirements()]);
-    const order = lanePreference(report, tier, requirements);
+    // The fit is worth computing against the network's own figures rather than
+    // against a copy of them, which is the one thing the gateway is still asked
+    // for here.
+    const requirements = await ladderRequirements();
 
-    const options: readonly LaneOption[] = LANES.map((lane: Lane) => {
-      const model = modelFor(lane, tier);
-      return { lane, model, fits: fitsHere(model.id, report, requirements) };
+    const options: readonly ModelOption[] = TIERS.map((tier) => {
+      const model = modelFor(tier);
+      return { model, fits: fitsHere(model.id, report, requirements) };
     });
 
-    const byMachine = bestLaneFor(report, tier, requirements);
-    // What `recommended` falls back to when the network's ask does not land.
-    //
-    // A machine that can carry no lane at all is still asked for a lane — the
-    // contract types both fields as a `Lane`, and the screen's own sentence is
-    // built from one — so the answer is the head of the machine's order, which is
-    // the lane that asks the least of it. That is a weaker claim than a fit and it
-    // is not dressed up as one: every option above is `fits: false` in that case,
-    // so the screen's caption reads "will be slow here · that's allowed" rather
-    // than "your machine can run this". Math is never the answer merely for being
-    // Math — on the rung where nothing fits, Coder 7B at 8 GB is preferred to the
-    // two 10 GB models, because it asks less.
-    const machineLane = byMachine ?? order[0];
-    const askFits =
-      ask !== null && (options.find((option) => option.lane === ask.lane)?.fits ?? false);
+    // `null` from `largestFitting` is "nothing fits comfortably", and the answer is
+    // then the floor of the ladder rather than a refusal: a 2 GB machine is still a
+    // machine the network would rather have on the 2B than not have at all, and the
+    // catalogue's floor exists for exactly it. `fits: false` is what stops that
+    // from being dressed up as a recommendation.
+    const comfortable = largestFitting(report, requirements);
+    const model = modelFor(comfortable ?? tierFor(memory));
 
-    return {
-      recommended: ask !== null && askFits ? ask.lane : machineLane,
-      byMachine: machineLane,
-      // The ask is reported whether or not it was taken, because the screen's
-      // caption is a sentence about the difference between the two — and when
-      // they agree there is no difference to explain.
-      networkAsk: ask,
-      options,
-    };
+    return { model, fits: comfortable !== null, options };
   });
 }
+
 
 /**
  * The catalogue's requirements for the ladder, as the network currently spells
  * them, or the table in `models.ts` when the catalogue cannot be reached.
  *
- * The same shape as `tagFor` and for the same reason: the network's catalogue is
- * the authority on what a model needs — it is the document `common join` and the
- * gateway's `/assign` both read — and a `min_ram_gb` that moves there must move
- * the app's answer with it. The table stands in when there is no gateway, no CLI
- * or no parse, so an offline machine still gets a fit rather than no fit.
+ * Read live rather than committed, for the reason this file reads anything live:
+ * the network's catalogue is the authority on what a model needs — it is the
+ * document `common join` and the gateway's `/assign` both read — and a `min_ram_gb`
+ * that moves there must move the app's answer with it. The table stands in when
+ * there is no gateway, no CLI or no parse, so an offline machine still gets a fit
+ * rather than no fit.
  *
  * Never rejects, like every other read here: this decides a caption, and a
- * caption is not worth failing a screen over. Only the ladder's six ids are read,
- * because the catalogue's other entries are models this app has no lane to offer
- * and a requirement for one of those is a requirement for nothing.
+ * caption is not worth failing a screen over. Only the ladder's four ids are read,
+ * because the catalogue's other entries are models this app's ladder does not
+ * carry and a requirement for one of those is a requirement for nothing.
  *
  * Field by field against the table, so a catalogue entry that has grown a new
  * shape loses the fields it no longer carries and keeps the ones it still does.
@@ -653,64 +459,6 @@ async function ladderRequirements(): Promise<Requirements> {
     };
   }
   return found;
-}
-
-/* ------------------------------ the model's name ----------------------------- */
-
-/** What a model is called on the wire. This block used to be ollama itself: its
- *  address, its pull stream and the fetch that read them. What is left is the
- *  part that was never ollama's, which is the tag — what a chat asks for and
- *  what the answer must be keyed by.
- *
- *  The name survives the daemon because the join starts `llama-server` with
- *  `--alias` set to this same string, so naming a tag is still how the request
- *  reaches the weights. See `tagFor`.
- */
-
-/**
- * The six rungs of the ladder, as the tags the catalogue gives them.
- *
- * The catalogue is the authority on these and is asked first, so that a tag
- * which changes there changes here. This table is the offline answer, and it is
- * not a guess: every pair below was read out of the live catalogue, and this
- * exists because the test prompt needs a tag and must not fail because the
- * gateway is unreachable.
- */
-const LADDER_TAGS: Record<string, string> = {
-  "qwen2.5-math-7b": "mightykatun/qwen2.5-math:7b",
-  "qwen2.5-math-1.5b": "mightykatun/qwen2.5-math:1.5b",
-  "qwen2.5-coder-7b": "qwen2.5-coder:7b",
-  "qwen2.5-coder-1.5b": "qwen2.5-coder:1.5b",
-  "qwen3-8b": "qwen3:8b",
-  "llama3.2-3b": "llama3.2:3b",
-};
-
-/** The tag for a ladder id, from the catalogue if it can be reached and from the
- *  table if it cannot. `null` for an id that is in neither, which for a flow
- *  that has only ever written ladder ids is unreachable. */
-async function tagFor(modelId: string): Promise<string | null> {
-  const fromTable = LADDER_TAGS[modelId];
-  let catalogue: string;
-  try {
-    catalogue = await invoke<string>("network_catalogue");
-  } catch {
-    return fromTable ?? null;
-  }
-  try {
-    const parsed: unknown = JSON.parse(catalogue);
-    if (Array.isArray(parsed)) {
-      for (const entry of parsed) {
-        if (!isJson(entry) || readString(entry, "id") !== modelId) continue;
-        const source = readString(entry, "source");
-        // `ollama:<tag>`, and nothing else is pullable: an `api:` or `graph:`
-        // source is a hosted model and has no weights to fetch.
-        if (source !== null && source.startsWith("ollama:")) return source.slice("ollama:".length);
-      }
-    }
-  } catch {
-    // A catalogue that will not parse is a catalogue that cannot be consulted.
-  }
-  return fromTable ?? null;
 }
 
 /* --------------------------------- the limits --------------------------------- */
@@ -762,11 +510,11 @@ function setLimits(limits: ResourceLimits): Task<ResourceLimits> {
  *
  * Chosen by measurement, not by taste. It has one right answer, so the screen can
  * be believed at a glance; it is short, so a small model says it in one line
- * rather than a paragraph; and it is outside every lane's specialism, so the
- * proof is that the model is running rather than that it is any good at what it
- * was picked for. The arithmetic question the stub uses fails all three — a 1B
- * model answered 17 × 24 as 408 once and 406 the next time, which is a test that
- * cannot tell a working model from a broken one.
+ * rather than a paragraph; and it is answerable by the smallest rung of the
+ * ladder as readily as the largest, so a failure here is the model not running
+ * rather than the model being small. The arithmetic question the stub uses fails
+ * all three — a 1B model answered 17 × 24 as 408 once and 406 the next time, which
+ * is a test that cannot tell a working model from a broken one.
  */
 const TEST_PROMPT = "What is the capital of France?";
 
@@ -928,10 +676,11 @@ export function shouldSpawn(known: Status, start: JoinState | null): boolean {
 
 async function spawnJoin(request: JoinRequest): Promise<void> {
   const started = await read<number>("network_join", {
-    // The catalogue id, not the ollama tag: `join.py` resolves the tag from
-    // the catalogue itself, and passing the id is what puts a ladder id into
-    // `identity.catalogue_id` — so the node is filed under the model the
-    // flow's lane screen is showing, rather than under a tag name.
+    // The catalogue id, not an ollama tag or a weights filename: `join.py`
+    // resolves those from the catalogue itself, and passing the id is what puts a
+    // ladder id into `identity.catalogue_id` — so the node is filed under the
+    // model the flow is showing the user, rather than under a name only the
+    // fetcher knows.
     model: request.modelId,
     // No name. The CLI defaults to the hostname plus a short random suffix,
     // which is a better name than anything this flow would ask the user to
@@ -1328,7 +1077,7 @@ async function awaitServing(
  *
  * `cancel()` stops watching and nothing else. Walking Back out of this screen
  * unmounts it, which cancels the task, and a cancel that tore down the node would
- * mean that going back to look at the lane screen silently took the user off the
+ * mean that going back to look at the model screen silently took the user off the
  * network. The join is a node the user asked for; `Leave the network` is the
  * control that ends it, and it is the only one.
  *
@@ -1352,7 +1101,6 @@ function joinNetwork(request: JoinRequest, opts?: ProgressOptions<JoinProgress>)
       intervalMs: JOIN_POLL_MS,
     });
 
-    const tag = await tagFor(request.modelId);
     if (signal.cancelled) throw stopped("Stopped.");
 
     // Unconditionally loading, and this used to be a question. A cold model
@@ -1372,7 +1120,20 @@ function joinNetwork(request: JoinRequest, opts?: ProgressOptions<JoinProgress>)
     let answer: string;
     let latencyMs: number | null;
     try {
-      const raw = await invoke<string>("network_ask_local", { question, model: tag });
+      // No model named, deliberately, and that is the fix for a name this app
+      // cannot know. The ask has to name whatever `llama-server` is serving, and
+      // the CLI sets that name itself: for an `ollama:` source it is the tag with
+      // the scheme stripped, and for the `gguf:` sources the catalogue is now made
+      // of it is the weights file's own stem — "Ternary-Bonsai-2-9B-Q2_0" for the 9B.
+      // A table of those here would be a second copy of `runtime.py`'s naming rule,
+      // free to drift from it and, as it did when the catalogue changed, to name a
+      // model that has never been on this machine.
+      //
+      // There is nothing to look up. `--model` is optional and the CLI falls back
+      // to the only model the backend is serving, which on this path is always the
+      // one this join just started: one `llama-server`, one set of weights. Naming
+      // it was never what made the question specific.
+      const raw = await invoke<string>("network_ask_local", { question, model: null });
       const parsed: unknown = JSON.parse(raw);
       if (!isJson(parsed) || typeof parsed.answer !== "string") {
         throw new OnboardingError("unknown", SENTENCE.unknown, "the model returned nothing readable");
@@ -1427,7 +1188,6 @@ function joinNetwork(request: JoinRequest, opts?: ProgressOptions<JoinProgress>)
     return {
       nodeId: final.nodeId ?? registered.nodeId ?? "",
       nodeName: final.name ?? registered.name ?? "this machine",
-      lane: request.lane,
       modelId: request.modelId,
       testPrompt: answered,
       gatewaySeen: seen,
@@ -1477,7 +1237,6 @@ function ensureJoined(request: JoinRequest): Task<EnsureJoinedResult> {
     return {
       nodeId: final.nodeId ?? registered.nodeId ?? "",
       nodeName: final.name ?? registered.name ?? "this machine",
-      lane: request.lane,
       modelId: request.modelId,
     };
   });
@@ -1489,5 +1248,5 @@ const wait = (milliseconds: number) =>
 /* ---------------------------------- the seam ---------------------------------- */
 
 export function createRealService(): OnboardingService {
-  return { scanHardware, suggestLane, setLimits, joinNetwork, ensureJoined };
+  return { scanHardware, suggestModel, setLimits, joinNetwork, ensureJoined };
 }

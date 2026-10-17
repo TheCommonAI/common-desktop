@@ -17,16 +17,16 @@
  * — `mayRejoinNow`, the quiet-hours gate — including the midnight cross, which
  *   is the ordinary case here (22:00–07:00) and the one an interval test written
  *   the obvious way gets backwards.
- * — `joinInputs`, which recovers what to rejoin *as*. It must never guess a lane:
- *   a node filed under a model it is not serving is worse to the network than a
- *   machine that stayed off it.
+ * — `joinInputs`, which recovers what to rejoin *as*. It must never guess a model
+ *   id: a node filed under a model it is not serving is worse to the network than
+ *   a machine that stayed off it.
  * — `networkFact`, which is the sentence the user reads. The load-bearing part is
  *   that "Common's command-line tool couldn't be started" must never come out as
  *   a sentence about the network.
  *
  * ── Why there is no runner here ────────────────────────────────────────────────
  *
- * The same harness as `lane-choice.test.mjs`, and for the same reason: no
+ * The same harness as `model-choice.test.mjs`, and for the same reason: no
  * frontend test runner, and adding vitest plus a jsdom for four functions would
  * be a larger change than the fix. Node strips TypeScript itself, so the sources
  * are copied into a temp directory with their import specifiers repointed — at
@@ -162,7 +162,7 @@ stage(CHAT_DIR, "rejoin.ts", [
   ['from "./backend"', 'from "./backend.mjs"'],
 ]);
 
-const { findModel, MODEL_CATALOG } = await import(pathToFileURL(join(TMP, "models.ts")).href);
+const { findModel, modelFor } = await import(pathToFileURL(join(TMP, "models.ts")).href);
 const { shouldSpawn } = await import(pathToFileURL(join(TMP, "service.real.ts")).href);
 const { joinInputs, mayRejoinNow, networkFact } = await import(
   pathToFileURL(join(TMP, "rejoin.ts")).href
@@ -191,10 +191,10 @@ function storing(flow) {
   };
 }
 
-/** One model out of the real catalogue, so the tests name ids the app actually
+/** Two models out of the real ladder, so the tests name ids the app actually
  *  ships rather than ids that happen to be right today. */
-const CODER = MODEL_CATALOG.full.code;
-const MATH_LIGHT = MODEL_CATALOG.light.math;
+const BIG = modelFor("9b");
+const SMALL = modelFor("2b");
 
 const CAP = { cpuPercent: 50, gpuPercent: 40 };
 
@@ -336,37 +336,23 @@ test("the plugged-in rule is deliberately not consulted", () => {
 /* ------------------------- what a reconnect asks for ------------------------- */
 
 test("the stored flow is what a reconnect joins as", async () => {
-  storing({ modelId: CODER.id, lane: "math", limits: limitsWith(null, "idle") });
+  storing({ modelId: BIG.id, limits: limitsWith(null, "idle") });
   // A `whoami` that would answer something else, to prove the flow is preferred
   // and the CLI is never asked when the flow resolves.
-  globalThis.__whoami = { catalogueId: MATH_LIGHT.id };
+  globalThis.__whoami = { catalogueId: SMALL.id };
 
   const request = await joinInputs();
 
-  assert.equal(request.modelId, CODER.id);
-  assert.equal(request.lane, "code");
+  assert.equal(request.modelId, BIG.id);
   assert.deepEqual(request.limits, limitsWith(null, "idle"));
 });
 
-test("the lane comes from the catalogue, never from the stored flow", async () => {
-  // The stored `lane` is deliberately wrong here, and the catalogue's answer is
-  // the one that must come out. A node filed under a lane it is not serving is
-  // routed to on that basis, so a disagreement is not a detail to average.
-  storing({ modelId: CODER.id, lane: "math", limits: null });
-
-  const request = await joinInputs();
-
-  assert.equal(request.lane, "code", "the catalogue's lane for this model, not the stored one");
-  assert.equal(CODER.lane, "code");
-});
-
 test("a flow with no limits gets the same defaults the flow would have started from", async () => {
-  storing({ modelId: MATH_LIGHT.id, lane: null, limits: null });
+  storing({ modelId: SMALL.id, limits: null });
 
   const request = await joinInputs();
 
-  assert.equal(request.modelId, MATH_LIGHT.id);
-  assert.equal(request.lane, "math");
+  assert.equal(request.modelId, SMALL.id);
   // No hardware was stored, so nothing is on battery and the default is `idle` —
   // and the quiet window is the app's own default, which the gate then honours.
   assert.equal(request.limits.contribute, "idle");
@@ -377,32 +363,30 @@ test("a storage that was cleared is answered by the identity on disk", async () 
   // A fresh build over a surviving `~/.common-network`: the flow is gone, the node
   // token is not. The reconnect is still worth making, and `whoami` is where the
   // model comes from — this is the case that justifies asking it at all.
-  globalThis.__whoami = { catalogueId: CODER.id };
+  globalThis.__whoami = { catalogueId: BIG.id };
 
   const request = await joinInputs();
 
-  assert.equal(request.modelId, CODER.id);
-  assert.equal(request.lane, "code");
+  assert.equal(request.modelId, BIG.id);
 });
 
 test("a model this version does not ship falls back to the registered one", async () => {
   // The catalogue moved under a stored flow — a model dropped from a later build.
   // The node is registered as something this build *does* know, and that is the
   // better answer than nothing.
-  storing({ modelId: "qwen-of-a-previous-era", lane: "writing", limits: null });
-  globalThis.__whoami = { catalogueId: MATH_LIGHT.id };
+  storing({ modelId: "qwen-of-a-previous-era", limits: null });
+  globalThis.__whoami = { catalogueId: SMALL.id };
 
   const request = await joinInputs();
 
-  assert.equal(request.modelId, MATH_LIGHT.id);
-  assert.equal(request.lane, "math");
+  assert.equal(request.modelId, SMALL.id);
 });
 
-test("an id nothing recognises is null, not a guess at the nearest lane", async () => {
-  // The one refusal. Joining as the wrong lane is worse for the network than not
+test("an id nothing recognises is null, not a guess at the nearest rung", async () => {
+  // The one refusal. Joining as the wrong model is worse for the network than not
   // joining, and a default here would be a silent one — so `null` travels up to a
   // sentence on the Settings row instead.
-  storing({ modelId: "qwen-of-a-previous-era", lane: "writing", limits: null });
+  storing({ modelId: "qwen-of-a-previous-era", limits: null });
   globalThis.__whoami = { catalogueId: "also-not-in-this-catalogue" };
 
   assert.equal(await joinInputs(), null);
@@ -418,7 +402,7 @@ test("a CLI that will not answer is null rather than a rejection", async () => {
   // question — is there a registered id to fall back on — and a machine that
   // cannot answer has not got one. Thrown, this would take a whole reconnect down
   // over a fallback that was optional by construction.
-  storing({ modelId: "qwen-of-a-previous-era", lane: "writing", limits: null });
+  storing({ modelId: "qwen-of-a-previous-era", limits: null });
   globalThis.__whoami = "throws";
 
   assert.equal(await joinInputs(), null);
@@ -465,15 +449,12 @@ test("an unknown code still says something, and does not claim a cause", () => {
 
 /* --------------------------------- a reminder --------------------------------- */
 
-test("the catalogue still carries the shapes these tests name", () => {
-  // The fixtures are derived from the real catalogue rather than hardcoded so
-  // that a model id moving does not fail a test about reconnect logic. This is
-  // what keeps that honest: `CODER` must be a full Coder and `MATH_LIGHT` a light
-  // Math, or the two tests above that lean on their lanes are testing nothing
-  // they meant to.
-  assert.equal(CODER.lane, "code");
-  assert.equal(CODER.tier, "full");
-  assert.equal(MATH_LIGHT.lane, "math");
-  assert.equal(MATH_LIGHT.tier, "light");
-  assert.equal(findModel(CODER.id), CODER);
+test("the ladder still carries the shapes these tests name", () => {
+  // The fixtures are derived from the real ladder rather than hardcoded so that a
+  // model id moving does not fail a test about reconnect logic. This is what keeps
+  // that honest: `BIG` must be the 9B and `SMALL` the 2B, or the tests above that
+  // distinguish them by rung are testing nothing they meant to.
+  assert.equal(BIG.tier, "9b");
+  assert.equal(SMALL.tier, "2b");
+  assert.equal(findModel(BIG.id), BIG);
 });

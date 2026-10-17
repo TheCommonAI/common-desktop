@@ -123,15 +123,14 @@ export async function joinInputs(): Promise<JoinRequest | null> {
   // making — and in the second, the identity is the better answer anyway, since
   // it is what the node is actually registered as.
   const model = findModel(flow?.modelId ?? "") ?? findModel(await registeredId());
-  // The lane comes from the catalogue and never from `flow.lane` or a default. A
-  // join started under the wrong lane files this node under a model it is not
+  // The id has to resolve against the ladder and never fall back to a default. A
+  // reconnect started under the wrong id files this node under a model it is not
   // serving, and the network routes to it on that basis — so an id no catalogue
-  // entry matches is a reason to stop and say so, not to pick the nearest lane and
+  // entry matches is a reason to stop and say so, not to pick the nearest rung and
   // hope. `null` is that stop.
   if (model === null) return null;
 
   return {
-    lane: model.lane,
     modelId: model.id,
     // The stored limits, or the same defaults the flow would have started from.
     // These travel in the request and reach nothing but this app — see `setLimits`

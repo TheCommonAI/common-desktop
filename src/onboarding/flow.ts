@@ -1,5 +1,5 @@
-import { LANES, tierFor } from "./models";
-import type { HardwareReport, Lane, ResourceLimits, Tier } from "./service";
+import { findModel, tierFor } from "./models";
+import type { HardwareReport, ResourceLimits, Tier } from "./service";
 import { STEP_ORDER, type StepId } from "./steps";
 
 /**
@@ -18,7 +18,9 @@ export interface FlowState {
    *  beside the report rather than written into it, so a figure typed once does
    *  not poison a later re-scan. */
   memoryOverrideBytes: number | null;
-  lane: Lane | null;
+  /** Which of the four models this machine is being set up to serve. Chosen on the
+   *  third screen and written through to storage, so the join and the reconnect
+   *  both read it back from here rather than deciding again. */
   modelId: string | null;
   /** `null` until the limits have been written. The join request needs a value,
    *  and a default is not the same as an answer. */
@@ -47,7 +49,6 @@ export function defaultLimits(hardware: HardwareReport | null): ResourceLimits {
 export const INITIAL_FLOW: FlowState = {
   hardware: null,
   memoryOverrideBytes: null,
-  lane: null,
   modelId: null,
   limits: null,
 };
@@ -101,13 +102,20 @@ function readLimits(value: unknown): ResourceLimits | null {
  *  than throw away the user's whole position. */
 function readFlow(value: unknown): FlowState {
   const source = (typeof value === "object" && value !== null ? value : {}) as Partial<FlowState>;
-  const lane = LANES.find((l) => l === source.lane);
+  // The model id is checked against the ladder, not merely for being a string. A
+  // flow written by a build whose ladder was a different ladder holds ids this one
+  // has never heard of, and `spawnJoin` sends whatever is here straight to
+  // `common join --model` — where an id the catalogue does not know is not an
+  // error, it is read as an Ollama registry tag. So a stale id is a node
+  // provisioned out of the wrong catalogue, quietly, and dropping it here is what
+  // stops that: the step machine then walks back to the screen that picks one.
+  const modelId =
+    typeof source.modelId === "string" && findModel(source.modelId) !== null ? source.modelId : null;
   return {
     hardware: typeof source.hardware === "object" && source.hardware !== null ? source.hardware : null,
     memoryOverrideBytes:
       typeof source.memoryOverrideBytes === "number" ? source.memoryOverrideBytes : null,
-    lane: lane ?? null,
-    modelId: typeof source.modelId === "string" ? source.modelId : null,
+    modelId,
     limits: readLimits(source.limits),
   };
 }
@@ -118,12 +126,12 @@ function canEnter(step: StepId, flow: FlowState): boolean {
     case "welcome":
     case "scan":
       return true;
-    case "lane":
+    case "model":
       return flow.hardware !== null;
     case "limits":
       return flow.modelId !== null;
     case "join":
-      return flow.lane !== null && flow.modelId !== null && flow.limits !== null;
+      return flow.modelId !== null && flow.limits !== null;
   }
 }
 

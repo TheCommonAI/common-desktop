@@ -98,6 +98,11 @@ const NOTES: Record<string, readonly string[]> = {
     "That check also cost more the quieter the network got. Every unreachable machine was retried for up to eight seconds, and the machines were checked strictly one after another, so a pass over a couple of dozen of them ran for minutes — and every request made during a pass waited its turn. Each machine is now looked up once and several are checked at a time, so one that has genuinely gone away is recorded as gone in the pass that finds it, instead of holding up everything else while it decides.",
     "Nothing in this app changed to make that work. The fault was in the gateway and the gateway is fixed, so it is already live and you have felt it before reading this — this release records the fix rather than delivering it.",
   ],
+  "0.2.13": [
+    "The network's catalogue changed under this app: Math, Code, and Writing specialists are gone, replaced by one general model family at four sizes. Common now follows that change — the setup screen that asked which lane you were for is gone with it, and the app instead recommends the largest size your machine can run comfortably.",
+    "A machine with memory to spare is no longer held to a model chosen for a lane that no longer exists. The recommendation is read straight from the network's own requirements, so a floor that moves there moves with it here.",
+    "The proof-of-life question asked right after joining no longer risks naming the wrong model by mistake. It now simply asks whatever your machine just started running, rather than keeping its own guess of what that should be called.",
+  ],
 };
 
 /** Every version with notes, oldest first — the order the card reads them in,
@@ -117,6 +122,7 @@ const ORDER: readonly string[] = [
   "0.2.10",
   "0.2.11",
   "0.2.12",
+  "0.2.13",
 ];
 
 // <<< make-notes: end generated

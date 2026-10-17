@@ -107,9 +107,17 @@ export function isOnboardingError(error: unknown): error is OnboardingError {
 
 export type Platform = "macos" | "windows" | "linux";
 export type PowerSource = "battery" | "mains" | "unknown";
-export type Lane = "math" | "code" | "writing";
-/** Which rung of the model ladder this machine's memory can carry. */
-export type Tier = "full" | "light";
+/**
+ * Which rung of the model ladder this machine's memory can carry.
+ *
+ * One family at four sizes, so a rung *is* a model. There is no lane axis beside
+ * it any more: the ladder used to be three lanes deep and the rung only said how
+ * big, which is why the flow had to ask the user which lane they were for. With
+ * prism-ml's Bonsai 2 there is one general line at four footprints, every lane
+ * would have resolved to the same weights, and the axis was removed rather than
+ * left standing as a control that changes nothing.
+ */
+export type Tier = "2b" | "4b" | "8b" | "9b";
 
 /** A model as the interface needs to show it. `bytes` is the catalogue's figure,
  *  which is an estimate: the weights are fetched by the join, and the size the
@@ -119,7 +127,6 @@ export type Tier = "full" | "light";
 export interface ModelSpec {
   id: string;
   label: string;
-  lane: Lane;
   tier: Tier;
   bytes: number;
 }
@@ -147,27 +154,38 @@ export interface ScanProgress {
   field: "memory" | "graphics" | "disk" | "power";
 }
 
-export interface LaneOption {
-  lane: Lane;
+export interface ModelOption {
   model: ModelSpec;
-  /** Whether this machine carries the model with headroom. Drives a clause in
-   *  the caption, never whether the lane is selectable — the user may always
-   *  override the recommendation. */
+  /** Whether this machine carries it with headroom. Drives a clause in the caption
+   *  and never whether it is selectable — the user may always overrule the
+   *  recommendation from Settings. */
   fits: boolean;
 }
 
-export interface LaneSuggestion {
-  /** What to select by default: the lane the network is short of when this
-   *  machine can carry it, otherwise the lane the machine alone is best for. */
-  recommended: Lane;
-  /** What the machine alone would pick, at its tier. The honest baseline, and
-   *  the yardstick the caption measures the network's ask against. */
-  byMachine: Lane;
-  /** The lane the network is short of, or `null` when the ask did not land. An
-   *  unreachable ask is NOT an error; see `suggestLane`. */
-  networkAsk: { lane: Lane; demand: "high" | "medium" | "low" } | null;
-  /** All three lanes at this machine's tier, in Math · Code · Writing order. */
-  options: readonly LaneOption[];
+/**
+ * What this machine should run.
+ *
+ * One field that decides and two that qualify it, where this used to be five
+ * fields arbitrating between the machine and the network. The network has no say
+ * any more and that is not a simplification of the protocol, it is the catalogue:
+ * with one family at four sizes, the question "which weights?" is a question about
+ * the machine, and the network's shortage cannot change the answer. An ask that
+ * does not land used to be a third state the screen had to explain; there is no
+ * ask, so there is no third state.
+ */
+export interface ModelSuggestion {
+  /** The rung to run: the largest this machine carries with headroom, or the
+   *  smallest rung when it carries none. */
+  model: ModelSpec;
+  /** Whether `model` clears the catalogue's floor at the catalogue's headroom.
+   *  `false` means nothing in the ladder fits this machine, and `model` is then
+   *  the floor of the ladder rather than a recommendation. The screen says so
+   *  plainly instead of quietly naming a model that will not keep up. */
+  fits: boolean;
+  /** Every rung, smallest first. Carried so the screen can say what it is *not*
+   *  recommending without asking the service a second question, and so Settings
+   *  can offer the hatch from the same answer. */
+  options: readonly ModelOption[];
 }
 
 export interface ResourceLimits {
@@ -182,7 +200,11 @@ export interface ResourceLimits {
 }
 
 export interface JoinRequest {
-  lane: Lane;
+  /** The catalogue id of the weights to serve — one of the four in `models.ts`, and
+   *  the whole of what this machine is asked to be. It replaces a `lane` field that
+   *  used to sit beside it: the join reads the node's domain tags out of the
+   *  catalogue entry it finds for this id, so the lane was never sent anywhere and
+   *  with one family there is nothing left to send. */
   modelId: string;
   limits: ResourceLimits;
   /* There is no display name. The node's name is chosen by the backend from the
@@ -229,7 +251,6 @@ export interface JoinProgress {
 export interface JoinResult {
   nodeId: string;
   nodeName: string;
-  lane: Lane;
   modelId: string;
   testPrompt: { prompt: string; answer: string; latencyMs: number };
   /** Whether the network confirmed it can reach this node. `false` is a
@@ -251,11 +272,9 @@ export interface EnsureJoinedResult {
   /** Read back after the wait, so it is the node this machine actually has now
    *  rather than the one the request named. */
   nodeName: string;
-  /** What this machine is now serving as. Echoed from the request rather than
-   *  read back, exactly as `JoinResult` echoes it: these are what the join was
-   *  started with, and the caller that built the request is where they are
-   *  confirmed. */
-  lane: Lane;
+  /** Which weights this machine is now serving. Echoed from the request rather
+   *  than read back, exactly as `JoinResult` echoes it: this is what the join was
+   *  started with, and the caller that built the request is where it is confirmed. */
   modelId: string;
 }
 
@@ -286,13 +305,15 @@ export interface OnboardingService {
   scanHardware(opts?: ProgressOptions<ScanProgress>): Task<HardwareReport>;
 
   /**
-   * Fit the memory to a lane, then ask the network what it is short of.
+   * Fit this machine to a rung of the ladder.
    *
-   * MUST NOT reject for want of a network. An ask that does not land is
-   * `networkAsk: null` and the interface says so in one clause. Reject only when
-   * the machine's own tier cannot be determined.
+   * MUST NOT reject for want of a network — the answer does not depend on one any
+   * more, and asking is where the live `min_ram_gb` figures come from, so an
+   * unreachable gateway falls back to the table in `models.ts` rather than
+   * failing. Reject only when the machine's own memory cannot be determined, which
+   * is the one input there is no table for.
    */
-  suggestLane(report: HardwareReport): Task<LaneSuggestion>;
+  suggestModel(report: HardwareReport): Task<ModelSuggestion>;
 
   /**
    * Write the contribution limits. MUST return what was actually stored — an
