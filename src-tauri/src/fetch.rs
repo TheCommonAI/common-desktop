@@ -1,4 +1,4 @@
-//! The first-run bootstrap: the three things the app needs to be a node.
+//! The first-run bootstrap: everything the app needs to be a node.
 //!
 //! This app runs a Python command-line tool and, to contribute, an Ollama beside
 //! it. Both have always been prerequisites the user was expected to arrive with:
@@ -31,10 +31,16 @@
 //!   directory and needs neither. It is a *runtime for the CLI*, never the
 //!   system Python — and a Python already on `PATH` is preferred to it, so most
 //!   machines never fetch this at all.
-//! - **The Common CLI**, from the bundle rather than from the network — see the
-//!   section below for why the network cannot supply it. Placed into
-//!   `~/.common-network`, the same directory the CLI's own `install.sh` and
-//!   `install.ps1` own, and only when nothing is there already.
+//! - **cloudflared**, from Cloudflare's releases, into `~/.common-network/bin` —
+//!   the one thing the CLI cannot work without and cannot fetch for itself.
+//!   `join.py` refuses to open a tunnel without it, and `backend.rs`'s `cli_env`
+//!   has always put `~/.common-network/bin` on the child's `PATH` in the stated
+//!   belief that the installer leaves one there. It does not: this app never runs
+//!   the CLI's own installer, so on a clean machine the join got all the way to
+//!   the tunnel and stopped.
+//! - **The Common CLI**, from the bundle rather than from the network, placed into
+//!   `~/.common-network` by `backend.rs`'s seed — see the section below for why
+//!   the network cannot supply it, and why there is no payload for it here.
 //! - **Ollama**, from `ollama/ollama`'s releases, into
 //!   `~/.common-network/runtime/ollama` — and **only when there is no Ollama
 //!   already**. A machine that has Ollama keeps the one it has; this app is not
@@ -62,20 +68,31 @@
 //!   that the asset is the one that release published — it does **not** defend
 //!   against a compromised origin. It is used where the publisher ships
 //!   per-release sums and pinning a digest would mean the app went stale the day
-//!   the publisher cut a new build. The CLI's entry is pinned, because a release
-//!   of our own is a release we can pin.
+//!   the publisher cut a new build.
 //!
-//! ## Why the CLI is bundled and the other two are not
+//! cloudflared is pinned, and pinned per asset, because Cloudflare publishes no
+//! sums *file* for it — its digests are a list in the release body, which is not
+//! the same thing. Read [`CLOUDFLARED_DIGESTS`] before refreshing those pins: for
+//! `2026.10.1` the body's two macOS entries do not match the macOS tarballs the
+//! release actually serves, and pinning from the body is how this app would come
+//! to refuse every macOS install.
 //!
-//! **Because there is nothing published to fetch.** `TheCommonAI/common-network`
-//! has one release, `v0.1.4`, and it carries **zero assets** — no tarball, no zip,
-//! nothing to download. A first run that tried to fetch the CLI would therefore fail
-//! on precisely the machine all of this exists for, so the CLI travels inside the
-//! installer and the fetch's CLI entry is left as the shape a release would have to
-//! fill in: [`CLI_ASSETS`] holds the asset names such a release would publish, and
-//! they are **invented** — not names observed in the wild — with an empty
-//! [`CLI_SHA256`] that fails closed. Nothing on the shipping path consults any of it;
-//! `cli_script` in `backend.rs` is what actually places the CLI.
+//! ## Why the CLI is bundled and the rest are not
+//!
+//! **Because there is nothing published to fetch.** A release of
+//! `TheCommonAI/common-network` carries no assets — no tarball, no zip, nothing to
+//! download. A first run that tried to fetch the CLI would therefore fail on
+//! precisely the machine all of this exists for, so the CLI travels inside the
+//! installer and is placed by `cli_script` in `backend.rs`, which also decides when
+//! the bundle may replace what is already there.
+//!
+//! There used to be a fourth payload here whose whole purpose was to write down the
+//! shape a release would have to publish: the asset names were **invented** rather
+//! than observed, and its checksum was an empty pin that fails closed. It has been
+//! removed. It could not install anything and never would without a release
+//! changing shape underneath it, and a row that is permanently unavailable is a trap
+//! for whoever reads the table next — the seed, and the version comparison beside
+//! it, are the single source for the CLI.
 //!
 //! The Python is now genuinely the one used, which is worth stating because it was
 //! not always. `cli` in `backend.rs` builds every invocation as `python3 <script>`
@@ -129,35 +146,17 @@ const PYTHON_VERSION: &str = "3.12.15";
 /// The Ollama whose payloads are named below. Also pinned, for the same reason.
 const OLLAMA_VERSION: &str = "0.40.4";
 
+/// The cloudflared whose payloads are named below, and the digest of each.
+///
+/// Pinned rather than "latest" for the reason every other payload here is: a
+/// moving target cannot be verified against a compiled-in digest, and this app
+/// verifies before it installs. The cost is the same as the other payloads carry —
+/// moving forward is an edit to this file.
+const CLOUDFLARED_VERSION: &str = "2026.10.1";
+
 const PBS_BASE: &str = "https://github.com/astral-sh/python-build-standalone/releases/download";
 const OLLAMA_BASE: &str = "https://github.com/ollama/ollama/releases/download";
-const CLI_BASE: &str = "https://github.com/TheCommonAI/common-network/releases/download";
-
-/// The tag of the Common CLI release this app would install from.
-///
-/// One of the three things to change when a release carries a payload. The tag
-/// itself is real — `TheCommonAI/common-network` has this release — but it has no
-/// assets, which is what [`CLI_PUBLISHED`] records.
-const CLI_TAG: &str = "v0.1.4";
-
-/// Whether that release actually carries the files [`CLI_ASSETS`] names.
-///
-/// It does not. This is `false` today, and while it is `false` the CLI is
-/// reported as unavailable and never fetched — see the module header. It is a
-/// separate constant from the names so that the names are still built, still
-/// checked by the tests, and still shown to the user as where the payload would
-/// come from; flipping this to `true` is not enough on its own, because the names
-/// below are guesses and [`CLI_SHA256`] is empty.
-const CLI_PUBLISHED: bool = false;
-
-/// The digest of the CLI payload, once there is one to digest.
-///
-/// Empty on purpose, and the emptiness is load-bearing twice. It is the third
-/// thing to fill in when a release appears, and it is what the verifier refuses
-/// on if one appears before anyone fills it in — an empty pin fails closed, and a
-/// placeholder that hashed *something* would be worse than none, because it would
-/// happily install whatever arrived.
-const CLI_SHA256: &str = "";
+const CLOUDFLARED_BASE: &str = "https://github.com/cloudflare/cloudflared/releases/download";
 
 /// The archive a payload arrives in, which decides how it is unpacked.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -172,6 +171,11 @@ enum Archive {
     /// table is honest about what Linux would need, and blocked everywhere
     /// because nothing this app can call unpacks zstd.
     TarZst,
+    /// Nothing at all: the download *is* the program, and it is installed under
+    /// the name [`Payload::member`] gives it. cloudflared's Linux and Windows
+    /// builds arrive this way, while its macOS builds are a `.tgz` holding the
+    /// same single file.
+    Raw,
 }
 
 /// How a payload's bytes are checked before anything is unpacked.
@@ -201,10 +205,23 @@ struct Payload {
     /// The directory inside the archive holding the thing itself, when the
     /// archive wraps everything in one — `python-build-standalone` does, ollama's
     /// Windows zip does not. `None` means "the archive's contents, as they are".
+    ///
+    /// For the two shapes that resolve to a single file — [`Archive::Raw`], and a
+    /// `.tgz` whose whole contents are the program — this is that file's name
+    /// instead, because both the unpacking and the executable bit need to know it.
     member: Option<&'static str>,
     /// Where the payload ends up. For a wrapped archive this is the final path
     /// of the wrapped directory, not its parent.
     dest: PathBuf,
+    /// The permission bits the installed file is given, on Unix.
+    ///
+    /// `None` for everything that is not a program. `Some` is what stops a
+    /// fetched cloudflared from being a file the app has to run by naming an
+    /// interpreter for it — the download arrives `644` from `curl`, `tar` would
+    /// usually carry the mode through for the macOS tarball and cannot be relied
+    /// on to, and a tunnel binary without its executable bit fails as a permission
+    /// error inside `join.py`, a long way from the cause.
+    mode: Option<u32>,
     /// Why it cannot be installed on this machine, when that is known without
     /// asking the network. `Some` means the fetch never starts.
     blocked: Option<String>,
@@ -281,19 +298,57 @@ const OLLAMA_ASSETS: &[AssetRow] = &[
     ("linux", "x86_64", "ollama-linux-amd64.tar.zst", Archive::TarZst, None),
 ];
 
-/// The files the Common CLI payload *would* arrive in.
+/// cloudflared's payloads, by the machine they are for.
 ///
-/// **These names are invented.** No release publishes them; they are what a
-/// release would have to publish for [`bootstrap_run`] to install the CLI, and
-/// they are here so that the shape of the missing thing is written down rather
-/// than living in someone's head. See [`CLI_PUBLISHED`].
+/// A row names the file each platform arrives in, the container it is in, and the
+/// name it is installed under — which is not the asset name on any platform, since
+/// the assets carry their platform in the file name and the program does not.
 #[rustfmt::skip] // See `OLLAMA_ASSETS`.
-const CLI_ASSETS: &[AssetRow] = &[
-    ("macos", "aarch64", "common-cli-macos-arm64.tar.gz", Archive::TarGz, None),
-    ("macos", "x86_64", "common-cli-macos-x64.tar.gz", Archive::TarGz, None),
-    ("windows", "x86_64", "common-cli-windows-x64.zip", Archive::Zip, None),
-    ("linux", "x86_64", "common-cli-linux-x64.tar.gz", Archive::TarGz, None),
+const CLOUDFLARED_ASSETS: &[AssetRow] = &[
+    ("macos", "aarch64", "cloudflared-darwin-arm64.tgz", Archive::TarGz, Some("cloudflared")),
+    ("macos", "x86_64", "cloudflared-darwin-amd64.tgz", Archive::TarGz, Some("cloudflared")),
+    ("windows", "x86_64", "cloudflared-windows-amd64.exe", Archive::Raw, Some("cloudflared.exe")),
+    ("linux", "x86_64", "cloudflared-linux-amd64", Archive::Raw, Some("cloudflared")),
 ];
+
+/// The digest of each of those files, which is the pin.
+///
+/// Read from the release's **asset metadata**, and not from the release body the
+/// way it looks like it should be. Cloudflare publishes no sums file, and for
+/// `2026.10.1` the body's list is wrong for macOS: it gives
+/// `35b7e34c…` for `cloudflared-darwin-arm64.tgz` and `8ccc6383…` for
+/// `cloudflared-darwin-amd64.tgz`, while the bytes those URLs serve hash to
+/// `647615df…` and `3b0dbaf3…`. The tarballs were re-cut after the body was
+/// written. Pinning the body's numbers would have made every macOS install fail
+/// with "the download did not match its published checksum", which is a sentence
+/// that reads exactly like a corrupted transfer.
+///
+/// So: refresh these from `gh api repos/cloudflare/cloudflared/releases/tags/<tag>
+/// --jq '.assets[] | "\\(.name) \\(.digest)"'`, which reports what the release
+/// actually stores, and check the two agree with a download before committing.
+/// Linux and Windows currently agree with the body as well; macOS does not.
+///
+/// Kept beside [`CLOUDFLARED_ASSETS`] rather than inside it only because a
+/// 64-character hex literal in every row makes the table stop being a table.
+/// `every_cloudflared_asset_has_a_digest_and_every_digest_an_asset` is what keeps
+/// the two in step, and [`cloudflared_digest`] answers empty for anything it does
+/// not know — which the verifier refuses rather than skips.
+#[rustfmt::skip]
+const CLOUDFLARED_DIGESTS: &[(&str, &str)] = &[
+    ("cloudflared-darwin-arm64.tgz",  "647615df99d49cd179ea5e13ef760b9bbfb33630f6ae62f87e33dfadda60adcc"),
+    ("cloudflared-darwin-amd64.tgz",  "3b0dbaf378337e9d7fb6cd235a76d1d6a7dee434c2d8edf9281164fb6a3837ab"),
+    ("cloudflared-windows-amd64.exe", "4d2490e74082c5d48dbfedaf92576fa5bd1702379ab88eb7faa0cfbe8dc891b6"),
+    ("cloudflared-linux-amd64",       "3bfc539f45d2620c71debb7a86be0efa737ed5ccbad9eb85c787116900e5c586"),
+];
+
+/// The digest pinned for an asset, or empty when none is.
+fn cloudflared_digest(asset: &str) -> &'static str {
+    CLOUDFLARED_DIGESTS
+        .iter()
+        .find(|(name, _)| *name == asset)
+        .map(|(_, digest)| *digest)
+        .unwrap_or("")
+}
 
 /// Where the CLI's files go, which is where its own installers put them —
 /// `backend.rs`'s `common_bin()` looks under `~/.common-network/bin` and this
@@ -301,6 +356,15 @@ const CLI_ASSETS: &[AssetRow] = &[
 /// not look.
 fn cli_dir(home: &Path) -> PathBuf {
     home.join(".common-network")
+}
+
+/// The `bin` directory inside it, which is where `cloudflared` goes.
+///
+/// The same directory `cli_present` looks in for the launchers, and the one
+/// `backend.rs`'s `cli_env` puts on the child's `PATH` — the app and the CLI's own
+/// installer agree on this path, and the join only works because they do.
+fn bin_dir(home: &Path) -> PathBuf {
+    cli_dir(home).join("bin")
 }
 
 /// Where the fetched runtimes go. One directory, so that removing the app's
@@ -327,12 +391,12 @@ pub fn runtime_bin_dir(home: &Path) -> PathBuf {
 }
 
 /// Everything that can be fetched on this machine, in the order it makes sense to
-/// do it: the runtime the CLI needs, the CLI, then the model server.
+/// do it: the runtime the CLI needs, the tunnel it needs, then the model server.
 fn payloads(home: &Path) -> Vec<Payload> {
     let key = platform_key();
     vec![
         python_payload(home, key),
-        cli_payload(home, key),
+        cloudflared_payload(home, key),
         ollama_payload(home, key),
     ]
 }
@@ -362,53 +426,54 @@ fn python_payload(home: &Path, key: (&str, &str)) -> Payload {
         // layout the live test below installs and then checks.
         member: Some("python"),
         dest: runtime_dir(home).join("python"),
+        // An interpreter is run by naming it, so it needs no bit of its own.
+        mode: None,
         blocked,
         probe: python_present,
     }
 }
 
-fn cli_payload(home: &Path, key: (&str, &str)) -> Payload {
-    let named = CLI_ASSETS.iter().find(|(os, arch, ..)| (*os, *arch) == key);
+fn cloudflared_payload(home: &Path, key: (&str, &str)) -> Payload {
+    let named = CLOUDFLARED_ASSETS
+        .iter()
+        .find(|(os, arch, ..)| (*os, *arch) == key);
 
-    let (asset, url, archive, blocked) = match named {
-        Some((_, _, asset, archive, _)) => (
+    let (asset, url, archive, name, blocked) = match named {
+        Some((_, _, asset, archive, member)) => (
             *asset,
-            format!("{CLI_BASE}/{CLI_TAG}/{asset}"),
+            format!("{CLOUDFLARED_BASE}/{CLOUDFLARED_VERSION}/{asset}"),
             *archive,
-            (!CLI_PUBLISHED).then(|| {
-                format!(
-                    "the command-line tool has no published build to fetch — the only \
-                     release of TheCommonAI/common-network ({CLI_TAG}) carries no \
-                     downloadable files"
-                )
-            }),
+            member.unwrap_or("cloudflared"),
+            None,
         ),
+        // No `cfg!` guard here and none needed: the table is the whole answer to
+        // "is there a build for this machine", and a machine with no row gets a
+        // sentence rather than a download that 404s.
         None => (
             "(no build for this machine)",
             String::new(),
-            Archive::TarGz,
+            Archive::Raw,
+            "cloudflared",
             Some(format!(
-                "no command-line tool build is published for {} {}",
+                "no cloudflared build is published for {} {}",
                 key.0, key.1
             )),
         ),
     };
 
     Payload {
-        id: "cli",
-        label: "Common's command-line tool",
-        version: CLI_TAG.trim_start_matches('v').to_string(),
+        id: "cloudflared",
+        label: "the tunnel that lets this machine be reached",
+        version: CLOUDFLARED_VERSION.to_string(),
         asset: asset.to_string(),
         url,
-        checksum: Checksum::Pinned(CLI_SHA256),
+        checksum: Checksum::Pinned(cloudflared_digest(asset)),
         archive,
-        // Unknown until a release publishes one: the CLI is expected to be a tree
-        // that merges into `~/.common-network` beside whatever is already there,
-        // which is what `install` does with an existing destination.
-        member: None,
-        dest: cli_dir(home),
+        member: Some(name),
+        dest: bin_dir(home),
+        mode: Some(0o755),
         blocked,
-        probe: cli_present,
+        probe: cloudflared_present,
     }
 }
 
@@ -461,6 +526,7 @@ fn ollama_payload(home: &Path, key: (&str, &str)) -> Payload {
             Some(member) => runtime_dir(home).join("ollama").join(member),
             None => runtime_dir(home).join("ollama"),
         },
+        mode: None,
         blocked,
         probe: ollama_present,
     }
@@ -614,27 +680,38 @@ pub fn python_for_cli(home: &Path) -> Option<PathBuf> {
     None
 }
 
-/// A `common` that is already installed, by the same names and in the same
-/// directory `common_names` and `common_bin` in `backend.rs` use.
+// A `common` that is already installed used to be reported from here, by the same
+// names and in the same directory `common_names` and `common_bin` in `backend.rs`
+// use. It went with the CLI's payload: it was that payload's probe and nothing else
+// called it, so what it reported was the state of a fetch that no longer happens.
+// Whether a CLI is in place is `cli_script`'s answer, and it is asked on every
+// launch rather than reported.
+
+/// A cloudflared that is already here, in either of the two places one can be.
 ///
-/// Reporting only. It asks the question a user is asking — "have I already got
-/// this?" — and the answer decides nothing, because the CLI is now bundled rather
-/// than fetched and `cli_script` is what places it. It is what `bootstrap_status`
-/// prints beside the seed.
-///
-/// All three spellings are checked rather than only the current platform's, for the
-/// reason `common_names` gives: the launcher that ships with the CLI is a shell
-/// script on Unix and a `.cmd` beside it on Windows, and a report that only knew
-/// about one spelling would say "not installed" on a machine that has one.
-fn cli_present(home: &Path) -> Option<String> {
-    let bin = cli_dir(home).join("bin");
-    for name in ["common", "common.cmd", "common.exe"] {
-        let candidate = bin.join(name);
-        if candidate.is_file() {
-            return Some(format!("the command-line tool at {}", candidate.display()));
-        }
+/// `~/.common-network/bin` first, because that is where this app installs one and
+/// where the CLI's own installer puts one when the user ran that instead; then
+/// `PATH`, because `brew install cloudflared` is a perfectly good way to have one
+/// and `join.py` looks no further than `shutil.which`. Finding either means the
+/// fetch never starts, which is the rule for every payload here: an existing
+/// install wins.
+fn cloudflared_present(home: &Path) -> Option<String> {
+    let local = bin_dir(home).join(cloudflared_name());
+    if local.is_file() {
+        return Some(format!("cloudflared at {}", local.display()));
     }
-    None
+    reported_version(cloudflared_name(), &["--version"])
+        .map(|text| format!("cloudflared on PATH ({text})"))
+}
+
+/// What cloudflared is called on this platform, which is also what the payload
+/// installs it as and what the probe looks for.
+fn cloudflared_name() -> &'static str {
+    if cfg!(windows) {
+        "cloudflared.exe"
+    } else {
+        "cloudflared"
+    }
 }
 
 /// An Ollama that is already installed, wherever the platform keeps it.
@@ -1043,8 +1120,12 @@ fn download(
     }
 }
 
-/// Unpack `archive` from `file` into `into`.
-fn extract(archive: Archive, file: &Path, into: &Path) -> Result<(), String> {
+/// Unpack `payload`'s archive from `file` into `into`, and set the mode it asks for.
+///
+/// Takes the payload rather than its `Archive` because the two shapes that resolve
+/// to one file need its `member` — the name that file is to be known by — and its
+/// `mode`. Both are things only the payload knows.
+fn extract(payload: &Payload, file: &Path, into: &Path) -> Result<(), String> {
     let run = |mut command: Command| -> Result<(), String> {
         let out = command
             .stdin(Stdio::null())
@@ -1061,11 +1142,11 @@ fn extract(archive: Archive, file: &Path, into: &Path) -> Result<(), String> {
         })
     };
 
-    match archive {
+    match payload.archive {
         Archive::TarGz => {
             let mut command = silent("tar");
             command.arg("-xzf").arg(file).arg("-C").arg(into);
-            run(command)
+            run(command)?;
         }
         Archive::Zip => {
             if cfg!(windows) {
@@ -1082,45 +1163,108 @@ fn extract(archive: Archive, file: &Path, into: &Path) -> Result<(), String> {
                     .arg("-DestinationPath")
                     .arg(into)
                     .arg("-Force");
-                run(command)
+                run(command)?;
             } else {
                 let mut command = silent("unzip");
                 command.arg("-q").arg(file).arg("-d").arg(into);
-                run(command)
+                run(command)?;
             }
         }
         // Refused rather than attempted: `tar -xzf` on a zstd stream fails with a
         // message about the gzip magic that says nothing about zstd, and the
         // caller has a better sentence for this — see `ollama_payload`.
-        Archive::TarZst => Err(
-            "this download is a .tar.zst, which needs a zstd decompressor this app \
-             does not ship"
-                .to_string(),
-        ),
+        Archive::TarZst => {
+            return Err(
+                "this download is a .tar.zst, which needs a zstd decompressor this app \
+                 does not ship"
+                    .to_string(),
+            );
+        }
+        // The download is the program. Copied rather than moved, so that the
+        // caller's cleanup — which removes the staging file and the unpacked
+        // directory together — stays the same shape for every payload.
+        Archive::Raw => {
+            let name = payload.member.ok_or_else(|| {
+                "this payload arrives as a bare file but does not say what to call it".to_string()
+            })?;
+            std::fs::copy(file, into.join(name))
+                .map_err(|e| format!("couldn't put the download in place: {e}"))?;
+        }
     }
+
+    // The executable bit, when the payload asks for one. `fs::copy` brings the
+    // *source's* mode across on Unix, which for a file `curl` just wrote is `644`
+    // — so a raw download has to be given its mode explicitly or the tunnel binary
+    // is installed un-runnable. For the tarball the mode is usually already
+    // right, since `tar` restores it and Cloudflare's archives carry `755`; this
+    // sets it either way rather than trusting an archive to have.
+    if let (Some(mode), Some(name)) = (payload.mode, payload.member) {
+        set_mode(&into.join(name), mode)?;
+    }
+    Ok(())
+}
+
+/// Give a file permission bits, on the platforms that have them.
+///
+/// A no-op on Windows, where `mode` means nothing and the extension is what makes
+/// a file runnable. Written as a function rather than a `cfg!` at the call site so
+/// the Unix path is one line and the Windows path is visibly nothing rather than
+/// invisibly skipped.
+fn set_mode(path: &Path, mode: u32) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = std::fs::Permissions::from_mode(mode);
+        std::fs::set_permissions(path, permissions)
+            .map_err(|e| format!("couldn't make {} runnable: {e}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+    }
+    Ok(())
 }
 
 /// Move `source` into `dest`, never over anything that is already there.
 ///
-/// Two shapes, and the destination decides which:
+/// Three shapes, and the source and destination together decide which:
 ///
 /// - `dest` does not exist — the whole of `source` becomes `dest`. This is the
 ///   ordinary case, and because `source` was unpacked into the staging directory
 ///   under the same `~/.common-network`, the move is a `rename` within one
 ///   filesystem: atomic, and never a window in which a half-unpacked payload is
 ///   what is installed.
-/// - `dest` already exists — `source`'s top-level entries are moved into it, and
-///   an entry whose name is already taken is **left alone**. This is the CLI's
-///   case: it installs into `~/.common-network`, which exists as soon as anything
-///   of the app's does, and merging is the only reading of "install the CLI
-///   beside what is already here" that cannot delete somebody's identity or
-///   weights.
+/// - `source` is a single file — it lands *inside* `dest`, under the name it
+///   already has, and an existing file of that name is left alone. This is
+///   cloudflared's case: the destination is `bin`, which holds the CLI's
+///   launchers too, and a payload that is one program is placed beside them rather
+///   than becoming the directory.
+/// - `dest` already exists and `source` is a tree — `source`'s top-level entries
+///   are moved into it, and an entry whose name is already taken is **left
+///   alone**. This is how a payload merges into `~/.common-network`, which exists
+///   as soon as anything of the app's does; merging is the only reading of
+///   "install this beside what is already here" that cannot delete somebody's
+///   identity or weights.
 fn install(source: &Path, dest: &Path) -> Result<(), String> {
     let parent = dest
         .parent()
         .ok_or_else(|| format!("{} has no parent to install into", dest.display()))?;
     std::fs::create_dir_all(parent)
         .map_err(|e| format!("couldn't make {}: {e}", parent.display()))?;
+
+    if source.is_file() {
+        std::fs::create_dir_all(dest)
+            .map_err(|e| format!("couldn't make {}: {e}", dest.display()))?;
+        let name = source
+            .file_name()
+            .ok_or_else(|| format!("{} has no name", source.display()))?;
+        let target = dest.join(name);
+        if target.exists() {
+            return Ok(());
+        }
+        return std::fs::rename(source, &target)
+            .map_err(|e| format!("couldn't move {} into place: {e}", target.display()));
+    }
 
     if !dest.exists() {
         return std::fs::rename(source, dest)
@@ -1261,7 +1405,7 @@ fn ensure(home: &Path, payload: &Payload, state: &Bootstrap, tell: &mut Tell<'_>
             format!("couldn't make room to unpack into: {e}"),
         );
     }
-    if let Err(message) = extract(payload.archive, &file, &unpacked) {
+    if let Err(message) = extract(payload, &file, &unpacked) {
         let _ = std::fs::remove_file(&file);
         let _ = std::fs::remove_dir_all(&unpacked);
         return fail(payload, tell, message);
@@ -1560,7 +1704,10 @@ mod tests {
             ("linux", "x86_64"),
         ] {
             assert!(pbs_triple(key).is_some(), "no Python build for {key:?}");
-            for (table, name) in [(OLLAMA_ASSETS, "Ollama"), (CLI_ASSETS, "the CLI")] {
+            for (table, name) in [
+                (OLLAMA_ASSETS, "Ollama"),
+                (CLOUDFLARED_ASSETS, "cloudflared"),
+            ] {
                 assert!(
                     table.iter().any(|(os, arch, ..)| (*os, *arch) == key),
                     "no {name} payload for {key:?}",
@@ -1568,7 +1715,7 @@ mod tests {
             }
         }
 
-        for (os, arch, asset, ..) in OLLAMA_ASSETS.iter().chain(CLI_ASSETS) {
+        for (os, arch, asset, ..) in OLLAMA_ASSETS.iter().chain(CLOUDFLARED_ASSETS) {
             assert!(
                 !asset.is_empty() && !asset.contains('/'),
                 "{os}/{arch} names a payload that is not a bare file name: {asset}",
@@ -1576,20 +1723,167 @@ mod tests {
         }
     }
 
+    /// Every cloudflared asset has a digest and every digest an asset.
+    ///
+    /// They are two tables, so they could drift — and one direction of that drift
+    /// is the dangerous one. An asset with no digest still fetches, and then fails
+    /// verification, on a machine that had one working before this changed. This
+    /// is the check that makes the split safe rather than merely tidy.
+    #[test]
+    fn every_cloudflared_asset_has_a_digest_and_every_digest_an_asset() {
+        for (os, arch, asset, ..) in CLOUDFLARED_ASSETS {
+            let digest = cloudflared_digest(asset);
+            assert_eq!(
+                digest.len(),
+                64,
+                "{os}/{arch} ({asset}) has no usable pinned digest",
+            );
+            assert!(
+                digest.chars().all(|c| c.is_ascii_hexdigit()),
+                "{os}/{arch} ({asset}) has a digest that is not hex: {digest}",
+            );
+        }
+        for (asset, _) in CLOUDFLARED_DIGESTS {
+            assert!(
+                CLOUDFLARED_ASSETS.iter().any(|(_, _, a, ..)| a == asset),
+                "{asset} is pinned but no platform installs it",
+            );
+        }
+        // And the direction that must fail closed rather than quietly: an asset
+        // nobody pinned gets nothing, which is what `expected_digest` refuses on.
+        assert_eq!(cloudflared_digest("cloudflared-darwin-amd64-2020.tgz"), "");
+    }
+
     /// The guard that makes an unfinished table entry fail closed.
     ///
-    /// The CLI's digest is empty today. If the payload were ever reachable — by
-    /// someone flipping `CLI_PUBLISHED` without filling this in — the verifier
-    /// must refuse rather than install whatever arrived.
+    /// Every pinned payload in the table has a digest today. The one that does not
+    /// is the case a future asset added without its digest would land in — and the
+    /// verifier must refuse rather than install whatever arrived.
     #[test]
     fn an_empty_pinned_checksum_is_refused_rather_than_skipped() {
         let home = Path::new("/nonexistent-home-for-a-test");
-        let payload = cli_payload(home, ("macos", "aarch64"));
-        assert!(matches!(payload.checksum, Checksum::Pinned("")));
+        let payload = cloudflared_payload(home, ("macos", "aarch64"));
+        assert!(matches!(payload.checksum, Checksum::Pinned(d) if d.len() == 64));
+
+        // A payload whose pin is empty — the state an unfinished row is in.
+        let unfinished = Payload {
+            checksum: Checksum::Pinned(""),
+            ..cloudflared_payload(home, ("macos", "aarch64"))
+        };
         assert!(
-            expected_digest(&payload).is_err(),
+            expected_digest(&unfinished).is_err(),
             "an empty pinned checksum was accepted",
         );
+    }
+
+    /// A payload that arrives as a bare executable is installed as one, runnable.
+    ///
+    /// Two things are checked and they are the two that would break silently: that
+    /// the file lands *in* `bin` under the name the payload gave it rather than
+    /// becoming `bin` itself, and that it comes out executable — `fs::copy` brings
+    /// `644` across from a fresh download, and an un-runnable tunnel binary fails
+    /// inside `join.py`, a long way from here.
+    #[test]
+    fn a_raw_payload_lands_in_the_directory_and_is_made_runnable() {
+        let root = std::env::temp_dir().join("common-bootstrap-raw");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).expect("a scratch home");
+        // The Linux row on purpose, whichever machine this runs on: it is a bare
+        // executable, and the point of the test is the shape rather than the
+        // platform. Taking the running platform's row would test the tarball on a
+        // Mac the way the tarball test already does.
+        let payload = cloudflared_payload(&home, ("linux", "x86_64"));
+        assert_eq!(
+            payload.archive,
+            Archive::Raw,
+            "the Linux build changed shape"
+        );
+
+        // Stand in for the download: a file in the staging directory named the way
+        // `ensure` names its scratch files.
+        let staging = staging_dir(&home);
+        std::fs::create_dir_all(&staging).expect("a staging directory");
+        let downloaded = staging.join("cloudflared.part");
+        std::fs::write(&downloaded, b"#!/bin/sh\n").expect("a downloaded file");
+
+        // The digest is what `ensure` checks before this point; the file's shape is
+        // what is under test, so the pin is bypassed the same way a passing
+        // verification leaves things.
+        let unpacked = staging.join("cloudflared.unpacked");
+        std::fs::create_dir_all(&unpacked).expect("a place to unpack");
+        extract(&payload, &downloaded, &unpacked).expect("the raw payload unpacks");
+
+        let name = payload.member.expect("a raw payload names its file");
+        let staged = unpacked.join(name);
+        assert!(staged.is_file(), "the download did not become {name}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&staged)
+                .expect("the staged file")
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o111,
+                0o111,
+                "the staged payload was not made executable: {mode:o}",
+            );
+        }
+
+        // And the move: into `bin`, beside whatever else is there, under its name.
+        std::fs::create_dir_all(bin_dir(&home)).expect("a bin directory");
+        std::fs::write(bin_dir(&home).join("common"), b"a launcher").expect("something to keep");
+        install(&staged, &payload.dest).expect("the move into bin");
+
+        assert!(
+            bin_dir(&home).join(name).is_file(),
+            "cloudflared is not in bin after the move",
+        );
+        assert!(
+            bin_dir(&home).join("common").is_file(),
+            "the raw payload's move removed the launcher beside it",
+        );
+        // The one thing that must never be true: `bin` replaced by the file.
+        assert!(bin_dir(&home).is_dir(), "bin stopped being a directory");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The macOS tarball is a `.tgz` holding the same single file, so the second
+    /// shape reaches the same place by a different route.
+    #[test]
+    fn a_single_file_archive_installs_the_same_way_as_a_raw_one() {
+        let root = std::env::temp_dir().join("common-bootstrap-tgz");
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).expect("a scratch home");
+
+        let payload = cloudflared_payload(&home, ("macos", "aarch64"));
+        assert_eq!(
+            payload.archive,
+            Archive::TarGz,
+            "the macOS build changed shape"
+        );
+
+        // `tar` is the unpacker here and building a real archive would test `tar`
+        // rather than this file, so the layout the tarball produces is staged
+        // directly: one file, at the root, under the name the payload expects.
+        let unpacked = root.join("unpacked");
+        std::fs::create_dir_all(&unpacked).expect("a place to unpack");
+        let name = payload.member.expect("a named file");
+        std::fs::write(unpacked.join(name), b"#!/bin/sh\n").expect("the archive's contents");
+
+        set_mode(&unpacked.join(name), payload.mode.expect("a mode")).expect("set the mode");
+        std::fs::create_dir_all(&payload.dest).expect("a bin directory");
+        install(&unpacked.join(name), &payload.dest).expect("the move into bin");
+        assert!(
+            payload.dest.join(name).is_file(),
+            "the tarball's file is not in bin"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The version parse, including the shapes that must not be read as a usable
@@ -1718,6 +2012,162 @@ mod tests {
             "the runtime is not where it was supposed to land: {}",
             payload.dest.display(),
         );
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The same run for cloudflared, and the one that answers whether the pinned
+    /// digests are the digests of the bytes those URLs actually serve.
+    ///
+    /// That question is not academic here. Cloudflare's release body and its release
+    /// *assets* disagree about the macOS tarballs for `2026.10.1` — see
+    /// [`CLOUDFLARED_DIGESTS`] — and a pin taken from the wrong one of those two
+    /// places produces a payload that downloads perfectly and is then refused, which
+    /// reads to a user like a corrupted transfer and would be a bug this suite could
+    /// not otherwise see.
+    ///
+    /// The second half is the inverse and is the more important one: with the pin
+    /// deliberately wrong, the run must **refuse**, leave nothing in place, and say
+    /// so. A verifier that quietly installed on a mismatch would make the whole
+    /// table decorative.
+    #[test]
+    #[ignore = "downloads the cloudflared payload; run with --ignored"]
+    fn the_cloudflared_payload_downloads_verifies_and_installs() {
+        let key = platform_key();
+        let name = {
+            let probe = cloudflared_payload(Path::new("/nowhere"), key);
+            if probe.blocked.is_some() {
+                eprintln!("skipped: no cloudflared build is published for {key:?}");
+                return;
+            }
+            probe.member.expect("a filename")
+        };
+
+        // --- the pin as committed: it must install ---
+        let home = std::env::temp_dir().join("common-bootstrap-cf");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("a scratch home");
+
+        // Always "not here", because a machine may well have cloudflared on PATH —
+        // which is the right reason for the app to skip the download, and would make
+        // this assert nothing.
+        let mut payload = cloudflared_payload(&home, key);
+        payload.probe = |_| None;
+
+        let state = Bootstrap::default();
+        let mut seen: Vec<String> = Vec::new();
+        let outcome = ensure(&home, &payload, &state, &mut |event| {
+            seen.push(format!("{event:?}"));
+            true
+        });
+
+        assert_eq!(outcome, Outcome::Installed, "events: {seen:#?}");
+        let installed = payload.dest.join(name);
+        assert!(
+            installed.is_file(),
+            "cloudflared is not at {}",
+            installed.display(),
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&installed)
+                .expect("the installed file")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o111, 0o111, "it is not executable: {mode:o}");
+        }
+        // And the probe now finds what was installed, which is what stops the next
+        // launch from fetching it again. The real probe, not `payload.probe`, which
+        // was replaced above precisely so that this download would happen.
+        assert!(
+            cloudflared_present(&home).is_some(),
+            "the probe does not see the copy that was just installed",
+        );
+        let _ = std::fs::remove_dir_all(&home);
+
+        // --- the pin wrong: it must refuse, and leave nothing ---
+        let home = std::env::temp_dir().join("common-bootstrap-cf-wrong");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("a scratch home");
+
+        let mut wrong = cloudflared_payload(&home, key);
+        wrong.probe = |_| None;
+        wrong.checksum =
+            Checksum::Pinned("0000000000000000000000000000000000000000000000000000000000000000");
+
+        let mut events: Vec<String> = Vec::new();
+        let outcome = ensure(&home, &wrong, &state, &mut |event| {
+            events.push(format!("{event:?}"));
+            true
+        });
+
+        assert_eq!(outcome, Outcome::Failed, "events: {events:#?}");
+        assert!(
+            events
+                .iter()
+                .any(|e| e.contains("did not match its published checksum")),
+            "the refusal did not say what happened: {events:#?}",
+        );
+        assert!(
+            !wrong.dest.join(name).exists(),
+            "a payload that failed verification was installed anyway",
+        );
+        // Nothing left behind that a later run could mistake for a download.
+        let leftovers: Vec<_> = std::fs::read_dir(staging_dir(&home))
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok().map(|e| e.file_name()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            leftovers.is_empty(),
+            "a refused download left scratch files behind: {leftovers:?}",
+        );
+        let _ = std::fs::remove_dir_all(&home);
+
+        // --- the other shape, against real bytes ---
+        //
+        // The running platform's row is a tarball on macOS and a bare executable on
+        // Windows, and only one of those is ever exercised by the half above — so
+        // the Raw shape, which is what Windows users actually get and which cannot
+        // be run here at all, is fetched through the Linux row. Nothing tries to
+        // *execute* it; what is under test is that a real download of a real bare
+        // executable verifies, unpacks into a directory as a file, and comes out
+        // runnable.
+        let home = std::env::temp_dir().join("common-bootstrap-cf-raw");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("a scratch home");
+
+        let mut raw = cloudflared_payload(&home, ("linux", "x86_64"));
+        assert_eq!(raw.archive, Archive::Raw, "the Linux build changed shape");
+        raw.probe = |_| None;
+
+        let mut events: Vec<String> = Vec::new();
+        let outcome = ensure(&home, &raw, &state, &mut |event| {
+            events.push(format!("{event:?}"));
+            true
+        });
+        assert_eq!(outcome, Outcome::Installed, "events: {events:#?}");
+        let raw_name = raw.member.expect("a filename");
+        assert_eq!(
+            raw_name, "cloudflared",
+            "it is not installed under its name"
+        );
+        assert!(
+            raw.dest.join(raw_name).is_file(),
+            "the raw payload did not land in bin",
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(raw.dest.join(raw_name))
+                .expect("the installed file")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o111, 0o111, "it is not executable: {mode:o}");
+        }
 
         let _ = std::fs::remove_dir_all(&home);
     }
