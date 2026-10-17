@@ -5,11 +5,10 @@ import { STEP_ORDER, type StepId } from "./steps";
 /**
  * What the flow carries, and how it survives being quit.
  *
- * Note what is NOT here: whether a download is running, which join phase is
- * underway, which limit question is on screen. Those are processes, and a
- * process cannot be restored into — reopening onto a gauge with nothing behind
- * it is worse than starting the step over. Only what the user has *answered*
- * is carried.
+ * Note what is NOT here: which join phase is underway, which limit question is
+ * on screen. Those are processes, and a process cannot be restored into —
+ * reopening onto a gauge with nothing behind it is worse than starting the step
+ * over. Only what the user has *answered* is carried.
  */
 
 export interface FlowState {
@@ -121,8 +120,6 @@ function canEnter(step: StepId, flow: FlowState): boolean {
       return true;
     case "lane":
       return flow.hardware !== null;
-    case "download":
-      return flow.lane !== null && flow.modelId !== null;
     case "limits":
       return flow.modelId !== null;
     case "join":

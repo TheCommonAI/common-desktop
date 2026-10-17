@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Chat from "./chat/Chat";
 import Onboarding from "./onboarding/Onboarding";
+import { startProvisioning } from "./provision";
 import Wordmark from "./Wordmark";
 import "./App.css";
 
@@ -50,6 +51,20 @@ export default function App() {
   const [phase, setPhase] = useState<Phase>(() =>
     seen(LIVE_SEEN) ? "chat" : seen(INTRO_SEEN) ? "onboarding" : "intro",
   );
+
+  // The one install, started at the one moment there is a machine to start it
+  // on. It is deliberately not awaited, not in a step and not in the flow — see
+  // `provision.ts` for why the machine that has already been through setup is
+  // the reason it exists. Nothing is blocked on it here; the join is what waits,
+  // and only if it has to.
+  //
+  // It is also not cancelled on unmount, which the missing cleanup is stating on
+  // purpose: this runs for the life of the process, and `startProvisioning` is
+  // idempotent, so a StrictMode remount joins the first call rather than starting
+  // a second fetch.
+  useEffect(() => {
+    void startProvisioning();
+  }, []);
 
   const begin = () => {
     if (phase !== "intro") return;

@@ -50,8 +50,9 @@ answer says which machine gave it.
 
 **Contribute** reads this computer, asks the network what it is short of, and
 downloads and serves the one model that would help. Your model runs here and
-answers here. Contributing needs [Ollama](https://ollama.com) and a downloaded
-model; the app walks through both, and neither is needed to use Chat.
+answers here. Contributing needs a downloaded model and nothing installed by
+hand: the CLI the app runs fetches the model and the llama.cpp server that serves
+it, and neither is needed to use Chat.
 
 On first launch, Common shows what it found on this machine, offers the model
 the network most needs that this machine can actually run, and says what
@@ -63,19 +64,19 @@ leaving the network, which forgets this machine's key.
 
 - **macOS** 10.15 or newer, **Windows** 10 or newer. Linux packaging is
   experimental and not published.
-- For Chat, nothing else at all. Contribute needs a model, and needs Ollama to
-  serve it — see below.
+- For Chat, nothing else at all. Contribute needs a model, which the app fetches
+  and runs itself — see below.
 
 Two of the three things the app needs from outside itself are **fetched on first
 run**, not shipped inside the installer. That is what keeps the download a few
-megabytes rather than a hundred and fifty, and it means a payload can be replaced
-without cutting a release of the app. Each is downloaded to a scratch directory,
-checked against a published checksum, and only then unpacked; a download that does
-not match is deleted and reported, never installed. **Anything already on the
+megabytes, and it means a payload can be replaced without cutting a release of
+the app. Each is downloaded to a scratch directory, checked against a published
+checksum or one compiled into the app, and only then unpacked; a download that
+does not match is deleted and reported, never installed. **Anything already on the
 machine wins** — nothing is fetched over a working install.
 
 - **The `common` command-line tool**, which the app runs rather than
-  reimplementing. It **ships inside the installer** — four Python files, 272 KB —
+  reimplementing. It **ships inside the installer** — five Python files, 350 KB —
   because the network publishes no release carrying a downloadable build, so there
   is nothing for a first run to fetch. It is a *seed* and not a pinned copy: the
   first time it runs it updates itself from the network's `main` branch, so a fix to
@@ -86,10 +87,11 @@ machine wins** — nothing is fetched over a working install.
   [python-build-standalone](https://github.com/astral-sh/python-build-standalone),
   unpacked under `~/.common-network/runtime/python`. Never the system Python, and
   never over one.
-- **Ollama**, but only when it is not already installed, from
-  [ollama's own releases](https://github.com/ollama/ollama/releases), unpacked
-  under `~/.common-network/runtime/ollama`. A machine with models on it keeps the
-  copy that has them.
+- **cloudflared**, the tunnel the CLI opens so this machine can be reached, and
+  the one thing it cannot fetch for itself. It comes from
+  [Cloudflare's releases](https://github.com/cloudflare/cloudflared/releases),
+  unpacked into `~/.common-network/bin`. A machine that already has one, there or
+  on `PATH`, keeps the copy it has.
 
 The app runs the CLI by naming the interpreter and the script — `python3
 common.py` — rather than through the `bin/common` launcher beside it. That is what
@@ -97,7 +99,7 @@ lets a Python this app fetched actually be the Python the CLI runs under; the
 launcher resolves its own interpreter and does not consult `PATH`.
 
 Only the CLI is bundled, and it is AGPL-3.0-or-later, the same licence as this app.
-Python and Ollama stay with their distributors — see
+Python and cloudflared stay with their distributors — see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Building from source
@@ -143,7 +145,7 @@ updater plugin's own parser, which is the check that catches it.
 | `src/chat/` | the conversation, Settings, the rail, and the calls into Rust |
 | `src/onboarding/` | first run: read the machine, offer a model, join |
 | `src-tauri/src/backend.rs` | every read of this machine and every call to `common` |
-| `src-tauri/src/fetch.rs` | first run: fetch, check and install Python and Ollama |
+| `src-tauri/src/fetch.rs` | first run: fetch, check and install Python and cloudflared |
 | `src-tauri/src/sha256.rs` | the digest that check is made with, written out rather than pulled in |
 | `src-tauri/cli-seed/` | the CLI itself, shipped — placed once, then it keeps itself current |
 | `src-tauri/src/lib.rs` | the window and the menu-bar icon |

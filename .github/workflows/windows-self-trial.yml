@@ -30,12 +30,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # The page in the webview fetches `/api/tags` and `/api/ps` straight from Ollama,
-  # and its origin is `http://tauri.localhost` — not one Ollama allows by default.
-  # Without this both fetches are refused, which the app survives but which turns
-  # the byte count and the loading phase into guesses. Job-level, so the daemon
-  # started below inherits it.
-  OLLAMA_ORIGINS: http://tauri.localhost,http://localhost,http://127.0.0.1
 
 jobs:
   windows:
@@ -43,7 +37,7 @@ jobs:
     # The Rust build, a multi-gigabyte model download, a test prompt on four CPU
     # cores and the gateway's own confirmation poll all live in here.
     #
-    # This sits above the sum of the per-step ceilings below (30+25+15+75=145)
+    # This sits above the sum of the per-step ceilings below (30+15+75=120)
     # on purpose. Every step that can hang carries its own ceiling, so a hang is
     # reported against the step that hung rather than as an opaque job timeout —
     # which is exactly what the first run of this workflow cost us 23 minutes and
@@ -113,46 +107,6 @@ jobs:
           $config | Out-File -Encoding utf8 trial-config.json
           npm run tauri build -- --bundles nsis --config trial-config.json
 
-      # ── Ollama, before the CLI ───────────────────────────────────────────────
-      #
-      # The order is the point. `install.ps1` only fetches `cloudflared.exe` if it
-      # finds `ollama` on PATH at the moment it runs, and `common join` dies
-      # without cloudflared. Installing Ollama second produces an install that
-      # looks complete and cannot join anything.
-      # Both halves of this are bounded on purpose. `Invoke-WebRequest` buffers the
-      # whole response and carries no timeout of its own, and `Start-Process -Wait`
-      # on an NSIS installer waits forever if the installer decides to put up a
-      # window — which on a runner with no interactive desktop it cannot draw and
-      # will not dismiss. The first run of this workflow sat on this step for 23
-      # minutes making no progress, which is a hang wearing a slow download's
-      # clothes. `--max-time` bounds the transfer, `--retry` rides out a blip, and
-      # `WaitForExit(ms)` bounds the install.
-      - name: Install Ollama
-        shell: pwsh
-        timeout-minutes: 25
-        run: |
-          $setup = "$env:RUNNER_TEMP\OllamaSetup.exe"
-          curl.exe -L --fail --no-progress-meter --retry 3 --max-time 900 -o $setup 'https://ollama.com/download/OllamaSetup.exe'
-          if ($LASTEXITCODE -ne 0) { throw "downloading OllamaSetup.exe failed (curl exit $LASTEXITCODE)" }
-          Write-Host "downloaded OllamaSetup.exe: $((Get-Item $setup).Length) bytes"
-
-          $install = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT','/NORESTART' -PassThru
-          if (-not $install.WaitForExit(600000)) { $install.Kill(); throw 'OllamaSetup.exe did not finish within 10 minutes' }
-          Write-Host "OllamaSetup.exe exit code: $($install.ExitCode)"
-
-          # The installer edits the registry's PATH; this process started before
-          # that, so it refreshes its own copy rather than hoping.
-          $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
-          if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) { throw 'ollama is not on PATH after installing it' }
-          ollama --version
-          Start-Process -FilePath 'ollama' -ArgumentList 'serve' -WindowStyle Hidden
-          $deadline = (Get-Date).AddMinutes(2)
-          while ((Get-Date) -lt $deadline) {
-            try { Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/version' -TimeoutSec 3 | Out-Null; break }
-            catch { Start-Sleep -Seconds 2 }
-          }
-          Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/version' | ConvertTo-Json -Compress
-
       # ── the real CLI, from the network's own installer ──────────────────────
       #
       # Downloaded to a file and run, rather than piped into `iex`: same trust,
@@ -177,8 +131,6 @@ jobs:
           $bin = "$env:USERPROFILE\.common-network\bin"
           $common = "$bin\common.cmd"
           if (-not (Test-Path $common)) { throw "the CLI installer did not write $common" }
-          # The one assertion that proves the ordering above was right.
-          if (-not (Test-Path "$bin\cloudflared.exe")) { throw "cloudflared is missing — install.ps1 did not see Ollama" }
           Get-ChildItem $bin | Select-Object -ExpandProperty Name
           & $common --no-color --no-update --version
 

@@ -17,41 +17,33 @@ import { createStubService } from "./service.stub";
  * ── Units ────────────────────────────────────────────────────────────────────
  *
  * Every measured quantity is BYTES and says so in its name: `totalBytes`,
- * `freeBytes`, `vramBytes`, `receivedBytes`, `bytesPerSecond`. Nothing is in
- * gigabytes. "GB" means different things to a hardware vendor, an operating
- * system and a download mirror — 10⁹ or 2³⁰ — and a contract that leaves that
- * ambiguous is a contract that produces off-by-7% disk checks. So the service
- * speaks one unit and the UI formats.
+ * `freeBytes`, `vramBytes`, `bytes`. Nothing is in gigabytes. "GB" means
+ * different things to a hardware vendor, an operating system and a download
+ * mirror — 10⁹ or 2³⁰ — and a contract that leaves that ambiguous is a
+ * contract that produces off-by-7% disk checks. So the service speaks one unit
+ * and the UI formats it. The one exception is argued where it occurs, in
+ * `JoinProgress.fetch`.
  *
  * ── Progress ─────────────────────────────────────────────────────────────────
  *
- * Progress is ABSOLUTE BYTES RECEIVED, never a fraction, plus the total once
- * the far side has reported one. A fraction cannot show the user "2.2 of 4.2
- * GB", and the total is genuinely unknown until the headers land.
- * `onProgress` fires at most about ten times a second.
- *
- * For a download, the last event before `result` resolves reports
- * `receivedBytes === totalBytes` with `state: "verifying"`. The promise
- * resolving means the file is on disk and its checksum matched — not that the
- * last byte arrived.
- *
- * ── Pausing ──────────────────────────────────────────────────────────────────
- *
- * `pause()` is synchronous and returns void. It does NOT settle `result` —
- * neither resolve nor reject. It takes effect at the next chunk boundary, the
- * service emits exactly one event with `state: "paused"`, and then progress goes
- * silent. `resume()` continues from the last `receivedBytes` and must never
- * restart the transfer. `pause()` while paused, and `resume()` while running,
- * are no-ops.
+ * Progress says *what is happening*, never how far along it is. The scan names
+ * the read it is taking; the join names its phase, and in the one phase that
+ * spends minutes moving bytes it also carries the fetcher's own account of
+ * them. There is no percentage anywhere else, deliberately: this flow has never
+ * been able to put a number on a registration or a model load, and a figure
+ * invented to fill the space would be read as the truth.
  *
  * ── Cancelling ───────────────────────────────────────────────────────────────
  *
  * `cancel()` rejects `result` with an `OnboardingError` whose code is
  * `"cancelled"`, emits no further progress, and is idempotent — calling it
  * twice, or after the promise has settled, does nothing. Stopping is an
- * expected user action and must never surface as an error in the UI. A
- * cancelled download leaves its partial file on disk, so a later call resumes
- * rather than restarts.
+ * expected user action and must never surface as an error in the UI.
+ *
+ * What it stops is the *watching*, which is looser than the word suggests for
+ * exactly one operation. A join is a node on the network: a cancel that ended
+ * it would mean walking Back to an earlier screen silently took the user off
+ * the network. See `joinNetwork`.
  *
  * ── Failure ──────────────────────────────────────────────────────────────────
  *
@@ -70,9 +62,11 @@ export type OnboardingErrorCode =
   | "permission-denied"
   /** Offline, DNS, TLS, or the far side is down. */
   | "network"
-  /** The `common` CLI the app runs is not on this machine. The join never left
+  /** The `common` CLI the app runs could not be started. The join never left
    *  the machine, so this is not a network failure and must never be shown as
-   *  one: the remedy is an install, not a retry. */
+   *  one — and it is not an install for the user to go and do either. The app
+   *  ships the CLI and fetches the Python it runs under; this means that fetch
+   *  did not finish. See `provision.ts`. */
   | "cli-missing"
   /** The join ran and then stopped, taking its attempts with it. Like
    *  `cli-missing` this is a failure on *this* machine and must never be shown
@@ -117,10 +111,11 @@ export type Lane = "math" | "code" | "writing";
 /** Which rung of the model ladder this machine's memory can carry. */
 export type Tier = "full" | "light";
 
-/** A model as the interface needs to show it. The authoritative download size
- *  is whatever `downloadModel` reports on progress; `bytes` here is an estimate
- *  good enough for the pre-flight disk check and for telling the user what they
- *  are about to spend. */
+/** A model as the interface needs to show it. `bytes` is the catalogue's figure,
+ *  which is an estimate: the weights are fetched by the join, and the size the
+ *  fetcher actually reports is its own. This is good enough for the two things
+ *  it is used for, which are telling the user what they are about to spend and
+ *  checking the disk has room. */
 export interface ModelSpec {
   id: string;
   label: string;
@@ -186,37 +181,6 @@ export interface ResourceLimits {
   quietHours: { start: string; end: string } | null;
 }
 
-export interface DownloadRequest {
-  modelId: string;
-}
-
-export interface DownloadProgress {
-  receivedBytes: number;
-  /** `null` until the far side reports a length. */
-  totalBytes: number | null;
-  /** `null` until the rate has settled — about the first two seconds. A number
-   *  here that is still settling reads to the user as a broken estimate. */
-  bytesPerSecond: number | null;
-  etaSeconds: number | null;
-  /** `waiting` is not a transfer at all: it is ollama not being up yet, and the
-   *  step before the first byte. It is a state rather than a silence because a
-   *  first run on a cold machine spends real seconds in it, and a screen that
-   *  shows nothing for that long cannot be told from a hung one. */
-  state: "downloading" | "paused" | "verifying" | "waiting";
-  /** Seconds spent waiting for ollama, and only ever set while `state` is
-   *  `"waiting"`. It is what makes the wait legible: the number changes, so the
-   *  screen is not one unchanging frame for half a minute. */
-  waitedSeconds: number | null;
-}
-
-export interface DownloadResult {
-  modelId: string;
-  /** Absolute. Shown to the user verbatim. */
-  path: string;
-  bytes: number;
-  verified: boolean;
-}
-
 export interface JoinRequest {
   lane: Lane;
   modelId: string;
@@ -227,7 +191,35 @@ export interface JoinRequest {
 }
 
 export interface JoinProgress {
-  phase: "registering" | "loading-model" | "test-prompt" | "confirming";
+  /** `"preparing"` is not a step of the join — it is the machine being got
+   *  ready for one. A join needs a Python to run the CLI with and the
+   *  cloudflared that opens the tunnel, and the app fetches either if it is
+   *  missing; see `provision.ts`. It comes first because it is the only phase
+   *  that can, and it is never emitted on a machine that already has both.
+   *
+   *  `"fetching-model"` is the other one that is not the join's own work, and it
+   *  is the same shape of fact: the CLI is downloading the weights, which is the
+   *  longest thing this flow does and used to have a screen of its own. It is a
+   *  phase because there is now nothing else to show it on — see `fetch`. */
+  phase:
+    | "preparing"
+    | "registering"
+    | "fetching-model"
+    | "loading-model"
+    | "test-prompt"
+    | "confirming";
+  /** Present only during `"fetching-model"`: the weights, as the process
+   *  fetching them accounts for them.
+   *
+   *  These two are strings, and that is the one place this file breaks its own
+   *  rule about bytes. The rule exists so that nothing downstream has to guess
+   *  what a number means — and here the number is already a rendering, made by
+   *  the layer that counted it ("1.2 GB of 4.3 GB"). Re-deriving bytes from it
+   *  would mean inventing precision out of `1.2 GB`, which is somewhere between
+   *  1.15 and 1.25 of them. Both halves are carried because the reader wants
+   *  both: the fraction says how far along it is, and the size says what is
+   *  being waited for, which ten percentages on their own never do. */
+  fetch?: { name: string; percent: number; done: string; total: string };
   /** Present only during `"test-prompt"`, once the model has answered. Carried
    *  on progress as well as on the result so the screen can show the proof at
    *  the moment it arrives rather than at the end of the whole sequence. */
@@ -280,14 +272,6 @@ export interface Task<T> {
   cancel(): void;
 }
 
-/** A transfer, which can additionally be held and let go. Only the download is
- *  pausable — a scan cannot be paused — and typing it separately is what stops
- *  a screen from offering a Pause control that would do nothing. */
-export interface PausableTask<T> extends Task<T> {
-  pause(): void;
-  resume(): void;
-}
-
 /* -------------------------------- contract -------------------------------- */
 
 export interface OnboardingService {
@@ -311,15 +295,6 @@ export interface OnboardingService {
   suggestLane(report: HardwareReport): Task<LaneSuggestion>;
 
   /**
-   * Fetch the weights. The long one. See the header for the exact meaning of
-   * progress, pause, resume and cancel.
-   */
-  downloadModel(
-    request: DownloadRequest,
-    opts?: ProgressOptions<DownloadProgress>,
-  ): PausableTask<DownloadResult>;
-
-  /**
    * Write the contribution limits. MUST return what was actually stored — an
    * implementation will clamp against the platform, and the interface redraws
    * from the return value rather than from what it sent.
@@ -329,6 +304,11 @@ export interface OnboardingService {
   /**
    * Register, prove the model answers here, and confirm the network can see
    * this node.
+   *
+   * The weights are fetched in here, by the CLI, as part of joining — there is
+   * no separate download to start and so nothing in this interface to start it
+   * with. That is also why `"fetching-model"` is a phase of this call and not a
+   * screen of its own.
    *
    * Idempotent by machine: calling it twice must not create two nodes. A second
    * call returns the same `nodeId`, so a retry after a failed `"confirming"`
@@ -377,9 +357,9 @@ function insideApp(): boolean {
 /**
  * The one line that swaps the backend.
  *
- * In the app: the installed CLI and the daemon on loopback, for real. In a
- * browser: the stub, which has neither `invoke` nor ollama behind it but which is
- * the only way these six screens can be looked at without building the app.
+ * In the app: the bundled CLI and this machine, for real. In a browser: the
+ * stub, which has neither `invoke` nor a machine behind it but which is the only
+ * way these screens can be looked at without building the app.
  *
  * This is the only place the choice is made, and nothing downstream of it knows
  * which service it was handed — the screens speak to the interface and the

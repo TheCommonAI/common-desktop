@@ -37,6 +37,11 @@ jobs:
       # Only that the three version files agree. Whether the *tag* agrees is a
       # question about a release, and is asked in the publish workflow.
       - run: node scripts/check-version.mjs
+      # The release body and the in-app card are cut from one file, and this is
+      # what keeps them cut from one file: fail if the committed `whats-new.ts`
+      # is not what the generator would write. A drift would still publish, and
+      # the release page and the card would quietly disagree.
+      - run: node scripts/make-notes.mjs check
       - run: npm run typecheck
       - run: npm run build
       - uses: dtolnay/rust-toolchain@stable
