@@ -1,18 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  OnboardingError,
-  isOnboardingError,
-  type PausableTask,
-  type Task,
-} from "./service";
+import { OnboardingError, isOnboardingError, type Task } from "./service";
 
 /**
  * One async operation, in the four states it can be in.
  *
  * The progress is carried on the state rather than alongside it because the
- * error state needs it: a download that failed two thirds of the way through
- * has to be able to say so, and a `progress` slot that only exists while
- * running cannot.
+ * error state needs it: a join that failed during `"confirming"` still shows
+ * the phase it got to, and a `progress` slot that only exists while running
+ * could not say so.
  */
 export type TaskState<T, P> =
   | { status: "idle" }
@@ -25,7 +20,7 @@ export type TaskState<T, P> =
  *  something asks it to. */
 export type TaskFactory<T, P> = (opts: {
   onProgress: (progress: P) => void;
-}) => Task<T> | PausableTask<T>;
+}) => Task<T>;
 
 export interface TaskHandle<T, P> {
   state: TaskState<T, P>;
@@ -33,13 +28,6 @@ export interface TaskHandle<T, P> {
   run: () => void;
   /** Stop it and go back to idle. Safe in any state. */
   cancel: () => void;
-  /** No-ops unless the operation is actually pausable — see `PausableTask`. */
-  pause: () => void;
-  resume: () => void;
-}
-
-function isPausable<T>(task: Task<T> | PausableTask<T>): task is PausableTask<T> {
-  return "pause" in task;
 }
 
 /** A task that is over before it starts, for a screen whose input has gone
@@ -74,7 +62,7 @@ export function useTask<T, P>(factory: TaskFactory<T, P>): TaskHandle<T, P> {
   const factoryRef = useRef(factory);
   factoryRef.current = factory;
 
-  const live = useRef<Task<T> | PausableTask<T> | null>(null);
+  const live = useRef<Task<T> | null>(null);
 
   // Bumped on every run, every cancel and on unmount. A task from any earlier
   // generation is inert: it cannot write state and cannot clear the live slot.
@@ -133,19 +121,10 @@ export function useTask<T, P>(factory: TaskFactory<T, P>): TaskHandle<T, P> {
     );
   }, []);
 
-  const pause = useCallback(() => {
-    const task = live.current;
-    if (task && isPausable(task)) task.pause();
-  }, []);
-
-  const resume = useCallback(() => {
-    const task = live.current;
-    if (task && isPausable(task)) task.resume();
-  }, []);
-
-  // Unmounting a step kills its work. Without this, walking Back out of the
-  // download would leave the transfer running behind a screen that no longer
-  // exists — and walking back in would start a second one.
+  // Unmounting a step stops the reading. Without this, walking Back out of the
+  // join would leave a poll running behind a screen that no longer exists — and
+  // walking back in would start a second one, which for the join means asking
+  // Rust about a node twice a second on behalf of a screen nobody is looking at.
   useEffect(() => {
     return () => {
       generation.current += 1;
@@ -155,5 +134,5 @@ export function useTask<T, P>(factory: TaskFactory<T, P>): TaskHandle<T, P> {
     };
   }, []);
 
-  return { state, run, cancel, pause, resume };
+  return { state, run, cancel };
 }

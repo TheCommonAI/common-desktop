@@ -1,4 +1,4 @@
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 
 import { provisionNow, startProvisioning } from "../provision";
 import {
@@ -14,9 +14,6 @@ import {
 } from "./models";
 import {
   OnboardingError,
-  type DownloadProgress,
-  type DownloadRequest,
-  type DownloadResult,
   type EnsureJoinedResult,
   type HardwareReport,
   type JoinProgress,
@@ -27,7 +24,6 @@ import {
   type LaneSuggestion,
   type OnboardingErrorCode,
   type OnboardingService,
-  type PausableTask,
   type Platform,
   type PowerSource,
   type ProgressOptions,
@@ -40,7 +36,7 @@ import {
 /**
  * The real backend.
  *
- * Two processes on this machine, and nothing else. Everything the flow needs
+ * One process on this machine, and nothing else. Everything the flow needs
  * already exists here, so this file is mostly translation:
  *
  * — **`common`**, the installed CLI, reached through the Rust seam in
@@ -49,39 +45,22 @@ import {
  *   can be reached are all `common --json <verb>` read verbatim. A fix to the
  *   CLI is a fix to the app.
  *
- * — **ollama**, over loopback at 127.0.0.1:11434. The download is ollama's own
- *   `/api/pull` stream rather than a file this app fetches, which is what makes
- *   the progress real (bytes ollama counted), the pause real (the partial blob
- *   ollama keeps), the resume real (ollama continues from what it has) and the
- *   verification real (ollama checks its own digests and will not say
- *   `success` until it has).
+ * — **`llama-server`**, which that CLI starts and talks to on loopback at
+ *   127.0.0.1:11436. This file never addresses it directly. The model load and
+ *   the test prompt are join phases, and the weights are fetched by the join's
+ *   own runtime, so there is no second process here for this file to reach into.
  *
- * Ollama is called from the webview rather than through Rust, with one
- * exception, and the exception is the download.
+ * There was one. Ollama sat at 11434 and owned the model download, and the
+ * paragraphs that used to stand here were all about it: CORS, the `Origin` a
+ * page's fetch carries, the Windows webview's `http://tauri.localhost` origin
+ * that ollama's allowlist does not hold, and why the pull therefore went through
+ * Rust while the two reads beside it stayed in the page. That reasoning is gone
+ * with the daemon, and so is the CSP line it argued for.
  *
- * The reason is CORS, and it is worth stating because the obvious reading is
- * the wrong one. A `fetch` from the page carries an `Origin` header, and ollama
- * answers only the origins on its allowlist. On macOS and Linux that list holds
- * Tauri's `tauri://*`, so every call here works. On Windows Tauri's webview
- * origin is `http://tauri.localhost` — the workaround URL for `tauri://localhost`
- * that `wry` uses there — and ollama's defaults do not hold it, so the preflight
- * comes back `403` and the request never leaves. That is fatal for the download
- * and merely quiet for the rest: the two reads below (`/api/tags`, `/api/ps`)
- * are wrapped in a `catch` that keeps going, but a pull that cannot start is a
- * model that cannot be installed, and on Windows it was.
- *
- * It also cannot be seen in development. `npm run tauri dev` serves the page
- * from `http://localhost:1420`, which ollama does allow, so the download works
- * on a Windows dev machine and fails only in the packaged build.
- *
- * So the pull goes through `ollama_pull` in Rust, which runs `curl` and streams
- * ollama's NDJSON back over a channel. A subprocess sends no `Origin`, so the
- * question does not arise on any platform — and every line is still ollama's
- * own, so the progress, the pause and the verification stay as real as they
- * were. See the command's own comment in `backend.rs`.
- *
- * That leaves one line in the production CSP: 127.0.0.1:11434 has to be in
- * `connect-src` for the two reads that still happen here.
+ * What it bought is worth keeping, and is kept. The progress was the fetcher's
+ * own account rather than this app's guess, which is still true — the CLI's
+ * runtime prints its byte counts to the join's log, and this file reads those
+ * lines back and reports them unparsed as `JoinProgress.fetch`.
  *
  * ── The two honest gaps ───────────────────────────────────────────────────────
  *
@@ -676,37 +655,26 @@ async function ladderRequirements(): Promise<Requirements> {
   return found;
 }
 
-/* --------------------------------- the weights --------------------------------- */
+/* ------------------------------ the model's name ----------------------------- */
 
-/** Ollama, on this machine. Not configurable, because the alternative is a
- *  setting whose only working value is this one. The webview may call it only
- *  for the two reads below; the download goes through Rust, and the file header
- *  says why. */
-const OLLAMA = "http://127.0.0.1:11434";
-
-/** One message from `ollama_pull`, as `PullEvent` in `backend.rs` sends it.
+/** What a model is called on the wire. This block used to be ollama itself: its
+ *  address, its pull stream and the fetch that read them. What is left is the
+ *  part that was never ollama's, which is the tag — what a chat asks for and
+ *  what the answer must be keyed by.
  *
- * `line` is ollama's own NDJSON, verbatim — the same text the webview used to
- * read off the response body, and the reason the parser below is unchanged.
- * `waiting` is ollama not being up yet, once a second until it is; its `seconds`
- * count up from the start of the wait. `unreachable` is ollama not being there
- * at all; `failed` is a transfer that started and did not finish. Both of those
- * are only ever sent when the transfer is over and there is no line that could
- * have said it. */
-type PullEvent =
-  | { kind: "line"; line: string }
-  | { kind: "waiting"; seconds: number }
-  | { kind: "unreachable"; message: string }
-  | { kind: "failed"; message: string };
+ *  The name survives the daemon because the join starts `llama-server` with
+ *  `--alias` set to this same string, so naming a tag is still how the request
+ *  reaches the weights. See `tagFor`.
+ */
 
 /**
- * The six rungs of the ladder, as ollama tags.
+ * The six rungs of the ladder, as the tags the catalogue gives them.
  *
  * The catalogue is the authority on these and is asked first, so that a tag
  * which changes there changes here. This table is the offline answer, and it is
  * not a guess: every pair below was read out of the live catalogue, and this
- * exists because the download and the test prompt both need a tag and neither
- * should fail because the gateway is unreachable.
+ * exists because the test prompt needs a tag and must not fail because the
+ * gateway is unreachable.
  */
 const LADDER_TAGS: Record<string, string> = {
   "qwen2.5-math-7b": "mightykatun/qwen2.5-math:7b",
@@ -717,9 +685,9 @@ const LADDER_TAGS: Record<string, string> = {
   "llama3.2-3b": "llama3.2:3b",
 };
 
-/** The ollama tag for a ladder id, from the catalogue if it can be reached and
- *  from the table if it cannot. `null` for an id that is in neither, which for a
- *  flow that has only ever written ladder ids is unreachable. */
+/** The tag for a ladder id, from the catalogue if it can be reached and from the
+ *  table if it cannot. `null` for an id that is in neither, which for a flow
+ *  that has only ever written ladder ids is unreachable. */
 async function tagFor(modelId: string): Promise<string | null> {
   const fromTable = LADDER_TAGS[modelId];
   let catalogue: string;
@@ -743,442 +711,6 @@ async function tagFor(modelId: string): Promise<string | null> {
     // A catalogue that will not parse is a catalogue that cannot be consulted.
   }
   return fromTable ?? null;
-}
-
-/** How often progress may be reported, in milliseconds. Ten a second is the
- *  contract's ceiling and is already more than a caption can be read at. */
-const EMIT_MS = 100;
-
-/** The window the transfer rate is measured over. Two seconds, because the
- *  contract says the rate is withheld until it has settled and this is what
- *  settled means here. */
-const RATE_WINDOW_MS = 2000;
-
-/**
- * Fetch the weights, through ollama's own pull stream.
- *
- * The stream is ollama's accounting, layer by layer, keyed by digest. That
- * keying is what makes a resumed transfer correct rather than approximately
- * correct: ollama re-reports the same digests it did before, each starting from
- * the bytes already on disk, and summing over a map means a layer seen twice is
- * counted once. A running total would double-count the whole partial file on
- * every resume.
- *
- * `pause` stops the read and then aborts, in that order, so the count the user is
- * shown is the count that was true when they pressed the button rather than one
- * that arrives a chunk later. Ollama keeps the blob it was writing; the resume
- * posts the same request again and ollama carries on from where it got to, which
- * may be very slightly ahead of the number on screen. That is the honest
- * direction for the discrepancy to run — the alternative is a progress bar that
- * reaches the total and then keeps going.
- */
-function downloadModel(
-  request: DownloadRequest,
-  opts?: ProgressOptions<DownloadProgress>,
-): PausableTask<DownloadResult> {
-  let settled = false;
-  let cancelled = false;
-  let paused = false;
-  let state: DownloadProgress["state"] = "downloading";
-  /**
-   * The id of the pull Rust is running, or `null`.
-   *
-   * An id rather than a handle, because the transfer no longer lives in this
-   * process. `ollama_pull_cancel` looks it up in a map on the Rust side, which
-   * is what makes a stop safe to get wrong: a cancel that arrives after the
-   * transfer has ended finds nothing and does nothing, where an abort on a
-   * stale handle would be a coin flip.
-   */
-  let pull: string | null = null;
-  /** Bytes per layer, by ollama's digest. See the note above. */
-  const layers = new Map<string, { total: number; bytes: number }>();
-  /** Rate samples, newest last, cleared whenever the transfer stops. */
-  const samples: { at: number; received: number }[] = [];
-  let lastEmit = -Infinity;
-  let confirmed = false;
-  /** Whether the final `verifying` event has gone out. The contract promises it
-   *  before `result` resolves, and it must not go out twice: this is the flag
-   *  that keeps "ollama said so" and "the stream ended" from both announcing it. */
-  let announced = false;
-
-  /**
-   * The ollama tag, resolved once. The flow deals in ladder ids — `qwen2.5-math-7b`
-   * — and ollama deals in tags — `mightykatun/qwen2.5-math:7b`. The difference is
-   * invisible everywhere except here, which is exactly where getting it wrong
-   * would ask ollama to pull a model that does not exist under that name.
-   */
-  let tag: string | null = null;
-  let tagReady: Promise<void> | null = null;
-  const resolveTag = () => {
-    tagReady ??= tagFor(request.modelId).then((found) => {
-      tag = found;
-    });
-    return tagReady;
-  };
-  /** What to call the model when talking to ollama. Before the catalogue has
-   *  answered this is the ladder id, which is only ever used to build a request
-   *  that has not been sent yet. */
-  const forOllama = () => tag ?? request.modelId;
-
-  let resolve!: (value: DownloadResult) => void;
-  let reject!: (error: unknown) => void;
-  const result = new Promise<DownloadResult>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-
-  const received = () => {
-    let sum = 0;
-    for (const layer of layers.values()) sum += layer.bytes;
-    return sum;
-  };
-
-  const expected = () => {
-    if (layers.size === 0) return null;
-    let sum = 0;
-    for (const layer of layers.values()) sum += layer.total;
-    return sum;
-  };
-
-  /** Bytes per second over the last two seconds, or `null` while the window is
-   *  still too young to mean anything. */
-  const rate = (at: number, bytes: number): number | null => {
-    samples.push({ at, received: bytes });
-    // Keep one sample older than the window as the anchor, so the measurement
-    // spans the full two seconds rather than the few milliseconds since the
-    // oldest sample that still fits inside it.
-    while (samples.length > 1 && at - samples[1].at > RATE_WINDOW_MS) samples.shift();
-    const first = samples[0];
-    const span = (at - first.at) / 1000;
-    if (span < RATE_WINDOW_MS / 1000) return null;
-    const moved = bytes - first.received;
-    return moved > 0 ? moved / span : null;
-  };
-
-  const emit = (force = false) => {
-    // Once the final event has gone out, it is final: nothing that arrives after
-    // it may take its place as the last thing the screen was told.
-    if (announced) return;
-    const at = performance.now();
-    if (!force && at - lastEmit < EMIT_MS) return;
-    lastEmit = at;
-    const bytes = received();
-    const total = expected();
-    const speed = state === "paused" ? null : rate(at, bytes);
-    opts?.onProgress?.({
-      receivedBytes: bytes,
-      totalBytes: total,
-      bytesPerSecond: speed,
-      etaSeconds:
-        speed === null || total === null ? null : Math.max(0, Math.round((total - bytes) / speed)),
-      state,
-      waitedSeconds: null,
-    });
-  };
-
-  /**
-   * Stop the transfer Rust is running, if one is.
-   *
-   * Fire and forget. The answer is not needed: a pause has already drawn itself,
-   * a failure is already on its way to `reject`, and an id Rust does not know
-   * about is a cancel that raced the end of the transfer — which is not an error
-   * and must not become one.
-   */
-  const stopPull = () => {
-    if (pull === null) return;
-    const id = pull;
-    pull = null;
-    void invoke("ollama_pull_cancel", { id }).catch(() => {
-      // A cancel that cannot be delivered changes nothing that is on screen.
-    });
-  };
-
-  const fail = (error: OnboardingError) => {
-    if (settled) return;
-    settled = true;
-    stopPull();
-    reject(error);
-  };
-
-  const finish = (value: DownloadResult) => {
-    if (settled) return;
-    settled = true;
-    resolve(value);
-  };
-
-  /**
-   * The last word before the numbers stop moving: the file is all there and what
-   * is left is the check. It is the event the contract names as the one that has
-   * to say so, and it is idempotent because ollama says so three times — once
-   * per digest, once for the manifest, once on `success` — and a screen that
-   * redraws the same sentence three times in a row is a screen that looks stuck.
-   */
-  const verify = () => {
-    if (announced) return;
-    state = "verifying";
-    const total = expected();
-    const bytes = received();
-    opts?.onProgress?.({
-      receivedBytes: total ?? bytes,
-      totalBytes: total,
-      bytesPerSecond: null,
-      etaSeconds: null,
-      state,
-      waitedSeconds: null,
-    });
-    announced = true;
-  };
-
-  /**
-   * Ollama is not up yet, and Rust is waiting for it.
-   *
-   * The only thing the screen hears while that happens, once a second — a first
-   * run on a cold Windows machine would otherwise be thirty seconds of one
-   * unchanging frame, which is what a hang looks like.
-   *
-   * It draws itself rather than going through `emit`, for the reason `verify`
-   * does: `emit` reports a transfer, and there is no transfer yet. It also
-   * deliberately leaves `state` alone, so that the first line of ollama's to
-   * arrive puts the screen back to reporting bytes without anything having to
-   * notice that it had stopped. The count it carries is whatever earlier lines
-   * established — nothing on a first run, the resumed total after a pause.
-   */
-  const waiting = (seconds: number) => {
-    if (announced) return;
-    opts?.onProgress?.({
-      receivedBytes: received(),
-      totalBytes: expected(),
-      bytesPerSecond: null,
-      etaSeconds: null,
-      state: "waiting",
-      waitedSeconds: seconds,
-    });
-  };
-
-  /** One line of ollama's NDJSON. */
-  const absorb = (line: string) => {
-    let event: unknown;
-    try {
-      event = JSON.parse(line);
-    } catch {
-      // Ollama writes whole JSON objects, one per line. A line that is not one
-      // is a line this code has no reading for; skipping it is better than
-      // failing a four-gigabyte transfer over a keepalive.
-      return;
-    }
-    if (!isJson(event)) return;
-
-    const error = readString(event, "error");
-    if (error !== null) {
-      fail(new OnboardingError(classify(error), "The download stopped.", error));
-      return;
-    }
-
-    const status = readString(event, "status") ?? "";
-    const digest = readString(event, "digest");
-    const total = readNumber(event, "total");
-    const completed = readNumber(event, "completed");
-    if (digest !== null && total !== null) {
-      layers.set(digest, { total, bytes: completed ?? 0 });
-      emit();
-      return;
-    }
-    // Anything else with a `total` is ollama's aggregate for the manifest, and
-    // the per-layer map above already has those bytes.
-    if (status.startsWith("verifying") || status.startsWith("writing manifest")) {
-      verify();
-      return;
-    }
-    if (status === "success") {
-      confirmed = true;
-      verify();
-      return;
-    }
-    // "pulling manifest", "pulling <digest>" and the rest are ollama saying what
-    // it is about to do; the bytes are the only thing worth reporting.
-  };
-
-  /** One trip through the stream. Called again by `resume`. */
-  const pump = async (): Promise<void> => {
-    // Before the first byte, and only once: the ladder id becomes the tag ollama
-    // will answer to.
-    await resolveTag();
-    if (tag === null) {
-      throw new OnboardingError(
-        "not-found",
-        "That model isn't available to download.",
-        `${request.modelId} is not an ollama model`,
-      );
-    }
-    if (paused || cancelled || settled) return;
-
-    const mine = `${request.modelId}:${Date.now()}`;
-    pull = mine;
-
-    const channel = new Channel<PullEvent>();
-
-    channel.onmessage = (event) => {
-      // A pause or a cancel stops the transfer on purpose and has already been
-      // reported; a failure has already been handed to `reject`. Anything that
-      // arrives after that is a line nobody is left to draw.
-      if (paused || cancelled || settled) return;
-      // Wrapped because this is a callback and nothing above it is listening: an
-      // exception raised in here is swallowed by the dispatcher that called it,
-      // which for a throw out of the drawing code `absorb` calls into would mean
-      // a download that appears to keep working while the bug goes unreported.
-      // `fail` is the only way out of a callback, so every path uses it.
-      try {
-        if (event.kind === "line") {
-          absorb(event.line);
-          return;
-        }
-        // Not an ending and not a byte: ollama still coming up, and Rust saying
-        // so once a second so the screen is not silent while it waits.
-        if (event.kind === "waiting") {
-          waiting(event.seconds);
-          return;
-        }
-        // The two endings that carry no stream. The split is the one the old code
-        // drew between a rejected `fetch` and a non-ok response, kept because the
-        // two are different things to be told: "not listening" is the ordinary
-        // state of a machine that has never run ollama, and "stopped halfway" is
-        // not.
-        fail(
-          new OnboardingError(
-            "network",
-            event.kind === "unreachable"
-              ? "Couldn't reach the model on this machine."
-              : "The download stopped.",
-            event.message,
-          ),
-        );
-      } catch (from) {
-        fail(asError(from));
-      }
-    };
-
-    try {
-      await invoke("ollama_pull", { model: forOllama(), id: mine, onEvent: channel });
-    } catch (from) {
-      if (paused || cancelled || settled) return;
-      // Rust declining the call, rather than ollama saying something: there is no
-      // message of ollama's to show, so this keeps the older, vaguer sentence.
-      throw new OnboardingError(
-        "network",
-        "Couldn't reach the model on this machine.",
-        reason(from),
-      );
-    } finally {
-      // Only this trip's id, so a pause that has already started the next one
-      // cannot have it cleared out from under it.
-      if (pull === mine) pull = null;
-    }
-
-    // The transfer ended, one way or another. A pause, a cancel or a failure
-    // that has already been reported all end here without a second word.
-    if (paused || cancelled || settled) return;
-
-    // The stream ended. Ollama says `success` only after it has checked the
-    // digests of everything it wrote, so a stream that stops without one is a
-    // transfer that did not finish — including the case where the connection
-    // closed cleanly, which is the one that would otherwise look like success.
-    if (!confirmed) {
-      throw new OnboardingError(
-        "network",
-        "The download stopped.",
-        "ollama closed the stream before confirming the file",
-      );
-    }
-  };
-
-  const settle = async (): Promise<void> => {
-    // The bytes as ollama itself accounts for them, rather than as this file
-    // summed them: the two agree, and when they do not it is ollama's figure that
-    // is the file on disk.
-    let bytes = received();
-    try {
-      const tags = (await fetch(`${OLLAMA}/api/tags`).then((response) => response.json())) as unknown;
-      if (isJson(tags) && Array.isArray(tags.models)) {
-        for (const entry of tags.models) {
-          if (!isJson(entry) || readString(entry, "name") !== forOllama()) continue;
-          const size = readNumber(entry, "size");
-          if (size !== null) bytes = size;
-        }
-      }
-    } catch {
-      // The count above is a true count of the bytes ollama reported; a second
-      // opinion that cannot be reached changes nothing.
-    }
-
-    // The directory rather than the blob: ollama's blobs are named by digest, so
-    // the directory is the only path here a person can act on. `path` is promised
-    // to the user verbatim and is not drawn by any screen today.
-    let path = "";
-    try {
-      path = await invoke<string>("ollama_models_dir");
-    } catch {
-      path = "";
-    }
-
-    // The contract's last word before the promise settles. Ollama usually says
-    // so itself — "verifying sha256 digest" arrives on the stream — and when it
-    // does, this must not say it a second time.
-    if (!announced) verify();
-    finish({
-      modelId: request.modelId,
-      path,
-      bytes: expected() ?? bytes,
-      verified: confirmed,
-    });
-  };
-
-  const begin = () => {
-    void pump().then(
-      () => {
-        if (settled || paused || cancelled) return;
-        void settle().catch((from: unknown) => fail(asError(from)));
-      },
-      (from: unknown) => {
-        if (settled || paused || cancelled) return;
-        fail(asError(from));
-      },
-    );
-  };
-
-  begin();
-
-  return {
-    result,
-    pause() {
-      if (settled || paused || state !== "downloading") return;
-      paused = true;
-      state = "paused";
-      // The window is dropped rather than kept: a rate that averages across a
-      // pause is a rate for a transfer that was not happening.
-      samples.length = 0;
-      lastEmit = -Infinity;
-      emit(true);
-      // Killing `curl` leaves ollama's partial blob where it is, which is what
-      // makes `resume` a resume: the same request goes out again and ollama
-      // carries on from the bytes it already has.
-      stopPull();
-    },
-    resume() {
-      if (settled || !paused) return;
-      paused = false;
-      state = "downloading";
-      samples.length = 0;
-      lastEmit = -Infinity;
-      begin();
-    },
-    cancel() {
-      if (settled || cancelled) return;
-      cancelled = true;
-      // The partial file stays: that is what makes the next attempt a resume,
-      // and it is why stopping costs the user nothing.
-      fail(stopped("Download stopped."));
-    },
-  };
 }
 
 /* --------------------------------- the limits --------------------------------- */
@@ -1481,14 +1013,52 @@ async function joinStoppedReason(): Promise<string | null> {
   return last.length > 120 ? `${last.slice(0, 119)}…` : last;
 }
 
+/**
+ * How far along the weight fetch is, from the join's own log — `null` when there
+ *  is no fetch underway to report.
+ *
+ *  This is what replaced a screen. The weights used to be pulled by ollama,
+ *  which streamed a byte count this file turned into a bar; the fetch happens
+ *  inside the join now, and the only account of it is `join.log`. The CLI's
+ *  runtime prints one line per ten percent while it downloads —
+ *  `  qwen3:8b   40%  1.7 GB of 4.3 GB` — and this reads the last of them back.
+ *
+ *  Deliberately unparsed, and that is the same judgement the contract makes: the
+ *  name and the two sizes are handed on exactly as the fetcher rendered them,
+ *  because bytes re-derived from "1.7 GB" would be a number this file invented.
+ *  Only the percentage is read as a number, and only to answer one question —
+ *  whether the fetch is still going. At `100` the bytes are in hand and the
+ *  caption can go back to saying what the join itself is doing.
+ *
+ *  Read from `joinStart` like everything else here, so a machine whose weights
+ *  arrived on an earlier attempt does not report that attempt's last line as
+ *  this one's work.
+ */
+/** The fetcher's count, as `JoinProgress` carries it. Optional there, because
+ *  only one phase has one; this is the read that produces it, so the only absent
+ *  answer it gives is `null`. */
+type FetchLine = Exclude<JoinProgress["fetch"], undefined>;
+
+async function joinFetchProgress(): Promise<FetchLine | null> {
+  if (joinStart === null) return null;
+  const line = await read<FetchLine | null>("network_join_progress", { from: joinStart });
+  return line.ok ? line.value : null;
+}
+
 /** One read of the network's opinion of this node, for the confirming phase. */
 async function healthy(): Promise<boolean> {
   const current = await status();
   return current.node !== null && current.node.healthy;
 }
 
-/** The phase emitter a join hands to the screen it is running behind. */
-type Say = (phase: JoinProgress["phase"], answered?: JoinProgress["answered"]) => void;
+/** The phase emitter a join hands to the screen it is running behind. The
+ *  second argument carries whichever of the two extras this phase has: the
+ *  fetcher's own count while the weights move, and the model's answer once it has
+ *  spoken. A phase that has neither passes nothing. */
+type Say = (
+  phase: JoinProgress["phase"],
+  extra?: { answered?: JoinProgress["answered"]; fetch?: JoinProgress["fetch"] },
+) => void;
 
 /** How long a first join waits for the gateway to list this machine. Four
  *  minutes, and unchanged: it covers a cold model coming off disk on a slow
@@ -1634,6 +1204,17 @@ async function awaitServing(
     if (signal.cancelled) throw stopped("Stopped.");
     const current = await status();
 
+    // What the join is actually doing, asked of the log before the caption is
+    // written. The weights are several gigabytes and the join fetches them
+    // in here, so "Registering this machine." is the wrong description of the
+    // eight minutes that spends — it is a true statement about the same process
+    // that would leave the user watching a spinner with no reason to believe
+    // anything was happening. Emitted every poll, so the count moves and so the
+    // phrase returns the moment the bytes are in hand. See `joinFetchProgress`.
+    const fetching = await joinFetchProgress();
+    if (fetching !== null && fetching.percent < 100) say("fetching-model", { fetch: fetching });
+    else say("registering");
+
     // The stop is read first, because it is the only thing on this line the loop
     // has been *told* rather than left to infer. Nothing of this app's is serving:
     // the joined process has ended without handing off, which is the only kind of
@@ -1760,8 +1341,7 @@ async function awaitServing(
  */
 function joinNetwork(request: JoinRequest, opts?: ProgressOptions<JoinProgress>): Task<JoinResult> {
   return start(async (signal) => {
-    const say: Say = (phase, answered) =>
-      opts?.onProgress?.(answered === undefined ? { phase } : { phase, answered });
+    const say: Say = (phase, extra) => opts?.onProgress?.({ phase, ...extra });
 
     // Register, and wait until the gateway has this machine in its own list. The
     // reasoning — the reuse guard, why the listing and not `healthy`, why a young
@@ -1775,10 +1355,18 @@ function joinNetwork(request: JoinRequest, opts?: ProgressOptions<JoinProgress>)
     const tag = await tagFor(request.modelId);
     if (signal.cancelled) throw stopped("Stopped.");
 
-    // A cold model spends most of the ask loading; a warm one spends all of it
-    // answering. Asking ollama which it is turns the phase into a fact.
-    const cold = !(await modelIsLoaded(tag));
-    say(cold ? "loading-model" : "test-prompt");
+    // Unconditionally loading, and this used to be a question. A cold model
+    // spends most of the ask loading and a warm one spends all of it answering,
+    // so the phase was chosen by asking ollama whether the model was already
+    // resident — a fact about this machine, read from this machine.
+    //
+    // There is no longer anywhere to read it from. `llama-server` is started by
+    // the join and this file never addresses it, so the warm case cannot be
+    // detected and the phase is now the join's own shape rather than a
+    // measurement of it. What is lost is real and small: a machine whose model
+    // is already in memory shows the loading sentence for the fraction of a
+    // second that turns out to take.
+    say("loading-model");
 
     const question = TEST_PROMPT;
     let answer: string;
@@ -1806,7 +1394,7 @@ function joinNetwork(request: JoinRequest, opts?: ProgressOptions<JoinProgress>)
 
     if (signal.cancelled) throw stopped("Stopped.");
     const answered = { prompt: question, answer, latencyMs: latencyMs ?? 0 };
-    say("test-prompt", answered);
+    say("test-prompt", { answered });
 
     // Confirming — and the only place reachability is asked, now that `registering`
     // stops at the gateway holding the node. `healthy` is not the entry and not the
@@ -1898,22 +1486,8 @@ function ensureJoined(request: JoinRequest): Task<EnsureJoinedResult> {
 const wait = (milliseconds: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 
-/** Whether ollama has the model in memory right now. Unknown counts as cold,
- *  which shows the sentence that is true whether or not it was: a load is what
- *  the first ask after a join always partly is. */
-async function modelIsLoaded(tag: string | null): Promise<boolean> {
-  if (tag === null) return false;
-  try {
-    const parsed = (await fetch(`${OLLAMA}/api/ps`).then((response) => response.json())) as unknown;
-    if (!isJson(parsed) || !Array.isArray(parsed.models)) return false;
-    return parsed.models.some((entry) => isJson(entry) && readString(entry, "name") === tag);
-  } catch {
-    return false;
-  }
-}
-
 /* ---------------------------------- the seam ---------------------------------- */
 
 export function createRealService(): OnboardingService {
-  return { scanHardware, suggestLane, downloadModel, setLimits, joinNetwork, ensureJoined };
+  return { scanHardware, suggestLane, setLimits, joinNetwork, ensureJoined };
 }

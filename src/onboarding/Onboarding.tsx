@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState, type ComponentType } from "react";
 import { INITIAL_FLOW, readProgress, writeProgress, type FlowState, type Progress } from "./flow";
-import DownloadModel from "./screens/DownloadModel";
 import HardwareScan from "./screens/HardwareScan";
 import JoinNetwork from "./screens/JoinNetwork";
 import PickLane from "./screens/PickLane";
@@ -11,7 +10,7 @@ import { STEP_ORDER, type ScreenProps, type StepId } from "./steps";
 /**
  * The flow, and the only thing that moves it.
  *
- * Six screens, one at a time. A screen is handed the data it carries, one way
+ * Five screens, one at a time. A screen is handed the data it carries, one way
  * to add to it, and two ways to move — and it decides nothing about where it
  * sits in the order. That is the whole reason the machine is here rather than
  * in each screen, and the reason a screen can be read on its own.
@@ -24,7 +23,6 @@ const SCREENS: Readonly<Record<StepId, ComponentType<ScreenProps>>> = {
   welcome: Welcome,
   scan: HardwareScan,
   lane: PickLane,
-  download: DownloadModel,
   limits: ResourceLimits,
   join: JoinNetwork,
 };

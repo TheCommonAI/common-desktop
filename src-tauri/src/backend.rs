@@ -36,13 +36,12 @@
 //! app puts them.
 
 use serde::Serialize;
-use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 // `Manager` is the trait that puts `path()` on the app handle, which is where a
 // report is written. `config` and `package_info` are inherent methods and need no
 // import; this one is what supplies the folder.
@@ -110,31 +109,6 @@ fn silent(program: impl AsRef<std::ffi::OsStr>) -> Command {
         cmd
     };
     cmd
-}
-
-/// Where Ollama keeps its own executables, when the platform puts them somewhere a
-/// fresh process will not already be looking.
-///
-/// The same directory `start_ollama` already names, asked for here because a second
-/// caller needs it for a different reason.
-///
-/// Windows asks the question and the other platforms answer `None`, which is why the
-/// `cfg` is on the *body* and not on the call: the caller goes on being compiled
-/// everywhere, so the `PATH` it rewrites is type-checked on the machines this is
-/// developed on rather than only on the ones it runs on.
-#[cfg(windows)]
-fn ollama_dir() -> Option<PathBuf> {
-    let local = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty())?;
-    let dir = PathBuf::from(local).join("Programs").join("Ollama");
-    // The check that matters. The directory existing proves nothing — a half-removed
-    // install leaves it behind — so the executable is the answer.
-    dir.join("ollama.exe").is_file().then_some(dir)
-}
-
-/// Nothing is kept where a fresh process is already looking, so nothing is added.
-#[cfg(not(windows))]
-fn ollama_dir() -> Option<PathBuf> {
-    None
 }
 
 /* ------------------------------- the CLI itself ------------------------------- */
@@ -349,27 +323,21 @@ fn cli_path() -> String {
 /// process was handed.
 ///
 /// `PATH` is the whole of it, and it earns its place as a first act rather than a last
-/// resort. `join.py` asks `shutil.which("ollama")` before it does anything at all and
-/// exits on the answer no — so a join spawned without Ollama on its `PATH` dies in
-/// under a second, before it has reached the network. A `PATH` is read once, at process
-/// start, and this app is routinely started from a shell — or an Explorer — that was
-/// already running when Ollama was installed, so the install directory is missing from
-/// this process's own environment and therefore from every child's. The app then spends
-/// its whole four-minute budget reporting a gateway that was never asked, which is
-/// exactly what a Windows self-trial did: `✗ ollama not found.` sat in `join.log` for the
-/// entire wait while the screen said "the gateway never listed this machine".
+/// resort. `join.py` looks `cloudflared` up by name before it will serve anything and
+/// gives up when it does not find it, so a join spawned without that directory on its
+/// `PATH` dies before it has reached the network — and the app then spends its whole
+/// four-minute budget reporting a gateway that was never asked.
 ///
-/// Appended and not prepended, so an Ollama the user installed somewhere of their own
-/// choosing still wins the lookup; this supplies the directory only when nothing else
-/// has.
+/// A `PATH` is read once, at process start, and this app is routinely started from a
+/// shell — or an Explorer — that was already running when the directory was written, so
+/// what is on this process's `PATH` is not necessarily what is on the disk. Appended and
+/// not prepended: a `cloudflared` the user installed somewhere of their own choosing
+/// still wins the lookup, and this supplies the directory only when nothing else has.
 ///
-/// There are two directories now, and the second one arrived with the seed. The
-/// `bin/common` wrapper that this app used to go through put `~/.common-network/bin`
-/// on `PATH` itself, and that is where the installer leaves `cloudflared`. Running the
-/// script directly means nothing else does, and `join.py` looks `cloudflared` up by
-/// name before it will serve anything — so without this a join would get all the way to
-/// the tunnel and stop, which is the same shape of failure the paragraph above exists
-/// to prevent.
+/// There used to be a second directory — Ollama's, on Windows — added because the
+/// `join.py` of that time asked `shutil.which("ollama")` before it did anything at all
+/// and exited on the answer no. Both halves of that are gone: the join no longer looks
+/// for a daemon, and neither does anything here.
 fn cli_env(cmd: &mut Command) {
     // Belt and braces beside `--no-color`: the CLI also honours NO_COLOR, and a
     // stray escape sequence inside JSON is a parse error with a baffling cause.
@@ -381,9 +349,6 @@ fn cli_env(cmd: &mut Command) {
         if bin.is_dir() {
             dirs.push(bin);
         }
-    }
-    if let Some(dir) = ollama_dir() {
-        dirs.push(dir);
     }
     if dirs.is_empty() {
         return;
@@ -1472,23 +1437,14 @@ fn kill_join(_pid: u32) {}
 #[tauri::command]
 pub async fn network_ask_local(question: String, model: Option<String>) -> Result<String, String> {
     off_thread(move || {
-        // Ollama first, for the same reason the download waits: this is the
-        // proof that *this machine* can answer, and on a fresh install the daemon
-        // may still be coming up. There is no channel here — this command answers
-        // in one piece — so the wait is silent, and a machine that never answers
-        // gets a sentence rather than a hang.
-        if !await_ollama(
-            Instant::now() + OLLAMA_WAIT,
-            OLLAMA_POLL,
-            ollama_answers,
-            start_ollama,
-            || true,
-        ) {
-            return Err(format!(
-                "ollama isn't answering on {OLLAMA_HOST} — start it and try again"
-            ));
-        }
-
+        // Nothing is waited on here, and something used to be: this asked the
+        // daemon whether it was up and started it if it was not, because on a
+        // fresh install it could still be coming up. The CLI answers this from
+        // `llama-server` now, which the join starts and supervises itself, so
+        // there is nothing on this machine for the app to wake and no address
+        // here for it to probe. When the model is not up the CLI says so in its
+        // own words, and those are the better words — they come from the layer
+        // that knows why.
         let Cli {
             mut cmd,
             named: bin,
@@ -1559,10 +1515,10 @@ pub fn network_ask_stop() {
 /// the question goes to the gateway, which routes it to whichever machine on
 /// the network is the best fit for what was actually asked.
 ///
-/// `--local` is a different product. It talks past the network to the Ollama
-/// running on this machine and takes *the first model in its list* — so a
-/// machine contributing a maths model, whose list happens to start there,
-/// answers "hey" with mathematics. This machine contributes one specialist; the
+/// `--local` is a different product. It talks past the network to whatever this
+/// machine is serving and takes the first model on offer — so a machine
+/// contributing a maths model answers "hey" with mathematics. This machine
+/// contributes one specialist; the
 /// network is what holds the rest, and answering from the one we happen to be
 /// sitting on is not a smaller version of that — it is a different thing.
 ///
@@ -1796,10 +1752,10 @@ fn gateway_base() -> String {
 ///
 /// The app has its own ladder — six models with the labels and the sizes the
 /// screens were drawn against — and every one of those ids is an id in this
-/// catalogue. What the ladder does not carry is the ollama tag each id pulls
-/// from, and that mapping is the network's to know: `qwen2.5-math-7b` is
-/// `mightykatun/qwen2.5-math:7b`, which no rule derives from the id. So the
-/// download asks this, and falls back to treating the id as a tag.
+/// catalogue. What the ladder does not carry is the tag each id is asked for by,
+/// and that mapping is the network's to know: `qwen2.5-math-7b` is
+/// `mightykatun/qwen2.5-math:7b`, which no rule derives from the id. So the app
+/// asks this, and falls back to treating the id as the tag.
 ///
 /// It is here rather than in the webview for the reason the header gives: the
 /// gateway sends no CORS headers, so a page cannot fetch it and Rust can.
@@ -2132,8 +2088,8 @@ const JOIN_TAIL_LINES: usize = 20;
 /// `HandedOff` and has nothing to say about the join itself. The file the CLI writes is
 /// then the only account there is — which is why reading it is what turns "the gateway
 /// never listed this machine" from a guess into a report. A self-trial watched the full
-/// four minutes of that sentence with `✗ ollama not found.` sitting here the whole time,
-/// and the join had died in under a second.
+/// four minutes of that sentence while a `✗` sat here from the first second — the join
+/// had died in under one, on a missing tool, before it reached the network at all.
 ///
 /// `from` is that attempt's `start`, the byte `network_join` measured when it spawned it,
 /// so what comes back is this attempt's words and never an older attempt's. See there for
@@ -2150,6 +2106,107 @@ pub async fn network_join_tail(from: u64) -> Result<Option<String>, String> {
         Err(e) => return Err(format!("couldn't read {}: {e}", path.display())),
     };
     Ok(Some(tail_from(&raw, from, JOIN_TAIL_LINES)))
+}
+
+/// How much of an attempt's log a progress read looks back through. Small on
+/// purpose: while a download is running its marks *are* the newest lines, so a
+/// deeper look could only reach past the end of a finished one and report its
+/// hundred as this one's.
+const JOIN_PROGRESS_LINES: usize = 4;
+
+/// The CLI's progress line, as the join screen draws it.
+///
+/// The weights are fetched by the CLI as part of joining, so the app has no stream
+/// of its own to count bytes on — Ollama's pull was the last of those, and it went
+/// with the daemon. What is here instead is the file the CLI already writes:
+/// `_Progress` in `runtime.py` prints one ordinary line at each ten percent
+/// whenever its output is not a terminal, and in the join this app starts it never
+/// is. Reading that line is the whole mechanism, and deliberately the whole of it —
+/// no new verb, no second account of what has been fetched, and so nothing for the
+/// two sides to disagree about.
+#[derive(Serialize)]
+pub struct JoinFetch {
+    /// What is arriving, in the CLI's own words: the weights' wire name, or
+    /// `the llama.cpp runtime (b11700)`. Carried rather than translated, because
+    /// the app has no better name for it than the layer that went to get it.
+    name: String,
+    percent: u32,
+    /// The sizes as the CLI rendered them — `"1.2 GB"`, `"4.3 GB"`. Strings,
+    /// because re-deriving bytes from the first would be inventing precision the
+    /// count never had. See the argument at `service.ts`'s `JoinProgress.fetch`.
+    done: String,
+    total: String,
+}
+
+/// Where this attempt's download has got to, or `None` when the CLI has not said.
+///
+/// `None` is three different true things — no log at all, no fetch started, and a
+/// fetch left to be re-read another day — and they are one answer to the screen,
+/// because there is nothing to draw in any of them. A fetch that has *finished* is
+/// deliberately not among them: the CLI's marks stop at the hundred and the line
+/// saying so stays in the file for good, so a finished fetch reads as a hundred,
+/// and the caller draws a percentage under a hundred or nothing at all.
+///
+/// Read from `from`, this attempt's first byte — `network_join`'s answer when it
+/// spawned it — and by seeking to it rather than by slicing a whole-file read,
+/// because this is called twice a second for as long as a multi-gigabyte download
+/// lasts. `network_join_tail` reads the whole file for the opposite reason: it is
+/// asked once, when a join has already died.
+#[tauri::command]
+pub async fn network_join_progress(from: u64) -> Result<Option<JoinFetch>, String> {
+    let path = home_dir()?.join(".common-network").join("join.log");
+    // A machine that has never joined has no log. That is not a failure and not a
+    // sentence: it is a join with nothing to show yet.
+    let mut file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("couldn't read {}: {e}", path.display())),
+    };
+    // An offset the file cannot honour is a log that was rotated or rewritten, and
+    // the honest answer to that is nothing — never the whole file, which would be
+    // someone else's download reported as this one's. Failing the call instead
+    // would put a sentence about the log over a download that is going fine.
+    if file.seek(SeekFrom::Start(from)).is_err() {
+        return Ok(None);
+    }
+    // An offset inside a character, or bytes that are not UTF-8 at all, land here
+    // for the same reason and read the same way.
+    let mut raw = String::new();
+    if file.read_to_string(&mut raw).is_err() {
+        return Ok(None);
+    }
+    Ok(progress_from(&raw, JOIN_PROGRESS_LINES))
+}
+
+/// The newest progress line in `raw`, read back into its parts.
+///
+/// The shape is fixed by the CLI — `runtime.py`'s `_Progress.update`, in the branch
+/// it takes when its output is not a terminal — and is exactly:
+///
+/// ```text
+///   <what>  <percent>%  <done> of <total>
+/// ```
+///
+/// Two spaces between the fields, the percentage padded to three columns. Parsed
+/// from the right, because `<what>` is free text — a wire name, or `the llama.cpp
+/// runtime (b11700)` — and `<done>` is a rendered size that carries a space of its
+/// own. A line that does not fit the shape is not this line, and that is what keeps
+/// the join's ordinary output out of the answer: the percentage is the last thing
+/// that has to parse, and only a mark has one. A failure sentence such as
+/// `... stopped early (1.2 GB of 4.3 GB)` has the ` of ` and the sizes but no
+/// percentage, and is refused for exactly that reason.
+fn progress_from(raw: &str, lines: usize) -> Option<JoinFetch> {
+    tail_lines(raw, lines).lines().rev().find_map(|line| {
+        let (head, total) = line.trim().rsplit_once(" of ")?;
+        let (head, done) = head.rsplit_once("  ")?;
+        let (name, percent) = head.rsplit_once("  ")?;
+        Some(JoinFetch {
+            name: name.trim().to_string(),
+            percent: percent.trim().trim_end_matches('%').parse().ok()?,
+            done: done.trim().to_string(),
+            total: total.trim().to_string(),
+        })
+    })
 }
 
 /// The last `lines` lines of the part of `raw` that a join starting at byte `from` wrote.
@@ -2326,554 +2383,6 @@ fn safe_stem(name: &str) -> String {
     }
 }
 
-/* ------------------------------ the model store ------------------------------ */
-
-/// Where this machine's weights live, absolute.
-///
-/// `DownloadResult.path` is promised to the user verbatim, so it must be a real
-/// path rather than the one that is conventional. `OLLAMA_MODELS` decides it if
-/// it is set; the default is `~/.ollama/models`.
-///
-/// A daemon started with `OLLAMA_MODELS` set to something this process cannot
-/// see would keep its weights somewhere else, and this would name the wrong
-/// directory. That is why nothing here depends on the answer: `verified` comes
-/// from ollama's own digest check, which is the only party that knows where the
-/// bytes it wrote actually are.
-#[tauri::command]
-pub async fn ollama_models_dir() -> Result<String, String> {
-    off_thread(|| {
-        let dir = match std::env::var_os("OLLAMA_MODELS") {
-            Some(custom) if !custom.is_empty() => PathBuf::from(custom),
-            _ => {
-                let home =
-                    home_dir().map_err(|_| "no home to look for the weights under".to_string())?;
-                home.join(".ollama/models")
-            }
-        };
-        Ok(dir.to_string_lossy().to_string())
-    })
-    .await
-}
-
-/* ------------------------------ the pull stream ------------------------------ */
-
-/// Ollama, on this machine. The same string as `OLLAMA` in
-/// `src/onboarding/service.real.ts`, and hardcoded there for the reason given
-/// there: the alternative is a setting whose only working value is this one.
-const OLLAMA_PULL_URL: &str = "http://127.0.0.1:11434/api/pull";
-
-/// Where ollama listens on this machine, for the sentences this file writes
-/// about it. The URLs above and below spell the same host out again because a
-/// `const` cannot be assembled from one, and `service.real.ts` holds a literal
-/// copy for the same reason.
-const OLLAMA_HOST: &str = "127.0.0.1:11434";
-
-/// The cheapest question ollama answers, and the only thing asked of it that is
-/// not the pull itself. A version string and nothing else: this goes out once a
-/// second while the app waits for a daemon that is still starting, so answering
-/// it has to cost nothing.
-const OLLAMA_VERSION_URL: &str = "http://127.0.0.1:11434/api/version";
-
-/// How long the app waits for ollama before it says it could not reach it.
-///
-/// A cold daemon takes seconds, not minutes, and the slow case is a first run
-/// that has to start one: the `.app` or the Windows service has to come up,
-/// bind, and load a runner. Thirty seconds is longer than that takes on the
-/// machines this ships to, and short enough that a machine with no ollama at all
-/// is not left staring at a spinner.
-const OLLAMA_WAIT: Duration = Duration::from_secs(30);
-
-/// How often the wait looks up to see whether ollama has answered yet.
-const OLLAMA_POLL: Duration = Duration::from_secs(1);
-
-/// One message of ollama's pull stream, on its way to the webview.
-///
-/// Variants rather than a bare line, because the failures are different animals
-/// and the screen says different things about them. Ollama reports its own
-/// refusals *inside* the stream — `{"error":"model not found"}`, one line among
-/// the progress — and those are lines like any other, read by the same parser
-/// that reads the bytes, so they need no variant of their own.
-///
-/// The ones that do are the ones with nothing to parse. `Unreachable` means the
-/// transfer never began — ollama is not listening, which is the ordinary state
-/// of a machine that has never run it, and the one case where the honest
-/// sentence is "we could not reach it" rather than "it stopped". `Failed` means
-/// it began and something ended it badly.
-///
-/// `Waiting` is the odd one out and is not a failure at all: it is the app
-/// saying it is still trying, once a second, while it waits for a daemon that is
-/// coming up. It exists because the alternative is worse than silence — a
-/// progress bar that has not moved for half a minute is indistinguishable from a
-/// hung one, and the whole point of waiting is that the user does nothing. Its
-/// `seconds` count up from the start of the wait rather than down to the end of
-/// it: a countdown to the moment the app gives up is a worse thing to watch for
-/// half a minute than a figure that says it is still trying.
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
-pub enum PullEvent {
-    Line { line: String },
-    Waiting { seconds: u32 },
-    Unreachable { message: String },
-    Failed { message: String },
-}
-
-/// One in-flight pull, as the cancel command needs to see it.
-struct Pull {
-    /// The `curl` process, once it has started. Behind a mutex of its own rather
-    /// than the registry's, so that cancelling never waits on the thread that is
-    /// reading from it.
-    child: Mutex<Option<Child>>,
-    /// Set by `ollama_pull_cancel` *before* it kills, so the reader can tell a
-    /// deliberate stop from a `curl` that fell over. Order matters: the reverse
-    /// leaves a window where a killed process reads as a failure.
-    stopped: AtomicBool,
-}
-
-/// Every pull this app has running, by the id the webview gave it.
-///
-/// Ollama offers no way to cancel a pull — it is a stream that runs to its end.
-/// `curl` does, and killing it is the correct stop rather than a crude one:
-/// ollama keeps the blob it has written so far, which is what makes the next
-/// attempt a resume instead of a restart. That property is the entire reason the
-/// download screen has a pause button, so the transport must not be the thing
-/// that loses it.
-#[derive(Default)]
-pub struct Pulls(Mutex<HashMap<String, Arc<Pull>>>);
-
-/// Whether ollama answers on loopback right now.
-///
-/// One `curl` on the cheapest endpoint it has. Loopback either answers at once
-/// or refuses at once, so the timeouts are a ceiling that is almost never paid —
-/// they are there for the machine where something else holds the port and says
-/// nothing, which would otherwise hang the wait rather than end it.
-///
-/// `--fail` so that a listener answering with a status code is not mistaken for
-/// ollama: readiness means a 2xx from this URL, not merely a connection.
-fn ollama_answers() -> bool {
-    ollama_answers_at(OLLAMA_VERSION_URL)
-}
-
-/// The same probe against any URL, which is what lets the test at the foot of
-/// this file point it at a port nothing is listening on. That refusal is the one
-/// arm of this that can be checked on a machine with no daemon on it, and it is
-/// worth checking: it is the arm the first run depends on.
-fn ollama_answers_at(url: &str) -> bool {
-    silent("curl")
-        .args([
-            "--silent",
-            "--show-error",
-            "--fail",
-            "--connect-timeout",
-            "1",
-            "--max-time",
-            "2",
-        ])
-        .arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-}
-
-/// Ask the platform to start ollama, and say whether the ask was taken.
-///
-/// The desktop app rather than `ollama serve` wherever there is one, because the
-/// app owns the daemon's lifecycle and its port: a bare `serve` started beside a
-/// running app only fails to bind, and says nothing this file can read. On
-/// Windows that app is `ollama app.exe` under `%LOCALAPPDATA%\Programs\Ollama`,
-/// asked for by path because the app is not on `PATH` while `ollama.exe` alone
-/// is.
-///
-/// The daemon is spawned and the handle dropped, so it outlives the window:
-/// quitting Common must not stop the model server the user's other tools are
-/// also using.
-fn start_ollama() -> bool {
-    if cfg!(target_os = "macos") {
-        // `open -a` has done its job once the app is launched, so its exit
-        // status is the whole answer — and it does not wait on the daemon, which
-        // is what the poll after it is for.
-        return silent("open")
-            .arg("-a")
-            .arg("Ollama")
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-    }
-
-    if cfg!(windows)
-        && let Some(local) = std::env::var_os("LOCALAPPDATA")
-    {
-        let app = PathBuf::from(local)
-            .join("Programs")
-            .join("Ollama")
-            .join("ollama app.exe");
-        if app.is_file() {
-            return silent(app).spawn().is_ok();
-        }
-    }
-
-    // `ollama serve` is the fallback, and the only path on Linux.
-    silent("ollama")
-        .arg("serve")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .is_ok()
-}
-
-/// Wait for ollama to answer, asking the platform to start it once on the way.
-///
-/// This is the whole of the Windows first-run fix. `ollama_pull` ran `curl`
-/// exactly once, at the instant the model was chosen, and a daemon that is
-/// installed but not yet up loses that race: the pull dies with curl's
-/// `CURLE_COULDNT_CONNECT` and the app says it could not reach ollama, which was
-/// true for about two seconds and false for the rest of the machine's life.
-///
-/// So: probe, ask the platform to start it if the probe fails, then keep probing
-/// until it answers or the deadline passes. The closures are seams rather than
-/// indirection for its own sake — `answers` and `start` so the loop can be
-/// tested without a daemon (see the tests at the foot of this file), and `tick`
-/// so the caller decides what a second of waiting is worth saying, and can cut
-/// the wait short when the user has.
-///
-/// - `deadline` — when to stop waiting and let the caller report it.
-/// - `poll` — how long to sleep between probes.
-/// - `answers` — whether ollama is up *now*.
-/// - `start` — ask the platform to start it. Called at most once, and only ever
-///   after a probe has already failed.
-/// - `tick` — one turn of the wait. `false` abandons it immediately. It is handed
-///   nothing because what is worth saying about a wait is how long it has been
-///   going, and only the caller knows when it began.
-fn await_ollama(
-    deadline: Instant,
-    poll: Duration,
-    mut answers: impl FnMut() -> bool,
-    mut start: impl FnMut() -> bool,
-    mut tick: impl FnMut() -> bool,
-) -> bool {
-    let mut asked = false;
-    loop {
-        if answers() {
-            return true;
-        }
-        if !asked {
-            asked = true;
-            let _ = start();
-        }
-        if deadline.saturating_duration_since(Instant::now()).is_zero() {
-            return false;
-        }
-        if !tick() {
-            return false;
-        }
-        std::thread::sleep(poll);
-    }
-}
-
-/// Stream a model into ollama, as ollama's own NDJSON.
-///
-/// This runs in Rust rather than in the webview, and the reason is one word:
-/// **CORS**. A `fetch` from the page carries an `Origin` header, and ollama
-/// answers only the origins on its allowlist. On macOS and Linux that list
-/// contains Tauri's `tauri://*`, so the download works and always has. On Windows
-/// Tauri's webview origin is `http://tauri.localhost` — `wry`'s workaround URL
-/// for `tauri://localhost`, per tauri 2.12.3 `manager/mod.rs:335` — and ollama's
-/// defaults do **not** contain it, so the CORS preflight comes back `403` and the
-/// transfer never starts. The model is chosen, the screen waits, and not one byte
-/// is ever counted.
-///
-/// Worse, it cannot be caught in development: `npm run tauri dev` serves the page
-/// from `http://localhost:1420`, which ollama *does* allow, so the pull works on
-/// a Windows dev machine and fails only in the packaged build.
-///
-/// A subprocess sends no `Origin` at all, so the question does not arise on any
-/// platform — which is the whole fix. The webview is still told every byte, so
-/// the progress remains ollama's own accounting rather than this file's; only the
-/// hop it takes to get there has changed.
-///
-/// `curl` rather than an HTTP crate, for the reason `where_am_i` gives below:
-/// this file already reaches the outside world by running something and reading
-/// what it says, and the update plugin's `reqwest` is not worth a direct
-/// dependency to do it differently.
-///
-/// Before any of that, it waits for ollama to be up — see `await_ollama` — and
-/// gives up only after `OLLAMA_WAIT` has passed with no answer. A refusal after
-/// that wait is genuinely a machine with no daemon on it, rather than one whose
-/// daemon had not finished starting, which is the distinction the first run used
-/// to get wrong. Every entry into a pull goes through that wait, including the
-/// two ways back in from a failure or a pause, so a resume re-checks readiness
-/// without the screen having to ask for it.
-#[tauri::command]
-pub async fn ollama_pull(
-    app: tauri::AppHandle,
-    model: String,
-    id: String,
-    on_event: tauri::ipc::Channel<PullEvent>,
-) -> Result<(), String> {
-    let pull = Arc::new(Pull {
-        child: Mutex::new(None),
-        stopped: AtomicBool::new(false),
-    });
-    app.state::<Pulls>()
-        .0
-        .lock()
-        .map_err(|_| "the pull registry is poisoned".to_string())?
-        .insert(id.clone(), pull.clone());
-
-    let registry = app.clone();
-    let key = id.clone();
-
-    let outcome = off_thread(move || {
-        // Nothing is asked of ollama until it has answered something. This is the
-        // Windows first run: the pull used to be fired at a daemon that had not
-        // finished starting, so `ollama app.exe` had been launched and the
-        // transfer still died on the connection. Now the launch is made here if
-        // it is needed, the version endpoint is polled until it comes up, and the
-        // transfer begins only then. The failure is reported by this code, and
-        // only once the wait has actually run out.
-        let began = Instant::now();
-        let ready = await_ollama(
-            began + OLLAMA_WAIT,
-            OLLAMA_POLL,
-            ollama_answers,
-            start_ollama,
-            || {
-                // A failed send means the window has gone and there is nobody
-                // left to wait for; a stop means the user has already said so and
-                // the screen has already drawn it. Either way, stop waiting.
-                //
-                // The number is time spent, not time left: a countdown to the
-                // moment the app gives up is a worse thing to watch for half a
-                // minute than a figure that says it is still trying.
-                !pull.stopped.load(Ordering::SeqCst)
-                    && on_event
-                        .send(PullEvent::Waiting {
-                            seconds: began.elapsed().as_secs() as u32,
-                        })
-                        .is_ok()
-            },
-        );
-        if !ready {
-            // A stop during the wait is the user's own doing and is not reported
-            // as a failure — the same rule the reaping below follows.
-            if !pull.stopped.load(Ordering::SeqCst) {
-                let _ = on_event.send(PullEvent::Unreachable {
-                    message: format!(
-                        "nothing answered on {OLLAMA_HOST} for {}s — start Ollama, \
-                         then try again",
-                        OLLAMA_WAIT.as_secs()
-                    ),
-                });
-            }
-            return Ok(());
-        }
-
-        // `--data` with the body handed to the process directly, rather than a
-        // shell-quoted string: a model tag needs no escaping on any platform, and
-        // a tag containing a quote could not break out of one.
-        let body = serde_json::json!({ "model": model, "stream": true }).to_string();
-
-        let mut child = match silent("curl")
-            .args([
-                "--silent",
-                "--show-error",
-                // Retry the connection, not the transfer. Ollama has just
-                // answered the readiness probe above, so a refusal here means it
-                // went away in between — and ten attempts a second apart is the
-                // difference between a failed download and a slow one. `--retry`
-                // does cover a POST on curl 8.x, which is worth stating because
-                // it historically covered only idempotent methods.
-                "--retry",
-                "10",
-                "--retry-connrefused",
-                "--retry-delay",
-                "1",
-                // `-N`. Without it curl buffers, and a buffered stream is a
-                // progress bar that sits still and then jumps to the end.
-                "--no-buffer",
-                "--request",
-                "POST",
-                "--header",
-                "Content-Type: application/json",
-                "--data",
-                body.as_str(),
-                OLLAMA_PULL_URL,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
-            Ok(child) => child,
-            // Reported rather than returned: a machine without `curl` is an
-            // environment this code cannot change, and the screen has a sentence
-            // for it. `Err` is kept for the failures that are this file's own.
-            Err(e) => {
-                let _ = on_event.send(PullEvent::Unreachable {
-                    message: format!("couldn't run curl: {e}"),
-                });
-                return Ok(());
-            }
-        };
-
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "curl gave nothing to read".to_string())?;
-        let stderr = child.stderr.take();
-
-        if let Ok(mut slot) = pull.child.lock() {
-            *slot = Some(child);
-        }
-
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        // Held rather than returned on the spot, so that every way out of the
-        // loop passes through the reaping below. A `curl` dropped without a
-        // `wait` is a process left behind, and this one is spawned again on every
-        // resume — so a pause loop would be the way to collect a few dozen of
-        // them.
-        let mut broken: Option<String> = None;
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => break,
-                Ok(_) => {
-                    let text = line.trim_end();
-                    if text.is_empty() {
-                        continue;
-                    }
-                    // A send that fails means the window is gone. There is nobody
-                    // left to report to, so the only useful thing to do is stop
-                    // reading and let the process be reaped below.
-                    if on_event
-                        .send(PullEvent::Line {
-                            line: text.to_string(),
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    broken = Some(format!("reading ollama's stream failed: {e}"));
-                    break;
-                }
-            }
-        }
-
-        // Take the child back to reap it. When `ollama_pull_cancel` has killed
-        // it, this returns the kill immediately rather than waiting out the
-        // transfer.
-        let status = pull
-            .child
-            .lock()
-            .map_err(|_| "the pull was poisoned".to_string())?
-            .take()
-            .map(|mut child| child.wait());
-
-        // `--show-error` is what puts a connection refusal here rather than
-        // nowhere; it is read after the wait because curl writes it once and
-        // never fills a pipe.
-        let mut complaint = String::new();
-        if let Some(mut err) = stderr {
-            let _ = err.read_to_string(&mut complaint);
-        }
-
-        // A deliberate stop is not a failure and must not be reported as one: the
-        // web layer has already drawn the pause, and every byte that arrived is
-        // on disk waiting to be resumed.
-        if pull.stopped.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-
-        // Now that the process has been reaped, the read error can be the answer.
-        // It is this file's own failure rather than ollama's, so it goes back as
-        // an `Err`: there is no sentence for it on the screen and inventing one
-        // would be worse than the shape the web layer already has for a command
-        // that would not run.
-        if let Some(message) = broken {
-            return Err(message);
-        }
-
-        match status {
-            Some(Ok(status)) if status.success() => Ok(()),
-            Some(Ok(status)) => {
-                let detail = complaint.trim();
-                let message = if detail.is_empty() {
-                    format!("ollama's pull stopped ({status})")
-                } else {
-                    detail.to_string()
-                };
-                // curl's own `CURLE_COULDNT_CONNECT`. Loopback either answers or
-                // refuses, so this is the whole of "ollama is not running" — the
-                // ordinary state of a machine that has never started it, and the
-                // one failure that should say *we could not reach it* rather than
-                // *it stopped*. Nothing was transferred either way, but only this
-                // one is a fact about the machine rather than about the transfer.
-                let event = if status.code() == Some(7) {
-                    PullEvent::Unreachable { message }
-                } else {
-                    PullEvent::Failed { message }
-                };
-                // Not an `Err`: the environment, or ollama, said what went wrong
-                // and the screen has a sentence for it. `Err` is kept for the
-                // failures that are this file's own.
-                let _ = on_event.send(event);
-                Ok(())
-            }
-            Some(Err(e)) => Err(format!("couldn't wait for curl: {e}")),
-            // No child, which only `ollama_pull_cancel` can arrange.
-            None => Ok(()),
-        }
-    })
-    .await;
-
-    // Always, on every path: an entry left behind is a map that grows for the
-    // life of the process and an id that a later cancel would find and kill
-    // something under.
-    if let Ok(mut registry) = registry.state::<Pulls>().0.lock() {
-        registry.remove(&key);
-    }
-
-    outcome
-}
-
-/// Stop a pull this app started.
-///
-/// The one thing the transport has to add, because a stream that cannot be
-/// interrupted makes the pause button a lie. Killing `curl` leaves ollama's
-/// partial blob exactly where it is — not a side effect to tolerate but the point:
-/// resuming posts the same request, and ollama carries on from what it already
-/// has rather than starting over.
-#[tauri::command]
-pub async fn ollama_pull_cancel(app: tauri::AppHandle, id: String) -> Result<(), String> {
-    let pull = app
-        .state::<Pulls>()
-        .0
-        .lock()
-        .map_err(|_| "the pull registry is poisoned".to_string())?
-        .get(&id)
-        .cloned();
-
-    // An id with nothing behind it is a pause that raced the end of the transfer,
-    // which is not a failure worth telling anyone about.
-    let Some(pull) = pull else {
-        return Ok(());
-    };
-
-    pull.stopped.store(true, Ordering::SeqCst);
-    if let Ok(mut slot) = pull.child.lock()
-        && let Some(child) = slot.as_mut()
-    {
-        let _ = child.kill();
-    }
-    Ok(())
-}
-
 /* ---------------------------------- place ---------------------------------- */
 
 /// Roughly where this machine is, for the single dot on the settings globe.
@@ -2975,177 +2484,6 @@ pub async fn where_am_i() -> Result<PlaceRead, String> {
         })
     })
     .await
-}
-
-/* ---------------------------------- tests ---------------------------------- */
-
-/// The readiness wait, exercised with a probe and a starter that are both
-/// counters, so the whole thing runs in milliseconds and answers about this code
-/// rather than about what happens to be installed on the machine.
-///
-/// It lives here, at the foot of the module, rather than in `tests/` beside
-/// `manifest.rs`: `await_ollama` is private, and the four closures it takes are
-/// the seams that make it testable — a test outside the crate could reach
-/// neither.
-///
-/// What is deliberately *not* here is a test against a live daemon. That would
-/// pass on a developer's laptop and fail on a build machine, reporting on the
-/// machine instead of on the code. The one arm that can be checked anywhere is
-/// the refusal, and it is checked below.
-#[cfg(test)]
-mod readiness {
-    use super::*;
-    use std::cell::Cell;
-
-    /// Short enough that the suite is instant, long enough that the poll loop
-    /// gets several goes at it.
-    const QUICK: Duration = Duration::from_millis(10);
-
-    /// A deadline a known number of polls away, so what the loop does is exact
-    /// rather than a race against the wall clock.
-    fn deadline_after(steps: u32) -> Instant {
-        Instant::now() + QUICK * steps
-    }
-
-    /// A counter two closures can share.
-    ///
-    /// The probe and the starter are both handed to `await_ollama` at once, so
-    /// they are alive together and each is `FnMut` — a plain `u32` captured by
-    /// both is two mutable borrows of one place, which does not compile. A
-    /// `Cell` is borrowed shared, and a counter has no need to be anything else.
-    #[derive(Default)]
-    struct Tally(Cell<u32>);
-
-    impl Tally {
-        fn bump(&self) -> u32 {
-            self.0.set(self.0.get() + 1);
-            self.0.get()
-        }
-
-        fn get(&self) -> u32 {
-            self.0.get()
-        }
-    }
-
-    #[test]
-    fn a_daemon_that_is_already_answering_is_neither_watched_nor_started() {
-        let probes = Tally::default();
-        let starts = Tally::default();
-        let ready = await_ollama(
-            deadline_after(5),
-            QUICK,
-            || probes.bump() > 0,
-            || {
-                starts.bump();
-                true
-            },
-            || true,
-        );
-
-        assert!(ready);
-        assert_eq!(
-            probes.get(),
-            1,
-            "one probe is the answer; the rest is waste"
-        );
-        assert_eq!(
-            starts.get(),
-            0,
-            "nothing may be started when nothing is wrong"
-        );
-    }
-
-    #[test]
-    fn the_daemon_is_started_once_over_a_whole_wait_and_only_after_a_refusal() {
-        let probes = Tally::default();
-        let starts = Tally::default();
-        let probes_when_started = Cell::new(None);
-        let ready = await_ollama(
-            deadline_after(5),
-            QUICK,
-            || probes.bump() > 2,
-            || {
-                starts.bump();
-                probes_when_started.set(Some(probes.get()));
-                false
-            },
-            || true,
-        );
-
-        assert!(ready, "the third probe answers, so the wait must succeed");
-        assert_eq!(starts.get(), 1, "once for the wait, not once per second");
-        // The order is the point. A launcher racing a daemon that is already up
-        // fails to bind the port, so the start has to answer a refusal.
-        assert_eq!(
-            probes_when_started.get(),
-            Some(1),
-            "the daemon was started before a probe had said no"
-        );
-    }
-
-    #[test]
-    fn a_daemon_that_never_answers_gives_up_at_the_deadline() {
-        let mut ticks = 0;
-        let began = Instant::now();
-        let ready = await_ollama(
-            Instant::now() + QUICK * 3,
-            QUICK,
-            || false,
-            || true,
-            || {
-                ticks += 1;
-                true
-            },
-        );
-
-        assert!(
-            !ready,
-            "nothing answered, so the wait must not claim it did"
-        );
-        assert!(ticks >= 1, "the screen is told the wait is happening");
-        assert!(
-            began.elapsed() < Duration::from_secs(5),
-            "the deadline is a deadline, not a suggestion: {:?}",
-            began.elapsed()
-        );
-    }
-
-    #[test]
-    fn a_tick_that_says_stop_abandons_the_wait_on_that_tick() {
-        let mut ticks = 0;
-        let ready = await_ollama(
-            Instant::now() + Duration::from_secs(60),
-            QUICK,
-            || false,
-            || true,
-            || {
-                ticks += 1;
-                false
-            },
-        );
-
-        assert!(!ready, "a cancelled wait has not found a daemon");
-        assert_eq!(ticks, 1, "a stop is acted on at once, not next second");
-    }
-
-    /// The refusal, which is the arm a first run actually meets, and the only
-    /// one that can be checked without a daemon on the machine. A closed loopback
-    /// port refuses immediately rather than sitting on the timeout, so this also
-    /// pins that the probe costs about nothing when the answer is no.
-    ///
-    /// If `curl` is missing entirely the spawn fails and the probe still answers
-    /// `false`, so this stays green on a machine that cannot run the pull at all
-    /// — which is the honest reading, since such a machine has no first run.
-    #[test]
-    fn a_port_nothing_listens_on_is_not_ollama() {
-        let began = Instant::now();
-        assert!(!ollama_answers_at("http://127.0.0.1:45999/api/version"));
-        assert!(
-            began.elapsed() < Duration::from_secs(3),
-            "a closed loopback port must refuse at once, not time out: {:?}",
-            began.elapsed()
-        );
-    }
 }
 
 /* ---------------------------------- launch --------------------------------- */
@@ -3277,8 +2615,11 @@ mod join_log {
     use super::*;
 
     /// What the CLI wrote on the run this was written for, in the shape the screen
-    /// would have read it: a banner, then the first act failing.
-    const A_DEAD_ATTEMPT: &str = "✗ ollama not found.\n# install it from https://ollama.com/download, then run this again.\n";
+    /// would have read it: the first act of a join, failing. `check_binaries` refusing
+    /// is that act — cloudflared is the one program the join cannot fetch for itself,
+    /// so a machine without it dies here, before it reaches the network at all.
+    const A_DEAD_ATTEMPT: &str =
+        "✗ cloudflared not found.\n# install it with: brew install cloudflared\n";
 
     #[test]
     fn a_second_attempt_is_read_from_its_own_first_byte_and_not_the_first_attempts() {
@@ -3422,9 +2763,9 @@ mod seed {
     }
 
     /// The rule that matters more than the placing does. `~/.common-network` may hold a
-    /// CLI the user installed, or one their own `common` has since updated — and the app
-    /// writing over it would be the same failure the fetch avoids for Ollama, where a
-    /// second copy is a copy with none of the models.
+    /// CLI the user installed, or one their own `common` has since updated — and this app
+    /// writing its own bundle over that would hand a working machine a program it did not
+    /// ask for. So the bundle wins only over what is strictly older; see `seed_cli`.
     #[test]
     fn a_machine_that_already_has_the_cli_keeps_the_one_it_has() {
         let to = scratch("no-clobber-home");

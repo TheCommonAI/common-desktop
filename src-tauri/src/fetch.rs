@@ -1,20 +1,20 @@
 //! The first-run bootstrap: everything the app needs to be a node.
 //!
-//! This app runs a Python command-line tool and, to contribute, an Ollama beside
-//! it. Both have always been prerequisites the user was expected to arrive with:
-//! `backend.rs` says so at the top of the file — "the Python toolchain at
-//! `~/.common-network` is already installed on any machine that can contribute".
-//! This module is the change to that. On first run the app now goes and gets
-//! them, checks them, and says plainly what it could and could not do.
+//! This app runs a Python command-line tool and, to contribute, a cloudflared
+//! tunnel beside it. Both have always been prerequisites the user was expected to
+//! arrive with: `backend.rs` says so at the top of the file — "the Python
+//! toolchain at `~/.common-network` is already installed on any machine that can
+//! contribute". This module is the change to that. On first run the app now goes
+//! and gets them, checks them, and says plainly what it could and could not do.
 //!
 //! **The installers stay small.** `tauri.conf.json` carries no `externalBin`, and
-//! the only thing under `resources` is the CLI itself — four `.py` files, 272 KB
+//! the only thing under `resources` is the CLI itself — five `.py` files, 350 KB
 //! between them, which is the price of a first run that works on a machine which has
-//! never had the toolchain. Python and Ollama are a hundred and fifty megabytes
+//! never had the toolchain. Python and cloudflared are some tens of megabytes
 //! between them and are still fetched rather than shipped, for the reason that
 //! matters: a payload fetched after the fact can be replaced without cutting a
 //! release. The CLI is bundled because it is the one payload that **cannot** be
-//! fetched — see below — and because at 272 KB it does not buy anything to defer it.
+//! fetched — see below — and because at 350 KB it does not buy anything to defer it.
 //!
 //! The bundled CLI is a *seed and not a pinned copy*. The first time it runs it
 //! replaces itself from the network's `main` branch — its own self-update, which is
@@ -41,12 +41,15 @@
 //! - **The Common CLI**, from the bundle rather than from the network, placed into
 //!   `~/.common-network` by `backend.rs`'s seed — see the section below for why
 //!   the network cannot supply it, and why there is no payload for it here.
-//! - **Ollama**, from `ollama/ollama`'s releases, into
-//!   `~/.common-network/runtime/ollama` — and **only when there is no Ollama
-//!   already**. A machine that has Ollama keeps the one it has; this app is not
-//!   in the business of replacing a working install with its own idea of one.
 //!
 //! [pbs]: https://github.com/astral-sh/python-build-standalone
+//!
+//! Ollama used to be fetched here too: about a gigabyte, from `ollama/ollama`'s
+//! releases into `~/.common-network/runtime/ollama`, and only on a machine that
+//! had none already, since a user who has Ollama has models in it. There is no
+//! second model runtime on the machine any more — the CLI runs `llama.cpp`'s
+//! `llama-server`, and the join fetches the weights it needs itself — so a
+//! payload here would have had nothing to install.
 //!
 //! ## Verify, then install. Never the other way round.
 //!
@@ -86,7 +89,7 @@
 //! installer and is placed by `cli_script` in `backend.rs`, which also decides when
 //! the bundle may replace what is already there.
 //!
-//! There used to be a fourth payload here whose whole purpose was to write down the
+//! There used to be another payload here whose whole purpose was to write down the
 //! shape a release would have to publish: the asset names were **invented** rather
 //! than observed, and its checksum was an empty pin that fails closed. It has been
 //! removed. It could not install anything and never would without a release
@@ -117,9 +120,8 @@
 //! The house rules from `backend.rs` are kept: every network hop is a `curl`
 //! subprocess through [`silent`], no dependency is added — including for the
 //! digest, which is [`crate::sha256`] — and every command does its blocking work
-//! off the main thread. Progress is a [`tauri::ipc::Channel`], the same as
-//! `ollama_pull`'s, so the screen can draw a transfer without the webview making
-//! a request.
+//! off the main thread. Progress is a [`tauri::ipc::Channel`], so the screen can
+//! draw a transfer without the webview making a request.
 
 use serde::Serialize;
 use std::io::Read;
@@ -143,9 +145,6 @@ const PBS_BUILD: &str = "20261013";
 /// The CPython these builds carry.
 const PYTHON_VERSION: &str = "3.12.15";
 
-/// The Ollama whose payloads are named below. Also pinned, for the same reason.
-const OLLAMA_VERSION: &str = "0.40.4";
-
 /// The cloudflared whose payloads are named below, and the digest of each.
 ///
 /// Pinned rather than "latest" for the reason every other payload here is: a
@@ -155,7 +154,6 @@ const OLLAMA_VERSION: &str = "0.40.4";
 const CLOUDFLARED_VERSION: &str = "2026.10.1";
 
 const PBS_BASE: &str = "https://github.com/astral-sh/python-build-standalone/releases/download";
-const OLLAMA_BASE: &str = "https://github.com/ollama/ollama/releases/download";
 const CLOUDFLARED_BASE: &str = "https://github.com/cloudflare/cloudflared/releases/download";
 
 /// The archive a payload arrives in, which decides how it is unpacked.
@@ -164,13 +162,6 @@ enum Archive {
     /// `.tar.gz` / `.tgz` — `tar -xzf`, which is on every platform this ships to
     /// (Windows 10 and later include bsdtar as `tar.exe`).
     TarGz,
-    /// `.zip` — `unzip` on macOS and Linux, PowerShell's `Expand-Archive` on
-    /// Windows, which has no `unzip`.
-    Zip,
-    /// `.tar.zst` — ollama's Linux packaging. Named rather than omitted so the
-    /// table is honest about what Linux would need, and blocked everywhere
-    /// because nothing this app can call unpacks zstd.
-    TarZst,
     /// Nothing at all: the download *is* the program, and it is installed under
     /// the name [`Payload::member`] gives it. cloudflared's Linux and Windows
     /// builds arrive this way, while its macOS builds are a `.tgz` holding the
@@ -203,8 +194,9 @@ struct Payload {
     checksum: Checksum,
     archive: Archive,
     /// The directory inside the archive holding the thing itself, when the
-    /// archive wraps everything in one — `python-build-standalone` does, ollama's
-    /// Windows zip does not. `None` means "the archive's contents, as they are".
+    /// archive wraps everything in one — `python-build-standalone` does. `None`
+    /// means "the archive's contents, as they are", which no payload in the table
+    /// needs today.
     ///
     /// For the two shapes that resolve to a single file — [`Archive::Raw`], and a
     /// `.tgz` whose whole contents are the program — this is that file's name
@@ -280,30 +272,17 @@ type AssetRow = (
     Option<&'static str>,
 );
 
-/// Ollama's payloads, by the machine they are for. Every platform is listed
+/// cloudflared's payloads, by the machine they are for. Every platform is listed
 /// rather than selected by `cfg!` for the reason [`platform_key`] gives.
-// `rustfmt` would explode each row to one field per line, because a tuple
-// element wider than `short_array_element_width_threshold` forces the whole
-// literal vertical. Four rows become thirty lines and the table stops being a
-// table. The rows are all inside the line-width limit; this keeps them aligned.
-#[rustfmt::skip]
-const OLLAMA_ASSETS: &[AssetRow] = &[
-    // The macOS app, as a zip holding `Ollama.app`. Not `ollama-darwin.tgz`,
-    // which holds the same thing and is also listed by ollama's checksum file —
-    // the zip is what ollama's own installer uses, so it is the one whose layout
-    // is known.
-    ("macos", "aarch64", "Ollama-darwin.zip", Archive::Zip, Some("Ollama.app")),
-    ("macos", "x86_64", "Ollama-darwin.zip", Archive::Zip, Some("Ollama.app")),
-    ("windows", "x86_64", "ollama-windows-amd64.zip", Archive::Zip, None),
-    ("linux", "x86_64", "ollama-linux-amd64.tar.zst", Archive::TarZst, None),
-];
-
-/// cloudflared's payloads, by the machine they are for.
 ///
 /// A row names the file each platform arrives in, the container it is in, and the
 /// name it is installed under — which is not the asset name on any platform, since
 /// the assets carry their platform in the file name and the program does not.
-#[rustfmt::skip] // See `OLLAMA_ASSETS`.
+// `rustfmt` would explode each row to one field per line, because a tuple element
+// wider than `short_array_element_width_threshold` forces the whole literal
+// vertical. Four rows become thirty lines and the table stops being a table. The
+// rows are all inside the line-width limit; this keeps them aligned.
+#[rustfmt::skip]
 const CLOUDFLARED_ASSETS: &[AssetRow] = &[
     ("macos", "aarch64", "cloudflared-darwin-arm64.tgz", Archive::TarGz, Some("cloudflared")),
     ("macos", "x86_64", "cloudflared-darwin-amd64.tgz", Archive::TarGz, Some("cloudflared")),
@@ -391,14 +370,10 @@ pub fn runtime_bin_dir(home: &Path) -> PathBuf {
 }
 
 /// Everything that can be fetched on this machine, in the order it makes sense to
-/// do it: the runtime the CLI needs, the tunnel it needs, then the model server.
+/// do it: the runtime the CLI needs, then the tunnel it needs.
 fn payloads(home: &Path) -> Vec<Payload> {
     let key = platform_key();
-    vec![
-        python_payload(home, key),
-        cloudflared_payload(home, key),
-        ollama_payload(home, key),
-    ]
+    vec![python_payload(home, key), cloudflared_payload(home, key)]
 }
 
 fn python_payload(home: &Path, key: (&str, &str)) -> Payload {
@@ -474,61 +449,6 @@ fn cloudflared_payload(home: &Path, key: (&str, &str)) -> Payload {
         mode: Some(0o755),
         blocked,
         probe: cloudflared_present,
-    }
-}
-
-fn ollama_payload(home: &Path, key: (&str, &str)) -> Payload {
-    let named = OLLAMA_ASSETS
-        .iter()
-        .find(|(os, arch, ..)| (*os, *arch) == key);
-
-    let (asset, url, archive, member, blocked) = match named {
-        Some((_, _, asset, archive, member)) => (
-            *asset,
-            format!("{OLLAMA_BASE}/v{OLLAMA_VERSION}/{asset}"),
-            *archive,
-            *member,
-            // The one platform-specific block that is not about publication.
-            // Ollama ships Linux as `.tar.zst` and nothing on a stock machine
-            // unpacks zstd — `tar -xzf` refuses it, and the `.tgz` ollama's own
-            // installer falls back to is not published for current versions.
-            (*archive == Archive::TarZst).then(|| {
-                "ollama publishes this platform as a .tar.zst, which needs a zstd \
-                 decompressor this app does not ship"
-                    .to_string()
-            }),
-        ),
-        None => (
-            "(no build for this machine)",
-            String::new(),
-            Archive::Zip,
-            None,
-            Some(format!(
-                "no Ollama build is published for {} {}",
-                key.0, key.1
-            )),
-        ),
-    };
-
-    Payload {
-        id: "ollama",
-        label: "Ollama",
-        version: OLLAMA_VERSION.to_string(),
-        asset: asset.to_string(),
-        url,
-        checksum: Checksum::Published(format!("{OLLAMA_BASE}/v{OLLAMA_VERSION}/sha256sum.txt")),
-        archive,
-        member,
-        // Under the runtime directory, and deliberately not `/Applications`:
-        // replacing the user's own Ollama needs an administrator and is not this
-        // app's decision to make.
-        dest: match member {
-            Some(member) => runtime_dir(home).join("ollama").join(member),
-            None => runtime_dir(home).join("ollama"),
-        },
-        mode: None,
-        blocked,
-        probe: ollama_present,
     }
 }
 
@@ -714,51 +634,15 @@ fn cloudflared_name() -> &'static str {
     }
 }
 
-/// An Ollama that is already installed, wherever the platform keeps it.
-///
-/// Checked before anything is downloaded and, when found, the fetch is skipped
-/// entirely. This is the "do not clobber" rule at its most important: a user who
-/// has Ollama has models in it, and a second copy that the app installed beside
-/// it would be a second copy with none of them.
-fn ollama_present(home: &Path) -> Option<String> {
-    if let Some(text) = reported_version("ollama", &["--version"]) {
-        return Some(format!("ollama on PATH ({text})"));
-    }
-
-    #[cfg(target_os = "macos")]
-    if Path::new("/Applications/Ollama.app").is_dir() {
-        return Some("Ollama.app in /Applications".to_string());
-    }
-
-    #[cfg(windows)]
-    if let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()) {
-        let app = PathBuf::from(local)
-            .join("Programs")
-            .join("Ollama")
-            .join("ollama.exe");
-        if app.is_file() {
-            return Some(format!("Ollama at {}", app.display()));
-        }
-    }
-
-    // One a previous run of this app fetched.
-    let fetched = runtime_dir(home).join("ollama");
-    if fetched.exists() {
-        return Some(format!("the copy at {}", fetched.display()));
-    }
-
-    None
-}
-
 /* -------------------------------- the wire -------------------------------- */
 
 /// One message of the bootstrap, on its way to the webview.
 ///
 /// The variants are the states a payload passes through plus the ways it can end
-/// without being installed, and the split is the same one `PullEvent` makes:
-/// `Present` and `Unavailable` are not failures, they are answers, and the screen
-/// says a different sentence for each. `Failed` is the only one that means
-/// something went wrong, and its message is written to be a next step.
+/// without being installed, and the split between them is the whole reason there
+/// are three: `Present` and `Unavailable` are not failures, they are answers, and
+/// the screen says a different sentence for each. `Failed` is the only one that
+/// means something went wrong, and its message is written to be a next step.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum BootstrapEvent {
@@ -829,9 +713,8 @@ pub struct PayloadStatus {
 
 /// The one bootstrap this process can have running, and the switch that stops it.
 ///
-/// One rather than a map keyed by id, unlike `Pulls`: a pull is per-model and
-/// several can be going at once, while a bootstrap is a one-off that installs
-/// three things in a row. There is nothing a second concurrent one could mean.
+/// One rather than a map keyed by id: a bootstrap is a one-off that installs two
+/// things in a row, and there is nothing a second concurrent one could mean.
 #[derive(Default)]
 pub struct Bootstrap {
     /// The `curl` of the transfer in flight, once it has started. Behind a mutex
@@ -899,12 +782,12 @@ fn content_length(url: &str) -> Option<u64> {
 
 /// The digest `sha256sum` would print for `asset`, out of a file it wrote.
 ///
-/// Three spellings are in the wild and all three are accepted: the bare name,
-/// `./name` — which is what ollama writes — and `*name`, which is what
-/// `sha256sum --binary` writes. The name is compared on its last path component
-/// so that a leading directory does not matter. Lines that are not a digest and a
-/// name are skipped rather than refused, so a comment or a blank line does not
-/// make the whole file unreadable.
+/// Two spellings are in the wild and both are accepted: the bare name, which is
+/// what `python-build-standalone` writes, and `*name`, which is what
+/// `sha256sum --binary` writes. The name is compared on its last path component,
+/// so a `./` or a leading directory does not matter. Lines that are not a digest
+/// and a name are skipped rather than refused, so a comment or a blank line does
+/// not make the whole file unreadable.
 fn digest_for(sums: &str, asset: &str) -> Option<String> {
     for line in sums.lines() {
         let line = line.trim();
@@ -1148,38 +1031,6 @@ fn extract(payload: &Payload, file: &Path, into: &Path) -> Result<(), String> {
             command.arg("-xzf").arg(file).arg("-C").arg(into);
             run(command)?;
         }
-        Archive::Zip => {
-            if cfg!(windows) {
-                let mut command = silent("powershell");
-                command
-                    .args([
-                        "-NoProfile",
-                        "-NonInteractive",
-                        "-Command",
-                        "Expand-Archive",
-                    ])
-                    .arg("-LiteralPath")
-                    .arg(file)
-                    .arg("-DestinationPath")
-                    .arg(into)
-                    .arg("-Force");
-                run(command)?;
-            } else {
-                let mut command = silent("unzip");
-                command.arg("-q").arg(file).arg("-d").arg(into);
-                run(command)?;
-            }
-        }
-        // Refused rather than attempted: `tar -xzf` on a zstd stream fails with a
-        // message about the gzip magic that says nothing about zstd, and the
-        // caller has a better sentence for this — see `ollama_payload`.
-        Archive::TarZst => {
-            return Err(
-                "this download is a .tar.zst, which needs a zstd decompressor this app \
-                 does not ship"
-                    .to_string(),
-            );
-        }
         // The download is the program. Copied rather than moved, so that the
         // caller's cleanup — which removes the staging file and the unpacked
         // directory together — stays the same shape for every payload.
@@ -1288,8 +1139,7 @@ fn install(source: &Path, dest: &Path) -> Result<(), String> {
 /// Do one payload: probe, download, verify, unpack, place.
 ///
 /// Takes a callback rather than a `Channel` so that the whole sequence can be run
-/// by a test without a window — the same seam `await_ollama` in `backend.rs`
-/// takes its closures for.
+/// by a test without a window.
 fn ensure(home: &Path, payload: &Payload, state: &Bootstrap, tell: &mut Tell<'_>) -> Outcome {
     if !tell(BootstrapEvent::Checking {
         payload: payload.id.to_string(),
@@ -1624,13 +1474,14 @@ mod tests {
         let file = format!(
             "# a comment, and a blank line\n\
              \n\
-             {SUM}  ./ollama-darwin.zip\n\
+             {SUM}  ./a-directory/some-file.zip\n\
              1111111111111111111111111111111111111111111111111111111111111111 *some-other.zip\n\
              {SUM}  cpython-3.12.15+20261013-aarch64-apple-darwin-install_only.tar.gz\n"
         );
 
-        // `./name` — what ollama writes.
-        assert_eq!(digest_for(&file, "ollama-darwin.zip").as_deref(), Some(SUM));
+        // A `./` and a directory, which are stripped: the name is the last
+        // component, and this is `some-file.zip` however it was spelled.
+        assert_eq!(digest_for(&file, "some-file.zip").as_deref(), Some(SUM));
         // `*name` — what `sha256sum --binary` writes.
         assert_eq!(
             digest_for(&file, "some-other.zip").as_deref(),
@@ -1704,18 +1555,15 @@ mod tests {
             ("linux", "x86_64"),
         ] {
             assert!(pbs_triple(key).is_some(), "no Python build for {key:?}");
-            for (table, name) in [
-                (OLLAMA_ASSETS, "Ollama"),
-                (CLOUDFLARED_ASSETS, "cloudflared"),
-            ] {
-                assert!(
-                    table.iter().any(|(os, arch, ..)| (*os, *arch) == key),
-                    "no {name} payload for {key:?}",
-                );
-            }
+            assert!(
+                CLOUDFLARED_ASSETS
+                    .iter()
+                    .any(|(os, arch, ..)| (*os, *arch) == key),
+                "no cloudflared payload for {key:?}",
+            );
         }
 
-        for (os, arch, asset, ..) in OLLAMA_ASSETS.iter().chain(CLOUDFLARED_ASSETS) {
+        for (os, arch, asset, ..) in CLOUDFLARED_ASSETS {
             assert!(
                 !asset.is_empty() && !asset.contains('/'),
                 "{os}/{arch} names a payload that is not a bare file name: {asset}",

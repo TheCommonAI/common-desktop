@@ -1,8 +1,5 @@
 import {
   OnboardingError,
-  type DownloadProgress,
-  type DownloadRequest,
-  type DownloadResult,
   type EnsureJoinedResult,
   type HardwareReport,
   type JoinProgress,
@@ -13,7 +10,6 @@ import {
   type LaneSuggestion,
   type OnboardingService,
   type OnboardingErrorCode,
-  type PausableTask,
   type ProgressOptions,
   type ResourceLimits,
   type ScanProgress,
@@ -39,16 +35,18 @@ import { LANES, findModel, fitsHere, gb, modelFor, tierFor } from "./models";
  * ── A note on the numbers ────────────────────────────────────────────────────
  *
  * The stub runs in seconds what its captions say takes minutes. That is
- * deliberate and it is the only place this file is not honest: the rate it
- * reports is a plausible line rate, so the estimate the user reads is the
- * estimate a real transfer would give. The pacing is the demo's.
+ * deliberate and it is the only place this file is not honest: the weight fetch
+ * ticks through ten percent at a time over a few seconds, where the real one
+ * spends minutes on the same lines. The shape is real — the fields, the order,
+ * the sentence the caption goes back to when the bytes are in hand — and only
+ * the pacing is the demo's.
  *
  * ── Reaching the other states ────────────────────────────────────────────────
  *
  * In development, `window.commonStub` exposes `options`, `gb()` and
  * `findModel()`. Set a field, walk the flow again:
  *
- *   commonStub.options.freeDiskBytes = gb(3)      // the blocked download
+ *   commonStub.options.freeDiskBytes = gb(3)      // no room for the weights
  *   commonStub.options.memoryBytes = gb(8)       // the light tier
  *   commonStub.options.onBattery = true          // the battery-derived default
  *   commonStub.options.networkAskLane = "code"   // the lane conflict
@@ -207,32 +205,8 @@ function report(): HardwareReport {
 const SCAN_FIELD_MS = 420;
 const ASK_MS = 1100;
 const SAVE_MS = 700;
-const VERIFY_MS = 900;
-
-/** Ticks per download, and the pause between them. Together these are the
- *  demo's pacing: about ten seconds end to end, whatever the file's size. */
-const DOWNLOAD_TICKS = 42;
-const TICK_MS = 220;
-
-/** The rate the caption reports, in bytes per second. The stub is faster than
- *  this and always will be; see the note at the top of the file. 17.5 MB/s puts
- *  a four-gigabyte model at about four minutes, which is what the design was
- *  drawn against. */
-const REPORTED_RATE = 17_500_000;
 
 const TEST_PROMPT = { prompt: "What is 17 × 24?", answer: "408", latencyMs: 1400 };
-
-/**
- * Bytes already on disk, by model id.
- *
- * The contract says a cancelled or failed transfer leaves its partial file
- * behind, so that calling again resumes rather than restarts. A real
- * implementation finds those bytes on disk; the stub keeps the count, because
- * the count is what a resumed transfer has to report for the caption
- * "resuming will be quick" to be telling the truth rather than flattering the
- * user.
- */
-const partial = new Map<string, number>();
 
 function scanHardware(opts?: ProgressOptions<ScanProgress>): Task<HardwareReport> {
   const j = job();
@@ -322,117 +296,6 @@ function suggestLane(hardware: HardwareReport): Task<LaneSuggestion> {
   };
 }
 
-function downloadModel(
-  request: DownloadRequest,
-  opts?: ProgressOptions<DownloadProgress>,
-): PausableTask<DownloadResult> {
-  const j = job();
-  const d = deferred<DownloadResult>();
-  const settle = settler(j);
-
-  const model = findModel(request.modelId);
-  const totalBytes = model?.bytes ?? gb(4);
-  const chunk = Math.ceil(totalBytes / DOWNLOAD_TICKS);
-
-  // Seeded from the partial file, so a transfer picked up after a cancel or a
-  // failure continues rather than starting over.
-  let receivedBytes = Math.min(totalBytes, partial.get(request.modelId) ?? 0);
-  let ticks = receivedBytes > 0 ? 2 : 0;
-  let state: DownloadProgress["state"] = "downloading";
-  let pending = false;
-
-  const emit = () => {
-    const settledRate = ticks < 2;
-    opts?.onProgress?.({
-      receivedBytes,
-      totalBytes,
-      // The rate is withheld for the first two ticks, so the estimate the user
-      // reads is never one that is still settling.
-      bytesPerSecond: settledRate ? null : REPORTED_RATE,
-      etaSeconds: settledRate
-        ? null
-        : Math.max(0, Math.round((totalBytes - receivedBytes) / REPORTED_RATE)),
-      state,
-      // The stub never waits for anything: it has no daemon to wait for.
-      waitedSeconds: null,
-    });
-  };
-
-  const verify = () => {
-    state = "verifying";
-    emit();
-    j.after(VERIFY_MS, () => {
-      settle(() => {
-        const injected = takeFailure("network");
-        if (injected) {
-          // The one place a `detail` appears: raw text from the layer that
-          // failed, for the secondary disclosure line, never the sentence.
-          d.reject(
-            failure("network", "The download stopped.", "read: connection reset by peer"),
-          );
-          return;
-        }
-        // Verified, so there is no longer a partial to resume.
-        partial.delete(request.modelId);
-        d.resolve({
-          modelId: request.modelId,
-          path: `/Users/you/Models/${request.modelId}.gguf`,
-          bytes: totalBytes,
-          verified: true,
-        });
-      });
-    });
-  };
-
-  const step = () => {
-    if (state !== "downloading") return;
-    receivedBytes = Math.min(totalBytes, receivedBytes + chunk);
-    ticks += 1;
-    partial.set(request.modelId, receivedBytes);
-    emit();
-    if (receivedBytes >= totalBytes) {
-      verify();
-      return;
-    }
-    schedule();
-  };
-
-  /** One tick in flight at a time. A paused transfer leaves its tick to fire and
-   *  be ignored, rather than racing a resumed one — which is what stops a
-   *  pause-and-immediately-resume from running two chains. */
-  function schedule() {
-    if (pending) return;
-    pending = true;
-    j.after(TICK_MS, () => {
-      pending = false;
-      step();
-    });
-  }
-
-  // The length is reported before anything has moved, so the caption can say
-  // "of 4.2 GB" from the first frame rather than appearing without a
-  // denominator. The first tick is scheduled rather than run inline, so that a
-  // pause arriving inside it finds a single chain to stop, not two.
-  emit();
-  schedule();
-
-  return {
-    result: d.promise,
-    pause() {
-      if (state !== "downloading") return;
-      state = "paused";
-      emit();
-    },
-    resume() {
-      if (state !== "paused") return;
-      state = "downloading";
-      schedule();
-    },
-    cancel() {
-      settle(() => d.reject(failure("cancelled", "Download stopped.")));
-    },
-  };
-}
 
 function setLimits(limits: ResourceLimits): Task<ResourceLimits> {
   const j = job();
@@ -472,6 +335,16 @@ const LOAD_MS = 1100;
 const ANSWER_MS = 1400;
 const CONFIRM_MS = 1000;
 
+/** The fetch, as the preview shows it: one line per ten percent, which is
+ *  exactly the cadence the CLI's runtime prints at. Eleven emissions including
+ *  the start, and then the caption goes back to the join's own sentence — the
+ *  real one does the same, because the last of those lines stays in the log and
+ *  reporting it for the rest of the join would describe work that had finished. */
+const FETCH_MS = 420;
+const FETCH_STEPS = 10;
+const FETCH_START_MS = REGISTER_MS + 200;
+const FETCHED_MS = FETCH_START_MS + FETCH_STEPS * FETCH_MS;
+
 function joinNetwork(
   request: JoinRequest,
   opts?: ProgressOptions<JoinProgress>,
@@ -483,15 +356,40 @@ function joinNetwork(
   const at = (phase: JoinProgress["phase"], answered?: JoinProgress["answered"]) => () =>
     opts?.onProgress?.(answered ? { phase, answered } : { phase });
 
+  /** The weights, in the three fields the CLI's runtime prints them in — the
+   *  name, the percentage, and the two sizes as that layer rendered them. Sizes
+   *  are decimal, 10⁹ to the gigabyte, which is how the CLI reports a file and
+   *  how `copy.ts` words one. */
+  const model = findModel(request.modelId);
+  const totalBytes = model?.bytes ?? gb(4);
+  const name = model?.label ?? request.modelId;
+  const fetching = (percent: number) => () =>
+    opts?.onProgress?.({
+      phase: "fetching-model",
+      fetch: {
+        name,
+        percent,
+        done: `${((totalBytes * percent) / 100 / 1e9).toFixed(1)} GB`,
+        total: `${(totalBytes / 1e9).toFixed(1)} GB`,
+      },
+    });
+
   j.after(0, at("registering"));
-  j.after(REGISTER_MS, at("loading-model"));
-  j.after(REGISTER_MS + LOAD_MS, at("test-prompt"));
-  j.after(REGISTER_MS + LOAD_MS + ANSWER_MS, at("test-prompt", TEST_PROMPT));
+  for (let i = 0; i < FETCH_STEPS; i += 1) {
+    j.after(FETCH_START_MS + i * FETCH_MS, fetching((i + 1) * 10));
+  }
+  // Back to registering the moment the bytes are in hand, which is the phase the
+  // real flow returns to and the reason this is a phase rather than a state of
+  // its own. Then the join gets on with the model it now has.
+  j.after(FETCHED_MS, at("registering"));
+  j.after(FETCHED_MS + 400, at("loading-model"));
+  j.after(FETCHED_MS + 400 + LOAD_MS, at("test-prompt"));
+  j.after(FETCHED_MS + 400 + LOAD_MS + ANSWER_MS, at("test-prompt", TEST_PROMPT));
   // The question is answered and the gateway has not spoken yet: its own beat,
   // because "checking the network can see you" is the step the user is actually
   // waiting on and the one the result turns on.
-  j.after(REGISTER_MS + LOAD_MS + ANSWER_MS + CONFIRM_MS, at("confirming"));
-  j.after(REGISTER_MS + LOAD_MS + ANSWER_MS + CONFIRM_MS * 2, () => {
+  j.after(FETCHED_MS + 400 + LOAD_MS + ANSWER_MS + CONFIRM_MS, at("confirming"));
+  j.after(FETCHED_MS + 400 + LOAD_MS + ANSWER_MS + CONFIRM_MS * 2, () => {
     settle(() => {
       // `cli-missing` and `join-stopped` are the two rejections here that are not
       // network failures, so neither gets the network's sentence. The screen shows
@@ -605,7 +503,7 @@ function ensureJoined(request: JoinRequest): Task<EnsureJoinedResult> {
 }
 
 export function createStubService(): OnboardingService {
-  return { scanHardware, suggestLane, downloadModel, setLimits, joinNetwork, ensureJoined };
+  return { scanHardware, suggestLane, setLimits, joinNetwork, ensureJoined };
 }
 
 /* The stub is the only part of the app that cannot be reached from the UI, so

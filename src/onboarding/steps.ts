@@ -1,22 +1,27 @@
 import type { FlowState } from "./flow";
 
 /**
- * The six steps, in order.
+ * The five steps, in order.
  *
  * A step is one screen. What happens *inside* a screen — the scan's four reads,
- * the download's seven states, the three limit questions, the four join phases
- * — is a state, not a step, and does not appear here. That distinction is what
- * keeps the limit questions in step five rather than turning them into steps
- * six, seven and eight.
+ * the three limit questions, the join's own phases — is a state, not a step, and
+ * does not appear here. That distinction is what keeps the limit questions in
+ * step four rather than turning them into steps five, six and seven.
+ *
+ * There were six until the weights stopped having a screen of their own. It was
+ * never really a step: the model is fetched as part of joining, and the screen
+ * existed because the fetch used to be something the app started on its own,
+ * against a daemon it had to wait for. Both of those are gone — see
+ * `provision.ts` for the daemon and `JoinProgress.fetch` for where the bytes are
+ * reported now.
  */
 
-export type StepId = "welcome" | "scan" | "lane" | "download" | "limits" | "join";
+export type StepId = "welcome" | "scan" | "lane" | "limits" | "join";
 
 export const STEP_ORDER: readonly StepId[] = [
   "welcome",
   "scan",
   "lane",
-  "download",
   "limits",
   "join",
 ];

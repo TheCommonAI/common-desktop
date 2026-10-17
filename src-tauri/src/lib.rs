@@ -11,8 +11,8 @@ mod update;
 mod store;
 
 // The first run: fetching, checking and placing the Python runtime, the Common
-// CLI and Ollama, so that arriving without them is no longer fatal. See
-// `fetch.rs` for what it can and cannot get today.
+// CLI that runs under it and cloudflared, so that arriving without them is no
+// longer fatal. See `fetch.rs` for what it can and cannot get today.
 mod fetch;
 
 // SHA-256 for the check above. Hand-written rather than pulled in, under the
@@ -124,10 +124,6 @@ pub fn run() {
         // webview calls it — the three commands in `update.rs` do — so this adds
         // no permission for the page and changes no capability.
         .plugin(tauri_plugin_updater::Builder::new().build())
-        // The pulls this app has running, so a pause can find the transfer it
-        // means to stop. The webview picks the id and hands the same one back to
-        // `ollama_pull_cancel`; the map itself never leaves Rust.
-        .manage(backend::Pulls::default())
         // The join this app started, so that "is it still working?" is answered by
         // the process handle rather than by hunting for its pid with a second
         // program. On Windows those two answers disagree, and the disagreement cost
@@ -195,13 +191,10 @@ pub fn run() {
             // wrapper exits cleanly having handed off, so a join can die without this
             // app being able to see it. The log is the only witness.
             backend::network_join_tail,
-            // Where the weights are, for the one field of `DownloadResult` that
-            // has to be a real path.
-            backend::ollama_models_dir,
-            // The download itself, streamed from ollama through Rust rather than
-            // fetched by the webview. `ollama_pull` says why the hop exists.
-            backend::ollama_pull,
-            backend::ollama_pull_cancel,
+            // How far the weights have got: the progress line the CLI writes to
+            // its own `join.log`, read from a byte offset, so the join screen can
+            // draw a transfer that used to have a screen of its own.
+            backend::network_join_progress,
             // The one read that leaves the machine without being asked to.
             // Asked for once, and cached in the web layer — see `backend.rs`.
             backend::where_am_i,

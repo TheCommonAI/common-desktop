@@ -107,10 +107,11 @@ const BLOCK: usize = 64;
 
 /// A digest under construction.
 ///
-/// Streaming rather than whole-file because the largest payload this is ever
-/// pointed at is Ollama, which is one and a half gigabytes: reading that into a
-/// `Vec` to hash it would need the memory the download was meant to avoid, and
-/// would fail on exactly the machines the app is for.
+/// Streaming rather than whole-file because the digest is all that is wanted: a
+/// payload is read a chunk at a time and none of it is held. Reading one into a
+/// `Vec` to hash it at the end would put the whole of it in memory for nothing —
+/// and the largest of them was once a gigabyte and a half, which is a size that
+/// made the point obvious rather than arguable.
 #[derive(Clone)]
 pub struct Sha256 {
     state: [u32; 8],

@@ -203,9 +203,9 @@ test("a transfer with a total reads as a fraction of it", () => {
 });
 
 test("a transfer with no total says how much has arrived rather than nothing", () => {
-  // The far side has not sent a length. `DownloadModel` makes the same call for
-  // the same reason: a bar with no end is worse than a sentence with a number in
-  // it, and silence here is a screen that looks hung.
+  // The far side has not sent a length. The weight fetch's line is the same
+  // decision seen from the other end: a fraction with no denominator is worse
+  // than a size on its own, and silence here is a screen that looks hung.
   const { caption } = preparingSentences({
     kind: "working",
     step: "download",

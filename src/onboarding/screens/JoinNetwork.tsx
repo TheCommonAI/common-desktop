@@ -7,7 +7,7 @@ import { formatBytes, formatLatency } from "../copy";
 import { LANE_LABEL, findModel } from "../models";
 import Control from "../parts/Control";
 import Statement from "../parts/Statement";
-import { onboardingService, type JoinProgress, type JoinResult } from "../service";
+import { onboardingService, type JoinProgress, type JoinResult, type ModelSpec } from "../service";
 import type { ScreenProps } from "../steps";
 import { refused, useTask } from "../use-task";
 
@@ -54,12 +54,74 @@ function phaseStatement(phase: JoinProgress["phase"], label: string): ReactNode 
       return "Getting this machine ready.";
     case "registering":
       return "Registering this machine.";
+    case "fetching-model":
+      // The one phase whose wait is genuinely long, and the only one of the six
+      // that used to be a screen of its own. It is not the join doing this — the
+      // CLI's runtime is, on its way up — which is why the line under it is the
+      // fetcher's own count rather than anything this app worked out.
+      return `Fetching ${label}.`;
     case "loading-model":
       return `Loading ${label}.`;
     case "test-prompt":
       return "Asking it something.";
     case "confirming":
       return "Checking the network can see you.";
+  }
+}
+
+/** The line under the statement, which says what is being waited for. Split out
+ *  beside `phaseStatement` and for the same reason: a function over the union
+ *  makes a phase without words a missing arm rather than a frame with nothing on
+ *  it.
+ *
+ *  `"preparing"` is the one arm not here, and unlike in `phaseStatement` that is
+ *  not a gap to be filled — that phase draws a transfer of its own and its words
+ *  come from `provision.ts`, where a test can hold them still. The caller settles
+ *  it before it gets here, which is why the parameter excludes it rather than
+ *  answering it with something empty. */
+function phaseCaption(
+  phase: Exclude<JoinProgress["phase"], "preparing">,
+  model: ModelSpec | null,
+  progress: JoinProgress | null,
+): readonly ReactNode[] {
+  switch (phase) {
+    case "fetching-model": {
+      const fetch = progress?.fetch;
+      if (fetch === undefined) {
+        // Reachable for the first tenth of the way and no further: the fetcher
+        // prints a line at each ten percent, and before the first of them there
+        // is no count to show. The statement already names what is coming; this
+        // claims no more than that it is still coming.
+        return ["The weights are on their way down"];
+      }
+      // Both halves, in this order. The fraction is how far along it is; the two
+      // sizes say what is being waited for, which ten percentages on their own
+      // never do. They are the fetcher's own rendering of them and not this
+      // app's, so nothing here rounds a number it did not measure — see
+      // `JoinProgress.fetch`, which is where that argument is made.
+      return [`${fetch.percent}%`, `${fetch.done} of ${fetch.total}`];
+    }
+    case "loading-model":
+      return [model === null ? null : `${formatBytes(model.bytes)} from disk into memory`];
+    case "test-prompt":
+      return progress?.answered === undefined
+        ? // What the model was asked is not known until the answer comes back,
+          // and this screen does not invent it. One true clause now, the proof in
+          // a moment.
+          ["Your machine is answering it"]
+        : [
+            `“${progress.answered.prompt}”`,
+            `“${progress.answered.answer}”`,
+            `${formatLatency(progress.answered.latencyMs)} on your machine`,
+          ];
+    case "confirming":
+      return ["Waiting for the gateway to answer"];
+    case "registering":
+      // A name for this machine, and nothing else. It used to say "and a key for
+      // it", which was false: the Alpha issues a bearer token to a node —
+      // `identity.json` holds it — and never a keypair, so there is no key being
+      // made here and nothing for a user to keep.
+      return ["Choosing a name for this machine"];
   }
 }
 
@@ -111,7 +173,6 @@ export default function JoinNetwork({ flow, next, back }: ScreenProps) {
   // Before the first phase lands the request has still been sent, so the first
   // thing it does is the honest thing to say.
   const phase = progress?.phase ?? "registering";
-  const answered = progress?.answered ?? null;
 
   let statement: ReactNode;
   let caption: ReactNode | readonly ReactNode[];
@@ -251,23 +312,7 @@ export default function JoinNetwork({ flow, next, back }: ScreenProps) {
       caption = waiting.caption;
     } else {
       statement = phaseStatement(phase, label);
-      caption =
-        phase === "loading-model"
-          ? [model === null ? null : `${formatBytes(model.bytes)} from disk into memory`]
-          : phase === "test-prompt"
-            ? answered === null
-              ? // What the model was asked is not known until the answer comes
-                // back, and this screen does not invent it. One true clause now,
-                // the proof in a moment.
-                ["Your machine is answering it"]
-              : [`“${answered.prompt}”`, `“${answered.answer}”`, `${formatLatency(answered.latencyMs)} on your machine`]
-            : phase === "confirming"
-              ? ["Waiting for the gateway to answer"]
-              : // A name for this machine, and nothing else. It used to say "and a
-                // key for it", which was false: the Alpha issues a bearer token to
-                // a node — `identity.json` holds it — and never a keypair, so
-                // there is no key being made here and nothing for a user to keep.
-                ["Choosing a name for this machine"];
+      caption = phaseCaption(phase, model, progress);
     }
     // The mark, for the whole of the running state and for none of any other.
     //

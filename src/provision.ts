@@ -176,9 +176,10 @@ export function preparingSentences(provision: Provision): {
 
 /** The one line of a transfer, in the units the rest of the app counts in. */
 function transfer(receivedBytes: number, totalBytes: number | null): string {
-  // No total until the far side sends a length, and a bar with no end is worse
-  // than no bar — the same decision `DownloadModel` makes for a transfer that has
-  // started without one.
+  // No total until the far side sends a length, because a fraction with no
+  // denominator is worse than a size on its own. The join's weight fetch makes
+  // the same call in the other direction: it shows both halves or neither, since
+  // a percentage of nothing is not a progress bar either.
   return totalBytes === null
     ? `${formatBytes(receivedBytes)} downloaded`
     : formatTransfer(receivedBytes, totalBytes);
