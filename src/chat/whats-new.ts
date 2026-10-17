@@ -95,7 +95,8 @@ const NOTES: Record<string, readonly string[]> = {
   ],
   "0.2.12": [
     "Connecting works again, and the fault was ours rather than your machine's. The network's gateway — the part of it that takes your question and hands it to a machine — was stopping itself: every thirty seconds it checked which machines were still reachable, and looking up their names would not let anything else in it run until each lookup had finished. A check that touches nothing took more than eight seconds to answer, and your question waited behind it until it gave up. The gateway no longer stops for a name.",
-    "That check also cost more the quieter the network got. Every unreachable machine was retried for up to thirty seconds, and the machines were checked strictly one after another, so a pass over a couple of dozen of them ran for minutes — and every request made during a pass waited its turn. Each machine is now looked up once and several are checked at a time, so one that has genuinely gone away is recorded as gone in the pass that finds it, instead of holding up everything else while it decides.",
+    "That check also cost more the quieter the network got. Every unreachable machine was retried for up to eight seconds, and the machines were checked strictly one after another, so a pass over a couple of dozen of them ran for minutes — and every request made during a pass waited its turn. Each machine is now looked up once and several are checked at a time, so one that has genuinely gone away is recorded as gone in the pass that finds it, instead of holding up everything else while it decides.",
+    "Nothing in this app changed to make that work. The fault was in the gateway and the gateway is fixed, so it is already live and you have felt it before reading this — this release records the fix rather than delivering it.",
   ],
 };
 
