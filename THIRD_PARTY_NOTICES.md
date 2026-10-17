@@ -58,8 +58,9 @@ with it, under AGPL-3.0-or-later — the same terms as this application, so it i
 redistributed here under that licence rather than a separate grant. The network's
 own `NOTICE` travels with it, at `src-tauri/cli-seed/NOTICE`.
 
-It is four Python files — `common.py`, `join.py`, `worker.py` and `chat.py`, 272 KB
-together — carried under the `resources` key in `src-tauri/tauri.conf.json` and
+It is five Python files — `common.py`, `join.py`, `worker.py`, `runtime.py` and
+`chat.py`, 350 KB together — carried under the `resources` key in
+`src-tauri/tauri.conf.json` and
 copied into `~/.common-network` on first run, and only when nothing is there
 already. It ships rather than being fetched because common-network publishes no
 release carrying a downloadable build, so there is nothing for a first run to
@@ -81,9 +82,3 @@ project, under the Python Software Foundation Licence 2.0. It is fetched only wh
 no Python 3.9 or newer is already on `PATH`, and it unpacks under
 `~/.common-network/runtime/python`. The PSF licence text travels with the
 downloaded runtime rather than with this application.
-
-**Ollama** (MIT) is installed by the user, not bundled, and is fetched from its
-own distributor. It is fetched only when no Ollama is already installed, and it
-unpacks under `~/.common-network/runtime/ollama` rather than into `/Applications`
-or `Program Files`. Model weights are fetched from the network and carry their own
-licences, which vary — consult the relevant model's page.

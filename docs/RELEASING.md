@@ -140,11 +140,11 @@ build.
 
 ## What first run fetches, and what it costs a release
 
-The installer carries **exactly one payload**: the CLI seed — four `.py` files,
-272 KB — declared under `resources` in `tauri.conf.json`. `externalBin` stays empty
-and must. Python and Ollama are a hundred and fifty megabytes between them and are
-still downloaded on first run by `src-tauri/src/fetch.rs` into `~/.common-network`,
-which is why the download on the website stays a few megabytes.
+The installer carries **exactly one payload**: the CLI seed — five `.py` files,
+350 KB — declared under `resources` in `tauri.conf.json`. `externalBin` stays empty
+and must. Python and cloudflared are still downloaded on first run by
+`src-tauri/src/fetch.rs` into `~/.common-network`, which is why the download on the
+website stays a few megabytes.
 
 The CLI is the exception because it is the one payload that **cannot** be fetched:
 `TheCommonAI/common-network` carries no release assets, so a fetch would fail on
@@ -158,8 +158,8 @@ from something stale.
 The consequence for a release is that **the URLs the app fetches from are not part
 of the release at all.** They are constants at the top of `fetch.rs`, pinned to a
 specific tag: `PBS_BUILD` and `PYTHON_VERSION` for the runtime, and
-`OLLAMA_VERSION` for Ollama. Bumping one is an app release, and it is the only way
-a fetched payload changes.
+`CLOUDFLARED_VERSION` for the tunnel. Bumping one is an app release, and it is the
+only way a fetched payload changes.
 
 Each fetched payload is verified before anything is unpacked, in one of two ways,
 and `bootstrap_status` reports which:
@@ -169,9 +169,10 @@ and `bootstrap_status` reports which:
 - **published** — a `sha256sum`-style file fetched beside the payload. This
   proves the transfer is intact and that the asset is the one that release
   published; it is *not* a defence against a compromised origin, because the
-  checksum comes over the same connection from the same host. Python and Ollama
-  use this, because pinning a digest would mean the app went stale the day the
-  publisher cut a build.
+  checksum comes over the same connection from the same host. Python uses this,
+  because pinning a digest would mean the app went stale the day the publisher
+  cut a build. cloudflared is **pinned** instead: Cloudflare publishes no sums
+  file, only a list of digests in the release body, which is not the same thing.
 
 The bundled seed is not verified, and does not need to be: it is compiled into the
 release and covered by whatever signs it, rather than arriving over a connection
@@ -193,7 +194,7 @@ only real fix, and `signed-build.yml` is where they would go. It is inert today:
 nine of its secrets and variables are absent.
 
 The first-run fetch does not change any of that, and it is worth being precise
-about what it does and does not buy. The Python runtime and Ollama it installs
+about what it does and does not buy. The Python runtime and cloudflared it installs
 are unsigned and unnotarised, exactly as the app is. What is true — and it is the
 one reason fetching at runtime is less bad than it sounds — is that **`curl` does
 not set the quarantine attribute** the way a browser does, so a payload fetched
