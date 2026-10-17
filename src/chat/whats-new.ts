@@ -93,6 +93,10 @@ const NOTES: Record<string, readonly string[]> = {
     "One install is all it takes. The first time Common runs it fetches everything it needs — a Python runtime and the tunnel binary that lets this machine be reached — and places its own command-line tool beside them. Nothing else has to be on the machine first.",
     "Ollama is gone. The network moved to llama.cpp some time ago and no longer needs a separate model daemon, so Common stops installing one, downloading one, and waiting on one. One model runtime on the machine, and it is not a second app.",
   ],
+  "0.2.12": [
+    "Connecting works again, and the fault was ours rather than your machine's. The network's gateway — the part of it that takes your question and hands it to a machine — was stopping itself: every thirty seconds it checked which machines were still reachable, and looking up their names would not let anything else in it run until each lookup had finished. A check that touches nothing took more than eight seconds to answer, and your question waited behind it until it gave up. The gateway no longer stops for a name.",
+    "That check also cost more the quieter the network got. Every unreachable machine was retried for up to thirty seconds, and the machines were checked strictly one after another, so a pass over a couple of dozen of them ran for minutes — and every request made during a pass waited its turn. Each machine is now looked up once and several are checked at a time, so one that has genuinely gone away is recorded as gone in the pass that finds it, instead of holding up everything else while it decides.",
+  ],
 };
 
 /** Every version with notes, oldest first — the order the card reads them in,
@@ -111,6 +115,7 @@ const ORDER: readonly string[] = [
   "0.2.9",
   "0.2.10",
   "0.2.11",
+  "0.2.12",
 ];
 
 // <<< make-notes: end generated
