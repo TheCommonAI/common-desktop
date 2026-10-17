@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 
+import { provisionNow, startProvisioning } from "../provision";
 import {
   LANES,
   LADDER_REQUIREMENTS,
@@ -1588,6 +1589,30 @@ async function awaitServing(
   say: Say,
   opts: { deadlineMs: number; intervalMs: number },
 ): Promise<Status> {
+  // The machine before the join, and it is here rather than in either caller
+  // because this is the one place both of them go through — the first join and
+  // the reconnect alike.
+  //
+  // Before the `status()` below, and that ordering is the whole point. Everything
+  // in this function reaches the CLI, and the CLI is a Python script: on a
+  // machine with neither Python nor cloudflared, the very first read fails and
+  // the screen says `cli-missing` about a tool it is holding in its own bundle.
+  // Waiting until the join is *started* would be too late; there is no step of
+  // this that works without it.
+  //
+  // Skipped outright once the answer is already known, so an ordinary machine
+  // pays one comparison and not one frame. `failed` is skipped too and on
+  // purpose: there is nothing left to wait for, the join is going to fail on its
+  // own, and it has a better sentence for it than this file would.
+  if (provisionNow().kind !== "ready") {
+    say("preparing");
+    await startProvisioning();
+    // A cancel during the fetch is the user walking away from the join, not a
+    // request to stop the fetch — which is one machine's, shared by every screen
+    // and every later attempt. So the fetch carries on and only the join stops.
+    if (signal.cancelled) throw stopped("Stopped.");
+  }
+
   say("registering");
 
   const known = await status();

@@ -65,6 +65,21 @@ export function invoke(command, args) {
 export class Channel {}
 `;
 
+/** The app's own fetch, for the copy of `service.real.ts`.
+ *
+ *  Always `ready`, which is the ordinary machine — everything a join needs is
+ *  already on it — so the wait at the top of `awaitServing` is skipped and what
+ *  runs here is the join itself. The real decisions in that file are
+ *  `tests/provision.test.mjs`'s, and none of them is a lane choice. */
+const PROVISION_MOCK = `
+export function provisionNow() {
+  return { kind: "ready" };
+}
+export async function startProvisioning() {
+  return provisionNow();
+}
+`;
+
 /** Copy a source into the temp directory, pointing its imports at the copies and
  *  the stand-ins. Node wants the extension on a relative specifier; the sources
  *  are written for a bundler, which does not. */
@@ -76,10 +91,12 @@ function stage(name, replacements) {
 
 writeFileSync(join(TMP, "service.mjs"), SERVICE_MOCK);
 writeFileSync(join(TMP, "tauri.mjs"), TAURI_MOCK);
+writeFileSync(join(TMP, "provision.mjs"), PROVISION_MOCK);
 stage("models.ts", []);
 stage("service.real.ts", [
   ['from "./models"', 'from "./models.ts"'],
   ['from "./service"', 'from "./service.mjs"'],
+  ['from "../provision"', 'from "./provision.mjs"'],
   ['from "@tauri-apps/api/core"', 'from "./tauri.mjs"'],
 ]);
 

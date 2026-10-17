@@ -85,6 +85,24 @@ export function invoke(command, args) {
 export class Channel {}
 `;
 
+/** The app's own fetch, for the copy of `service.real.ts` — which is here only so
+ *  that `shouldSpawn` can be imported from the real source, and which now reads
+ *  this from the top of `awaitServing`.
+ *
+ *  Always `ready`, and that is the machine these tests are about: a reconnect is
+ *  something a machine that has *already been set up* does, so everything a join
+ *  needs is on it and there is nothing to wait for. Leaving the real module in
+ *  would also be the only way to reach `startProvisioning`, which reaches
+ *  `invoke`, which has no app behind it here. */
+const PROVISION_MOCK = `
+export function provisionNow() {
+  return { kind: "ready" };
+}
+export async function startProvisioning() {
+  return provisionNow();
+}
+`;
+
 /** The chat's own seam, for the copy of `rejoin.ts`. `whoami` is the only thing
  *  `joinInputs` reaches for, and it answers from `globalThis.__whoami` — `null`
  *  for an identity that is not there, which is what the real one returns for a
@@ -116,6 +134,7 @@ function stage(fromDir, name, replacements) {
 writeFileSync(join(TMP, "service.mjs"), SERVICE_MOCK);
 writeFileSync(join(TMP, "tauri.mjs"), TAURI_MOCK);
 writeFileSync(join(TMP, "backend.mjs"), BACKEND_MOCK);
+writeFileSync(join(TMP, "provision.mjs"), PROVISION_MOCK);
 
 // The onboarding module, staged whole: `rejoin.ts` reads the stored flow and the
 // limits, which means `flow.ts`, which means `models.ts` and `steps.ts`. Only the
@@ -132,6 +151,7 @@ stage(ONBOARDING_DIR, "flow.ts", [
 stage(ONBOARDING_DIR, "service.real.ts", [
   ['from "./models"', 'from "./models.ts"'],
   ['from "./service"', 'from "./service.mjs"'],
+  ['from "../provision"', 'from "./provision.mjs"'],
   ['from "@tauri-apps/api/core"', 'from "./tauri.mjs"'],
 ]);
 stage(CHAT_DIR, "rejoin.ts", [

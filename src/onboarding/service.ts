@@ -227,7 +227,12 @@ export interface JoinRequest {
 }
 
 export interface JoinProgress {
-  phase: "registering" | "loading-model" | "test-prompt" | "confirming";
+  /** `"preparing"` is not a step of the join — it is the machine being got
+   *  ready for one. A join needs a Python to run the CLI with and the
+   *  cloudflared that opens the tunnel, and the app fetches either if it is
+   *  missing; see `provision.ts`. It comes first because it is the only phase
+   *  that can, and it is never emitted on a machine that already has both. */
+  phase: "preparing" | "registering" | "loading-model" | "test-prompt" | "confirming";
   /** Present only during `"test-prompt"`, once the model has answered. Carried
    *  on progress as well as on the result so the screen can show the proof at
    *  the moment it arrives rather than at the end of the whole sequence. */

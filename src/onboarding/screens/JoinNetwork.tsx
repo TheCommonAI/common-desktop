@@ -1,6 +1,8 @@
 import { useState, type ReactNode } from "react";
 import ShareLog from "../../chat/ShareLog";
 import ThinkingMark from "../../chat/ThinkingMark";
+import { preparingSentences } from "../../provision";
+import { useProvision } from "../../useProvision";
 import { formatBytes, formatLatency } from "../copy";
 import { LANE_LABEL, findModel } from "../models";
 import Control from "../parts/Control";
@@ -39,9 +41,17 @@ import { refused, useTask } from "../use-task";
  */
 
 /** The clause for a phase, which is the whole caption: the phase *is* the
- *  information, so there is no second line for it to sit beside. */
+ *  information, so there is no second line for it to sit beside.
+ *
+ *  `"preparing"` is the one case the renderer does not use, because that phase is
+ *  not a step of the join and its words are somewhere a test can hold them still
+ *  — see `preparingSentences`. It is answered here anyway: a function over a
+ *  union that leaves one arm to fall off the end returns nothing, and a screen
+ *  with no sentence on it is the exact failure this file's header is about. */
 function phaseStatement(phase: JoinProgress["phase"], label: string): ReactNode {
   switch (phase) {
+    case "preparing":
+      return "Getting this machine ready.";
     case "registering":
       return "Registering this machine.";
     case "loading-model":
@@ -56,6 +66,12 @@ function phaseStatement(phase: JoinProgress["phase"], label: string): ReactNode 
 export default function JoinNetwork({ flow, next, back }: ScreenProps) {
   const model = flow.modelId === null ? null : findModel(flow.modelId);
   const label = model?.label ?? "the model";
+
+  // The machine being got ready, for the phase that has to draw it. Subscribed
+  // rather than started: the fetch begins at launch and belongs to the app, not
+  // to this screen — a screen that started it would be a screen that could
+  // abandon it, and the two files it brings are needed either way.
+  const provision = useProvision();
 
   const { state, run } = useTask<JoinResult, JoinProgress>((opts) =>
     flow.lane === null || flow.modelId === null
@@ -173,13 +189,15 @@ export default function JoinNetwork({ flow, next, back }: ScreenProps) {
         : "The network didn't answer.";
     caption = missingCli
       ? [
-          // The tool is no longer something the user has to go and find: this app
-          // ships it. What it still needs from outside is an interpreter to run it
-          // with, and that is the only remaining way to arrive here — so the sentence
-          // names Python and not the tool. Saying "install it yourself" would now be
-          // sending them after something they already have.
+          // Nothing here is something the user has to go and find. The app ships
+          // the tool and fetches the interpreter it runs under, so the sentence
+          // names the half that can still be missing — and says the fetch is what
+          // did not finish, rather than implying there is an install to go and
+          // do. Telling someone to install a Python this app was about to
+          // download for them is the mistake the previous wording made once
+          // already, in the other direction.
           "Its command-line tool couldn't be started",
-          "Common ships it, and runs it with Python 3.9 or newer",
+          "This app fetches the Python to run it with, and that didn't get through",
         ]
       : stopped
         ? [
@@ -217,24 +235,40 @@ export default function JoinNetwork({ flow, next, back }: ScreenProps) {
       </>
     );
   } else if (state.status === "running") {
-    statement = phaseStatement(phase, label);
-    caption =
-      phase === "loading-model"
-        ? [model === null ? null : `${formatBytes(model.bytes)} from disk into memory`]
-        : phase === "test-prompt"
-          ? answered === null
-            ? // What the model was asked is not known until the answer comes
-              // back, and this screen does not invent it. One true clause now,
-              // the proof in a moment.
-              ["Your machine is answering it"]
-            : [`“${answered.prompt}”`, `“${answered.answer}”`, `${formatLatency(answered.latencyMs)} on your machine`]
-          : phase === "confirming"
-            ? ["Waiting for the gateway to answer"]
-            : // A name for this machine, and nothing else. It used to say "and a
-              // key for it", which was false: the Alpha issues a bearer token to
-              // a node — `identity.json` holds it — and never a keypair, so
-              // there is no key being made here and nothing for a user to keep.
-              ["Choosing a name for this machine"];
+    if (phase === "preparing") {
+      // Not a step of the join, so not a step's sentence. The machine is being
+      // got ready somewhere else in the app — the fetch starts at launch and
+      // belongs to no screen — and the words for it, transfer included, are in
+      // `provision.ts` where a test can reach them. This screen is only the
+      // place they are read from, which is why the phase is on `JoinProgress`
+      // at all.
+      //
+      // It is also the one state here that draws a transfer, and it is a much
+      // smaller one than the flow's other wait: tens of megabytes rather than
+      // gigabytes, and only on a machine that was missing something.
+      const waiting = preparingSentences(provision);
+      statement = waiting.statement;
+      caption = waiting.caption;
+    } else {
+      statement = phaseStatement(phase, label);
+      caption =
+        phase === "loading-model"
+          ? [model === null ? null : `${formatBytes(model.bytes)} from disk into memory`]
+          : phase === "test-prompt"
+            ? answered === null
+              ? // What the model was asked is not known until the answer comes
+                // back, and this screen does not invent it. One true clause now,
+                // the proof in a moment.
+                ["Your machine is answering it"]
+              : [`“${answered.prompt}”`, `“${answered.answer}”`, `${formatLatency(answered.latencyMs)} on your machine`]
+            : phase === "confirming"
+              ? ["Waiting for the gateway to answer"]
+              : // A name for this machine, and nothing else. It used to say "and a
+                // key for it", which was false: the Alpha issues a bearer token to
+                // a node — `identity.json` holds it — and never a keypair, so
+                // there is no key being made here and nothing for a user to keep.
+                ["Choosing a name for this machine"];
+    }
     // The mark, for the whole of the running state and for none of any other.
     //
     // This screen said nothing at all while it worked. Four phases of caption, each
