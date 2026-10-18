@@ -109,6 +109,9 @@ const NOTES: Record<string, readonly string[]> = {
   "0.2.15": [
     "Answers from a single machine arrive as they're typed, the way a chat is supposed to feel, instead of showing up all at once once the whole thing is ready. On a cold model that used to mean tens of seconds of nothing; now the words land as the network's machine writes them. A question the network splits across more than one machine still arrives all at once, because that answer genuinely isn't written until every machine involved has finished and the pieces are combined — there's nothing earlier to show.",
   ],
+  "0.2.16": [
+    "While an answer is still arriving, a small circle at the end of the text breathes, so you can tell it is still being written. It stops with the rest of the streamed text once the answer is complete, and it stays still for anyone who has reduced motion turned on.",
+  ],
 };
 
 /** Every version with notes, oldest first — the order the card reads them in,
@@ -131,6 +134,7 @@ const ORDER: readonly string[] = [
   "0.2.13",
   "0.2.14",
   "0.2.15",
+  "0.2.16",
 ];
 
 // <<< make-notes: end generated

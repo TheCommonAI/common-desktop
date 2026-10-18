@@ -1055,6 +1055,33 @@ body {
   margin: 0;
 }
 
+/* The mark at the end of a streamed answer: a small circle that breathes while
+   the words are still arriving. It sits on the baseline so it reads as part of
+   the line, and it is removed with the rest of the streamed text once the answer
+   lands as a message. */
+.stream-cursor {
+  display: inline-block;
+  width: 0.45em;
+  height: 0.45em;
+  margin-left: 0.2em;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: baseline;
+  animation: stream-breathe 1.2s ease-in-out infinite;
+}
+
+@keyframes stream-breathe {
+  0%,
+  100% {
+    transform: scale(0.6);
+    opacity: 0.35;
+  }
+  50% {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+}
+
 /* What arrives here is the renderer's HTML, not a string: markdown-it's tags
    for the model's own markup, and KaTeX's for its mathematics. So this is a
    container for a document rather than a paragraph — which is why it is a `div`
@@ -1894,7 +1921,8 @@ body {
   }
 
   .word,
-  .onboarding {
+  .onboarding,
+  .stream-cursor {
     animation: none;
   }
 
