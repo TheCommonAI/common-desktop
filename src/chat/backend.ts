@@ -1,5 +1,5 @@
 import { getVersion } from "@tauri-apps/api/app";
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 
 /**
  * The two things the chat asks of the machine.
@@ -64,6 +64,12 @@ export interface NetworkAnswer {
   totalMs: number | null;
 }
 
+/** One piece of the answer, as it arrives. Mirrors `AskEvent` in `backend.rs`. */
+interface AskEvent {
+  kind: "delta";
+  text: string;
+}
+
 /**
  * Ask the network.
  *
@@ -73,10 +79,28 @@ export interface NetworkAnswer {
  * so a machine contributing one specialist answers every question with that
  * specialist. The machine the user is sitting on is one node among the network's,
  * and it is not privileged.
+ *
+ * `onDelta`, if given, is called with each piece of the answer as it is typed
+ * out — but only when a single node answered it. A panel's answer was already
+ * complete before the gateway sent its first byte (see the comment on
+ * `stream_json` in `common.py`'s `cmd_ask`), so there is nothing to narrate as
+ * it happens, and no deltas arrive for one: the whole text shows up at once in
+ * the return value, exactly as it always did. A caller that passes no callback
+ * gets exactly the old behaviour either way — the deltas are a bonus on top of
+ * the final answer, never a replacement for it.
  */
-export async function askNetwork(question: string): Promise<NetworkAnswer> {
+export async function askNetwork(
+  question: string,
+  onDelta?: (text: string) => void,
+): Promise<NetworkAnswer> {
   if (!insideApp()) return PREVIEW_ANSWER;
-  const raw = await invoke<string>("network_ask", { question });
+  const channel = new Channel<AskEvent>();
+  if (onDelta) {
+    channel.onmessage = (event) => {
+      if (event.kind === "delta") onDelta(event.text);
+    };
+  }
+  const raw = await invoke<string>("network_ask", { question, onDelta: channel });
   const parsed = JSON.parse(raw) as {
     answer?: unknown;
     node?: unknown;

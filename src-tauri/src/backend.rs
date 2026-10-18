@@ -36,7 +36,7 @@
 //! app puts them.
 
 use serde::Serialize;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -46,6 +46,7 @@ use std::time::Duration;
 // report is written. `config` and `package_info` are inherent methods and need no
 // import; this one is what supplies the folder.
 use tauri::Manager;
+use tauri::ipc::Channel;
 
 /* ------------------------------- running things ------------------------------- */
 
@@ -1508,6 +1509,20 @@ pub fn network_ask_stop() {
     ASK_EPOCH.fetch_add(1, Ordering::SeqCst);
 }
 
+/// One line of `network_ask`'s progress, on its way to the webview.
+///
+/// Only one variant, because there is only one thing worth narrating while the
+/// question is out: a word arriving. Routing, registering and the rest of what
+/// a join does have their own screens with their own states; asking has a
+/// single wait, and the wait is the whole of what this reports.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum AskEvent {
+    /// A piece of the answer, as `common ask --json`'s NDJSON prints it. See
+    /// `network_ask`'s header for why this never arrives for a panel's answer.
+    Delta { text: String },
+}
+
 /// Ask the network something, exactly as `common ask` does.
 ///
 /// The consumer side of the product, and the one the chat uses. There is no
@@ -1529,8 +1544,17 @@ pub fn network_ask_stop() {
 ///
 /// The question does leave this machine — that is what routing is — and the
 /// greeting in the transcript says so.
+///
+/// `on_delta` carries the answer as it arrives, one `AskEvent::Delta` per token
+/// — but only when a single node answered. A panel or a composed reply was
+/// synthesised whole before the gateway sent its first byte (see the comment on
+/// `cmd_ask`'s `stream_json`, in `common.py`), so there is nothing to narrate as
+/// it happens; `common ask --json` emits that answer as one summary line and
+/// nothing before it, and this function sends no deltas for it either. Either
+/// way the return value is the same final JSON this always returned, so a
+/// caller that ignores the channel entirely still gets the whole answer.
 #[tauri::command]
-pub async fn network_ask(question: String) -> Result<String, String> {
+pub async fn network_ask(question: String, on_delta: Channel<AskEvent>) -> Result<String, String> {
     off_thread(move || {
         let Cli {
             mut cmd,
@@ -1547,20 +1571,17 @@ pub async fn network_ask(question: String) -> Result<String, String> {
 
         let mut child = cmd.spawn().map_err(|e| launch_error(&bin, e))?;
 
-        // Both pipes are drained by their own threads for the whole of the wait
-        // below. `Command::output` drains them too, but it waits without a way
-        // out — and a pipe nobody reads fills at 64 KiB and stops whatever is
-        // writing to it, which here would be the process this thread is waiting
-        // on.
-        let mut out_pipe = child.stdout.take();
+        // The two pipes are drained differently now, and the difference is the
+        // whole of this change. Stderr is still read to a string in its own
+        // thread, exactly as before — it is error text, read once at the end,
+        // and reading it any other way would buy nothing. Stdout is read line
+        // by line, in this thread, because each complete line is either a
+        // `{"delta": "..."}` to forward the moment it arrives or the final
+        // `{"answer": ...}` summary to keep — and a line that has not finished
+        // arriving is not yet either of those, so reading by line rather than
+        // by byte is what keeps a delta from being forwarded half-written.
+        let out_pipe = child.stdout.take();
         let mut err_pipe = child.stderr.take();
-        let out_reader = std::thread::spawn(move || {
-            let mut text = String::new();
-            if let Some(pipe) = out_pipe.as_mut() {
-                let _ = pipe.read_to_string(&mut text);
-            }
-            text
-        });
         let err_reader = std::thread::spawn(move || {
             let mut text = String::new();
             if let Some(pipe) = err_pipe.as_mut() {
@@ -1569,11 +1590,60 @@ pub async fn network_ask(question: String) -> Result<String, String> {
             text
         });
 
+        // Read on a thread of its own so the loop below can keep polling for a
+        // stop without blocking on a line that has not arrived yet — a cold
+        // model can go tens of seconds before its first token, and a stop
+        // pressed in that window must still land within `ASK_POLL`, not wait
+        // behind a read with no timeout.
+        let (lines_tx, lines_rx) = std::sync::mpsc::channel::<String>();
+        let read_thread = std::thread::spawn(move || {
+            if let Some(pipe) = out_pipe {
+                let reader = BufReader::new(pipe);
+                for line in reader.lines() {
+                    match line {
+                        Ok(text) => {
+                            if lines_tx.send(text).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        });
+
+        // A delta's send is best-effort: a channel that fails to deliver one
+        // word is not a reason to end the question, because `network_ask_stop`
+        // already owns that decision — see `ASK_EPOCH` above. This is the one
+        // small helper shared by the two drains below.
+        let mut stdout = String::new();
+        let mut forward = |line: &str| {
+            stdout.push_str(line);
+            stdout.push('\n');
+            let delta = serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|parsed| {
+                    parsed
+                        .get("delta")
+                        .and_then(|d| d.as_str())
+                        .map(str::to_string)
+                });
+            if let Some(text) = delta {
+                let _ = on_delta.send(AskEvent::Delta { text });
+            }
+        };
+
         let (stopped, status) = loop {
             if ASK_EPOCH.load(Ordering::SeqCst) != epoch {
                 let _ = child.kill();
                 let _ = child.wait();
                 break (true, None);
+            }
+            // Drain whatever lines have arrived since the last look. `last_json`
+            // below still needs the whole transcript to find the final summary
+            // line, exactly as it did before this loop existed.
+            while let Ok(line) = lines_rx.try_recv() {
+                forward(&line);
             }
             match child.try_wait() {
                 Ok(Some(done)) => break (false, Some(done)),
@@ -1591,8 +1661,13 @@ pub async fn network_ask(question: String) -> Result<String, String> {
                 }
             }
         };
+        // One last drain: the process has exited, but its last lines may still
+        // be sitting in the channel the reader thread filled on its way out.
+        while let Ok(line) = lines_rx.try_recv() {
+            forward(&line);
+        }
+        let _ = read_thread.join();
 
-        let stdout = out_reader.join().unwrap_or_default();
         let stderr = err_reader.join().unwrap_or_default().trim().to_string();
 
         // The transcript dropped this question the moment it was stopped, so
@@ -1608,7 +1683,11 @@ pub async fn network_ask(question: String) -> Result<String, String> {
             });
         }
         // Ahead of the JSON, `ask` prints "plotting request into vector space"
-        // — see `last_json`.
+        // — see `last_json`. The deltas are also ahead of it now, and
+        // `last_json` already scans from the end for the first line that
+        // parses, so they cost it nothing: a `{"delta": ...}` line parses fine
+        // on its own, but it is never the *last* one, because the summary is
+        // always printed after streaming finishes.
         Ok(last_json(&stdout))
     })
     .await

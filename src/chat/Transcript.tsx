@@ -21,8 +21,21 @@ export interface TranscriptProps {
   messages: readonly ChatMessage[];
   /** A question is out on the network and has not come back. Rendered as the
    *  last thing in the log, because that is where it is: the conversation so
-   *  far, and then the answer being waited on. */
+   *  far, and then the answer being waited on.
+   *
+   *  `false` the moment `streaming` has anything in it — see that prop — so
+   *  the two are never both drawn: a wait with nothing to show yet, and a wait
+   *  with something to show, are one state apiece and not two at once. */
   thinking?: boolean;
+  /** The answer, as it is being typed out — `""` when there is nothing of it
+   *  yet, which draws as nothing rather than as an empty bubble. Only a single
+   *  node's answer ever arrives this way; see `askNetwork`'s header for why a
+   *  panel's answer skips this and goes straight from `thinking` to the
+   *  finished message. Rendered through `renderMessage` exactly like a
+   *  finished one, because a reader should not be able to tell markdown
+   *  mid-stream from markdown that has settled — both are the model's own
+   *  markup, just read at different moments. */
+  streaming?: string;
   /** Let go of that question — the way out of a wait that runs to four minutes.
    *  Passed straight to the waiting line, which is the only thing that has
    *  anything to let go of, and which hands back how long it was held: the clock
@@ -31,7 +44,12 @@ export interface TranscriptProps {
   onStop: (waitedMs: number) => void;
 }
 
-export default function Transcript({ messages, thinking = false, onStop }: TranscriptProps) {
+export default function Transcript({
+  messages,
+  thinking = false,
+  streaming = "",
+  onStop,
+}: TranscriptProps) {
   return (
     // `role="log"` announces what is *added* and not what is there, which is
     // exactly a transcript's contract. A live region on each message would
@@ -60,6 +78,19 @@ export default function Transcript({ messages, thinking = false, onStop }: Trans
         </article>
       ))}
       {thinking && <Thinking onStop={onStop} />}
+      {/* Not yet a `ChatMessage` — it has no id, no timestamp and no `servedBy`,
+          because none of those are known until the answer is actually done.
+          This is the same words a `msg--assistant` article will hold in a
+          moment, drawn early rather than held back, which is the whole point
+          of streaming them at all. */}
+      {streaming !== "" && (
+        <article className="msg msg--assistant">
+          <div
+            className="msg__text"
+            dangerouslySetInnerHTML={{ __html: renderMessage(streaming) }}
+          />
+        </article>
+      )}
     </div>
   );
 }

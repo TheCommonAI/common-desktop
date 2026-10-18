@@ -103,6 +103,15 @@ export default function Chat() {
     return { list: [first], activeId: first.id };
   });
   const [thinking, setThinking] = useState(false);
+  // The answer as it is typed out, or `""` before the first word of it has
+  // arrived. Separate from `thinking` rather than folded into it: the two cover
+  // different stretches of the same wait — `thinking` for however long routing
+  // and model load take, with nothing to show yet, and this for the part where
+  // there is something to show, word by word, before the whole answer is ready
+  // to become a committed `ChatMessage`. It is never read for a panel's answer
+  // — see `askNetwork`'s header — so that case is simply the old wait with
+  // nothing streamed into it, the same as before this existed.
+  const [streaming, setStreaming] = useState("");
   const [seen, setSeen] = useState<boolean | null>(null);
   const [settings, setSettings] = useState(false);
 
@@ -379,7 +388,15 @@ export default function Chat() {
       askingSince.current = Date.now();
       append(id, { role: "user", text: question });
       setThinking(true);
-      askNetwork(prompt)
+      setStreaming("");
+      askNetwork(prompt, (delta) => {
+        if (generation.current !== mine) return;
+        // The first delta ends the wait that had nothing to show — `thinking`
+        // and this are drawn by the same line in `Transcript`, in that order,
+        // so the mark gives way to the words the moment there are any.
+        setThinking(false);
+        setStreaming((soFar) => soFar + delta);
+      })
         .then((reply) => {
           if (generation.current !== mine) return;
           append(id, {
@@ -399,6 +416,11 @@ export default function Chat() {
           askingSince.current = 0;
           answering.current = false;
           setThinking(false);
+          // Cleared rather than left to show the finished answer twice: the
+          // committed message above has just been appended with the identical
+          // text, and the transcript draws from `messages`, not from this, the
+          // moment it exists.
+          setStreaming("");
         });
       return true;
     },
@@ -445,6 +467,10 @@ export default function Chat() {
       generation.current += 1;
       answering.current = false;
       setThinking(false);
+      // Whatever had streamed in dies with the question: the stopped line above
+      // is what the transcript keeps, not a partial answer trailing off
+      // mid-sentence with nothing saying it was cut short.
+      setStreaming("");
     },
     [append],
   );
@@ -574,8 +600,13 @@ export default function Chat() {
         onRestart={restartForUpdate}
       />
       <div className="chat__main">
-        <Transcript messages={active.messages} thinking={thinking} onStop={stopWaiting} />
-        <Composer onSend={send} busy={thinking} />
+        <Transcript
+          messages={active.messages}
+          thinking={thinking}
+          streaming={streaming}
+          onStop={stopWaiting}
+        />
+        <Composer onSend={send} busy={thinking || streaming !== ""} />
       </div>
       {/* Kept mounted and driven by `open`, rather than mounted on demand. A
           `<dialog>` that is closed is `display: none` and costs nothing, and
