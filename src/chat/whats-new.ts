@@ -112,6 +112,12 @@ const NOTES: Record<string, readonly string[]> = {
   "0.2.16": [
     "While an answer is still arriving, a small circle at the end of the text breathes, so you can tell it is still being written. It stops with the rest of the streamed text once the answer is complete, and it stays still for anyone who has reduced motion turned on.",
   ],
+  "0.2.17": [
+    "Setting up on a slow connection no longer gives up partway through the first model download. The wait keeps going while the download is still moving, and a download that really stalls now says so, with how far it got, instead of blaming the network.",
+    "Common checks for a CLI update when it launches, so a machine that only ever runs the app gets fixes to the network's software without waiting for a new app release.",
+    "The disk check on Windows no longer runs a command line with the drive path written into it.",
+    "Answers have a wider reading column, and the setup screens are centred.",
+  ],
 };
 
 /** Every version with notes, oldest first — the order the card reads them in,
@@ -135,6 +141,7 @@ const ORDER: readonly string[] = [
   "0.2.14",
   "0.2.15",
   "0.2.16",
+  "0.2.17",
 ];
 
 // <<< make-notes: end generated

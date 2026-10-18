@@ -943,12 +943,15 @@ async function awaitServing(
   // original put it too: starting a join is an invoke, and a budget that
   // included it would be a budget that quietly shrinks on a slow machine for a
   // reason that has nothing to do with the network.
-  const deadline = Date.now() + opts.deadlineMs;
+  let deadline = Date.now() + opts.deadlineMs;
   let registered: Status | null = null;
   // An attempt is only spent on a join this call actually started. Reusing one
   // that was already serving leaves the count at zero, so a machine whose join
   // dies later in the wait gets all three.
   let attempts = spawning ? 1 : 0;
+  // The last percentage the download showed, or -1 before any was read. Used to
+  // tell a download that is moving from one that has stopped.
+  let lastPercent = -1;
   for (;;) {
     if (signal.cancelled) throw stopped("Stopped.");
     const current = await status();
@@ -963,6 +966,16 @@ async function awaitServing(
     const fetching = await joinFetchProgress();
     if (fetching !== null && fetching.percent < 100) say("fetching-model", { fetch: fetching });
     else say("registering");
+
+    // A download that is moving is not a join that has failed. The deadline above
+    // was sized for a cold start from disk, and a first run on a slower connection
+    // spends longer than that fetching the weights, so while the percentage keeps
+    // climbing the budget starts again from now. A download that stops climbing for
+    // a whole budget is still a failure, and is reported as one below.
+    if (fetching !== null && fetching.percent < 100) {
+      if (fetching.percent > lastPercent) deadline = Date.now() + opts.deadlineMs;
+      lastPercent = fetching.percent;
+    }
 
     // The stop is read first, because it is the only thing on this line the loop
     // has been *told* rather than left to infer. Nothing of this app's is serving:
@@ -1045,6 +1058,17 @@ async function awaitServing(
         // survive the log's uncertainty — see `JoinNetwork.tsx`, where the reason this
         // is not `network` is written down at more length than a comment here could.
         throw new OnboardingError("join-stopped", SENTENCE["join-stopped"], stoppedHere);
+      }
+      // A download that was still running when the budget ran out is a stalled
+      // download, not a gateway that never heard of the machine. The sentence has
+      // to say which, or the user is sent to check the network when the fix is to
+      // run the join again, which resumes the partial file.
+      if (lastPercent >= 0 && lastPercent < 100) {
+        throw new OnboardingError(
+          "network",
+          SENTENCE.network,
+          `the model download stopped at ${lastPercent}% and did not move for ${Math.round(opts.deadlineMs / 1000)}s`,
+        );
       }
       throw new OnboardingError("network", SENTENCE.network, "the gateway never listed this machine");
     }

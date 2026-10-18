@@ -131,6 +131,50 @@ pub fn use_cli_seed(dir: PathBuf) {
     let _ = CLI_SEED.set(dir);
 }
 
+/// How long a launch-time CLI update may run before it is abandoned.
+const CLI_UPDATE_LIMIT: Duration = Duration::from_secs(60);
+
+/// Let the installed CLI bring itself up to date, off the launch path.
+///
+/// Every question the app asks runs the CLI with `--no-update`, so answering never
+/// waits on GitHub. The cost is that a machine which only ever runs this app would
+/// never see a CLI fix without a new app release. So once per launch the app runs
+/// the CLI without that flag, on its own thread: the CLI's own check replaces the
+/// installed copy when GitHub has something newer. Nothing waits on it, and an
+/// attempt that runs past `CLI_UPDATE_LIMIT` is killed. A failed or slow update
+/// leaves the copy that was already there.
+pub fn refresh_cli_in_background() {
+    std::thread::spawn(|| {
+        let Ok(Cli { mut cmd, .. }) = cli() else {
+            return;
+        };
+        // `--help` is enough: the update runs before arguments are read, and it asks
+        // for nothing else. Output goes nowhere, since nobody is waiting for it.
+        cmd.arg("--no-color")
+            .arg("--help")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let Ok(mut child) = cmd.spawn() else {
+            return;
+        };
+        let started = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(None) if started.elapsed() < CLI_UPDATE_LIMIT => {
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+                _ => return,
+            }
+        }
+    });
+}
+
 /// `~/.common-network`, the directory the CLI's own installer owns.
 fn cli_home(home: &Path) -> PathBuf {
     home.join(".common-network")

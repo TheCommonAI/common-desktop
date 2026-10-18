@@ -297,6 +297,9 @@ body {
   /* A very wide window would otherwise stretch a 3rem line to a hundred
      characters. */
   max-width: 44rem;
+  /* Centred, so the sentence sits in the middle of the window. The controls row
+     is flex, so it is centred separately below. */
+  text-align: center;
 }
 
 .sheet--forward {
@@ -361,6 +364,7 @@ body {
 .sheet__controls {
   display: flex;
   flex-wrap: wrap;
+  justify-content: center;
   align-items: baseline;
   gap: 0.6rem 1.75rem;
   margin-top: 2.25rem;
@@ -1045,13 +1049,12 @@ body {
   padding: 3.5rem clamp(2rem, 8%, 4.5rem) 1.5rem;
 }
 
-/* The measure, and deliberately short of the column. The mock leaves more
-   ground to the right of a message than the message takes, and that is not
-   waste: a transcript that fills its column reads as a terminal, and a line of
-   prose that runs the full width of a wide window is one the eye has to hunt
-   back along. */
+/* The measure: short of the column, but not a narrow strip down the middle of
+   it. A transcript that fills its column reads as a terminal, and a line of prose
+   that runs the full width of a wide window is one the eye has to hunt back along,
+   so the cap sits at a comfortable reading width and the column still gets used. */
 .msg {
-  max-width: 20rem;
+  max-width: min(40rem, 100%);
   margin: 0;
 }
 
@@ -1308,7 +1311,7 @@ body {
      wrote is theirs to see whole, and the model's reply is the thing being
      disciplined. */
   align-self: flex-end;
-  max-width: min(22rem, 82%);
+  max-width: min(32rem, 82%);
   padding: 0.5rem 1.1rem 0.45rem;
   border-radius: 22px;
   background: var(--raise);
