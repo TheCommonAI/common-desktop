@@ -114,6 +114,12 @@
         "A machine with memory to spare is no longer held to a model chosen for a lane that no longer exists. The recommendation is read straight from the network's own requirements, so a floor that moves there moves with it here.",
         "The proof-of-life question asked right after joining no longer risks naming the wrong model by mistake. It now simply asks whatever your machine just started running, rather than keeping its own guess of what that should be called."
       ]
+    },
+    {
+      "version": "0.2.14",
+      "notes": [
+        "A machine that updated from before the catalogue changed could land with no model and no way to choose one — Settings said \"No model chosen yet\" and showed nothing underneath it, because the control for picking a model was hidden behind already having one. It's shown outright now whenever none is chosen, so a previously-joined machine can pick a size and reconnect."
+      ]
     }
   ]
 }
