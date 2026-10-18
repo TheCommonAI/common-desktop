@@ -147,6 +147,9 @@ pub fn run() {
             {
                 backend::use_cli_seed(dir);
             }
+            // Off the launch path: the update runs on its own thread and nothing here
+            // waits for it. See `refresh_cli_in_background` for why it is needed.
+            backend::refresh_cli_in_background();
             Ok(())
         })
         // Closing the window hides it. The app is a thing that lives in the menu

@@ -131,6 +131,50 @@ pub fn use_cli_seed(dir: PathBuf) {
     let _ = CLI_SEED.set(dir);
 }
 
+/// How long a launch-time CLI update may run before it is abandoned.
+const CLI_UPDATE_LIMIT: Duration = Duration::from_secs(60);
+
+/// Let the installed CLI bring itself up to date, off the launch path.
+///
+/// Every question the app asks runs the CLI with `--no-update`, so answering never
+/// waits on GitHub. The cost is that a machine which only ever runs this app would
+/// never see a CLI fix without a new app release. So once per launch the app runs
+/// the CLI without that flag, on its own thread: the CLI's own check replaces the
+/// installed copy when GitHub has something newer. Nothing waits on it, and an
+/// attempt that runs past `CLI_UPDATE_LIMIT` is killed. A failed or slow update
+/// leaves the copy that was already there.
+pub fn refresh_cli_in_background() {
+    std::thread::spawn(|| {
+        let Ok(Cli { mut cmd, .. }) = cli() else {
+            return;
+        };
+        // `--help` is enough: the update runs before arguments are read, and it asks
+        // for nothing else. Output goes nowhere, since nobody is waiting for it.
+        cmd.arg("--no-color")
+            .arg("--help")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let Ok(mut child) = cmd.spawn() else {
+            return;
+        };
+        let started = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(None) if started.elapsed() < CLI_UPDATE_LIMIT => {
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+                _ => return,
+            }
+        }
+    });
+}
+
 /// `~/.common-network`, the directory the CLI's own installer owns.
 fn cli_home(home: &Path) -> PathBuf {
     home.join(".common-network")
@@ -620,6 +664,31 @@ fn powershell(script: &str) -> Result<String, String> {
     )
 }
 
+/// `powershell`, with one value handed over as an environment variable.
+///
+/// For a script that needs something from the caller. The script text stays fixed
+/// and the value is only ever read back as `$env:{name}`, so it is data and cannot
+/// be parsed as code. Use this rather than formatting the value into `script`.
+#[cfg(windows)]
+fn powershell_with_env(script: &str, name: &str, value: &str) -> Result<String, String> {
+    let out = silent("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .env(name, value)
+        .output()
+        .map_err(|e| format!("couldn't run powershell: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("powershell exited with {}", out.status));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
 /* --------------------------------- hardware --------------------------------- */
 
 #[derive(Serialize)]
@@ -873,10 +942,19 @@ fn read_disk_blocking(path: &str) -> Result<DiskRead, String> {
 #[cfg(windows)]
 fn read_disk_blocking(path: &str) -> Result<DiskRead, String> {
     let target = weights_volume(path)?;
-    let raw = powershell(&format!(
-        "$d=[System.IO.DriveInfo]::new('{target}'); \
-         \"$($d.TotalSize) $($d.AvailableFreeSpace)\""
-    ))?;
+    // The path is handed over as data, never written into the script. The script
+    // is a constant, so nothing in `target` can close a string literal and start a
+    // command, which is what interpolating it into `-Command` allowed. It has to be
+    // absolute too: a relative path names nothing a drive can answer for.
+    if !Path::new(&target).is_absolute() {
+        return Err(format!("{target:?} is not an absolute path"));
+    }
+    let raw = powershell_with_env(
+        "$d=[System.IO.DriveInfo]::new($env:COMMON_DISK_TARGET); \
+         \"$($d.TotalSize) $($d.AvailableFreeSpace)\"",
+        "COMMON_DISK_TARGET",
+        &target,
+    )?;
     let mut cols = raw.split_whitespace();
     let total_bytes = cols
         .next()
