@@ -106,6 +106,9 @@ const NOTES: Record<string, readonly string[]> = {
   "0.2.14": [
     "A machine that updated from before the catalogue changed could land with no model and no way to choose one — Settings said \"No model chosen yet\" and showed nothing underneath it, because the control for picking a model was hidden behind already having one. It's shown outright now whenever none is chosen, so a previously-joined machine can pick a size and reconnect.",
   ],
+  "0.2.15": [
+    "Answers from a single machine arrive as they're typed, the way a chat is supposed to feel, instead of showing up all at once once the whole thing is ready. On a cold model that used to mean tens of seconds of nothing; now the words land as the network's machine writes them. A question the network splits across more than one machine still arrives all at once, because that answer genuinely isn't written until every machine involved has finished and the pieces are combined — there's nothing earlier to show.",
+  ],
 };
 
 /** Every version with notes, oldest first — the order the card reads them in,
@@ -127,6 +130,7 @@ const ORDER: readonly string[] = [
   "0.2.12",
   "0.2.13",
   "0.2.14",
+  "0.2.15",
 ];
 
 // <<< make-notes: end generated
