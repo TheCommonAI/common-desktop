@@ -3,6 +3,7 @@ import { isOnboardingError, onboardingService } from "../onboarding/service";
 import { gatewaySeesUs } from "./backend";
 import { joinInputs, mayRejoinNow, type Rejoin } from "./rejoin";
 import { recordReportEvent } from "./reporting";
+import { recordUsage } from "./usage";
 
 /**
  * The React binding for a reconnect. The decisions it drives are in `rejoin.ts`.
@@ -131,6 +132,7 @@ export function useRejoin({ onStart, onSettled }: RejoinOptions): RejoinHandles 
           // storage problem the user has not noticed. Neither is a sentence to open
           // the app with. A pressed button is the opposite and owes an answer.
           if (how === "manual") {
+            recordUsage("reconnectsFailed");
             recordReportEvent(
               "connection",
               "Reconnect failed: this machine was set up with a model this version doesn't know.",
@@ -159,6 +161,7 @@ export function useRejoin({ onStart, onSettled }: RejoinOptions): RejoinHandles 
         if (!alive.current) return;
 
         setState({ kind: "working" });
+        recordUsage("reconnectAttempts");
         report.current.onStart();
 
         try {
@@ -187,6 +190,7 @@ export function useRejoin({ onStart, onSettled }: RejoinOptions): RejoinHandles 
                 : String(why)
             }`,
           );
+          recordUsage("reconnectsFailed");
           report.current.onSettled(false);
           return;
         }
@@ -202,6 +206,9 @@ export function useRejoin({ onStart, onSettled }: RejoinOptions): RejoinHandles 
             "connection",
             "Reconnect timed out before the gateway confirmed that it could reach this machine.",
           );
+          recordUsage("reconnectsFailed");
+        } else {
+          recordUsage("reconnectsSucceeded");
         }
         report.current.onSettled(reached);
       } finally {
