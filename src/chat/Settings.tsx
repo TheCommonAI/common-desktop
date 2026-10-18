@@ -302,11 +302,18 @@ export default function Settings({
               : `${nodeName} · serving ${model.label}`}
         </p>
 
-        {/* The hatch. A button that looks exactly like the sentence around it —
-            no underline, no colour, nothing that says press me — because the
-            user is not meant to find it. A hold opens it; a click does nothing;
-            a keyboard activation opens it too, so it is invisible to the eye and
-            present to a reader. */}
+        {/* The hatch. When a model is already running, it is a button that looks
+            exactly like the sentence around it — no underline, no colour, nothing
+            that says press me — because the user is not meant to find it. A hold
+            opens it; a click does nothing; a keyboard activation opens it too, so
+            it is invisible to the eye and present to a reader.
+
+            With no model chosen there is nothing to hide: a machine that updated
+            past a catalogue change loses a stale id in `flow.ts`'s validation, and
+            a node this app has never joined starts the same way. Both need the
+            picker in front of them, not a secret knock — so the picker is shown
+            outright rather than waiting for a hold on a button that would not
+            exist to hold. */}
         <p className="settings__fact">
           {model === null ? (
             "No model chosen yet"
@@ -335,7 +342,7 @@ export default function Settings({
           )}
         </p>
 
-        {hatched && (
+        {(hatched || model === null) && (
           <div className="settings__hatch-open">
             <Choices
               label="Model"
