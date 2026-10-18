@@ -1622,7 +1622,12 @@ pub async fn network_ask(question: String, on_delta: Channel<AskEvent>) -> Resul
             stdout.push('\n');
             let delta = serde_json::from_str::<serde_json::Value>(line)
                 .ok()
-                .and_then(|parsed| parsed.get("delta").and_then(|d| d.as_str()).map(str::to_string));
+                .and_then(|parsed| {
+                    parsed
+                        .get("delta")
+                        .and_then(|d| d.as_str())
+                        .map(str::to_string)
+                });
             if let Some(text) = delta {
                 let _ = on_delta.send(AskEvent::Delta { text });
             }
