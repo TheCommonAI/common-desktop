@@ -664,31 +664,6 @@ fn powershell(script: &str) -> Result<String, String> {
     )
 }
 
-/// `powershell`, with one value handed over as an environment variable.
-///
-/// For a script that needs something from the caller. The script text stays fixed
-/// and the value is only ever read back as `$env:{name}`, so it is data and cannot
-/// be parsed as code. Use this rather than formatting the value into `script`.
-#[cfg(windows)]
-fn powershell_with_env(script: &str, name: &str, value: &str) -> Result<String, String> {
-    let out = silent("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            script,
-        ])
-        .env(name, value)
-        .output()
-        .map_err(|e| format!("couldn't run powershell: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("powershell exited with {}", out.status));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
-}
-
 /* --------------------------------- hardware --------------------------------- */
 
 #[derive(Serialize)]
@@ -936,39 +911,53 @@ fn read_disk_blocking(path: &str) -> Result<DiskRead, String> {
 
 /// Free and total space on the volume the weights land on, the Windows way.
 ///
-/// `DriveInfo` rather than `Get-PSDrive` or `Win32_LogicalDisk`: it is the same
-/// numbers without a WMI round trip, and it takes a drive root directly. It
-/// wants the trailing separator, which is why `weights_volume` keeps one.
+/// `GetDiskFreeSpaceExW` accepts a directory path directly, including paths on
+/// network shares, and avoids passing the path through a command interpreter.
 #[cfg(windows)]
 fn read_disk_blocking(path: &str) -> Result<DiskRead, String> {
     let target = weights_volume(path)?;
-    // The path is handed over as data, never written into the script. The script
-    // is a constant, so nothing in `target` can close a string literal and start a
-    // command, which is what interpolating it into `-Command` allowed. It has to be
-    // absolute too: a relative path names nothing a drive can answer for.
-    if !Path::new(&target).is_absolute() {
-        return Err(format!("{target:?} is not an absolute path"));
+    use std::os::windows::ffi::OsStrExt;
+
+    let mut target_wide: Vec<u16> = std::ffi::OsStr::new(&target).encode_wide().collect();
+    if target_wide.contains(&0) {
+        return Err(format!("disk path contains a null character: {target:?}"));
     }
-    let raw = powershell_with_env(
-        "$d=[System.IO.DriveInfo]::new($env:COMMON_DISK_TARGET); \
-         \"$($d.TotalSize) $($d.AvailableFreeSpace)\"",
-        "COMMON_DISK_TARGET",
-        &target,
-    )?;
-    let mut cols = raw.split_whitespace();
-    let total_bytes = cols
-        .next()
-        .and_then(|v| v.parse::<u64>().ok())
-        .ok_or_else(|| format!("DriveInfo({target}) printed no total: {raw:?}"))?;
-    let free_bytes = cols
-        .next()
-        .and_then(|v| v.parse::<u64>().ok())
-        .ok_or_else(|| format!("DriveInfo({target}) printed no free space: {raw:?}"))?;
+    target_wide.push(0);
+
+    let mut free_bytes = 0u64;
+    let mut total_bytes = 0u64;
+    let result = unsafe {
+        get_disk_free_space_ex_w(
+            target_wide.as_ptr(),
+            &mut free_bytes,
+            &mut total_bytes,
+            std::ptr::null_mut(),
+        )
+    };
+    if result == 0 {
+        return Err(format!(
+            "couldn't read disk space for {target:?}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
     Ok(DiskRead {
         free_bytes,
         total_bytes,
         path: target,
     })
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    #[link_name = "GetDiskFreeSpaceExW"]
+    fn get_disk_free_space_ex_w(
+        directory_name: *const u16,
+        free_bytes_available_to_caller: *mut u64,
+        total_number_of_bytes: *mut u64,
+        total_number_of_free_bytes: *mut u64,
+    ) -> i32;
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
