@@ -1,6 +1,7 @@
 import { useState } from "react";
 import Control from "../onboarding/parts/Control";
 import { diagnostics, saveDiagnostics, type Diagnostics } from "./backend";
+import { recentReportEvents } from "./reporting";
 
 /**
  * How to hand somebody the evidence, for when it will not connect.
@@ -94,6 +95,18 @@ export function reportText(d: Diagnostics): string {
     out.push("End of the log");
     out.push("");
     out.push(d.logTail);
+  }
+
+  out.push("");
+  const events = recentReportEvents();
+  if (events.length > 0) {
+    out.push("Recent automatically captured events (stored on this device)");
+    out.push("These are included only when you choose to copy or save this report.");
+    for (const event of events) {
+      out.push("");
+      out.push(`${event.occurredAt}  ${event.kind}`);
+      out.push(event.message);
+    }
   }
 
   out.push("");

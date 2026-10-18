@@ -1598,6 +1598,64 @@ body {
   margin-bottom: 0;
 }
 
+.feedback {
+  margin-top: 0.6rem;
+}
+
+.feedback__button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: 700 0.9rem/1.5 var(--font-body);
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.feedback__button:hover,
+.feedback__button:focus-visible {
+  text-decoration-color: currentColor;
+}
+
+.feedback__button:focus-visible {
+  outline: 2px solid var(--ink-quiet);
+  outline-offset: 3px;
+}
+
+.feedback__note {
+  min-height: 1.2em;
+  margin: 0.25rem 0 0;
+  color: var(--ink-quiet);
+  font: 400 0.75rem/1.4 var(--font-body);
+}
+
+.crash {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.75rem;
+  width: min(34rem, calc(100% - 3rem));
+  height: 100%;
+  margin: auto;
+}
+
+.crash h1,
+.crash p {
+  margin: 0;
+}
+
+.crash h1 {
+  font: 700 1.25rem/1.4 var(--font-body);
+}
+
+.crash p {
+  color: var(--ink-quiet);
+  font: 400 0.9rem/1.5 var(--font-body);
+}
+
 /* The hatch. It is a button and it is not dressed as one: no underline, no hue,
    no box, and a default cursor rather than a pointing hand. Nothing here may
    invite the press, because the whole feature is that it is not on offer.

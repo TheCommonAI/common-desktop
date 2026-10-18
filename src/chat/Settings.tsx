@@ -12,6 +12,7 @@ import { busy, type UpdateOffer } from "./updates";
 import { findPlace, readPlace, type Place } from "./geo";
 import Globe from "./Globe";
 import ShareLog from "./ShareLog";
+import Feedback from "./Feedback";
 
 /**
  * Settings, as a card over the conversation.
@@ -473,9 +474,18 @@ export default function Settings({
           <p className="settings__label">If it won't connect</p>
           <p className="settings__fact">
             A report of this machine — the app, the CLI, this node's identity — and the end of
-            the join log.
+            the join log, plus recent connection failures and locally captured crashes.
           </p>
           <ShareLog />
+        </div>
+
+        <div className="settings__row">
+          <p className="settings__label">Feedback</p>
+          <p className="settings__fact">
+            Tell us what went wrong or what could be better. Reports stay on this device until you
+            copy or save them; nothing is uploaded automatically.
+          </p>
+          <Feedback />
         </div>
 
         {/* Last of the quiet rows, and the only one about the app rather than the

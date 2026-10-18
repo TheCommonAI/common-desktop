@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { isOnboardingError, onboardingService } from "../onboarding/service";
 import { gatewaySeesUs } from "./backend";
 import { joinInputs, mayRejoinNow, type Rejoin } from "./rejoin";
+import { recordReportEvent } from "./reporting";
 
 /**
  * The React binding for a reconnect. The decisions it drives are in `rejoin.ts`.
@@ -130,6 +131,10 @@ export function useRejoin({ onStart, onSettled }: RejoinOptions): RejoinHandles 
           // storage problem the user has not noticed. Neither is a sentence to open
           // the app with. A pressed button is the opposite and owes an answer.
           if (how === "manual") {
+            recordReportEvent(
+              "connection",
+              "Reconnect failed: this machine was set up with a model this version doesn't know.",
+            );
             setState({
               kind: "failed",
               code: "unknown",
@@ -174,6 +179,14 @@ export function useRejoin({ onStart, onSettled }: RejoinOptions): RejoinHandles 
               ? { kind: "failed", code: why.code, detail: why.detail ?? null }
               : { kind: "failed", code: "unknown", detail: null },
           );
+          recordReportEvent(
+            "connection",
+            `Reconnect failed: ${
+              isOnboardingError(why)
+                ? `${why.code}${why.detail ? ` — ${why.detail}` : ""}`
+                : String(why)
+            }`,
+          );
           report.current.onSettled(false);
           return;
         }
@@ -184,6 +197,12 @@ export function useRejoin({ onStart, onSettled }: RejoinOptions): RejoinHandles 
         const reached = await settled();
         if (!alive.current) return;
         setState(reached ? { kind: "reached" } : { kind: "failed", code: "timeout", detail: null });
+        if (!reached) {
+          recordReportEvent(
+            "connection",
+            "Reconnect timed out before the gateway confirmed that it could reach this machine.",
+          );
+        }
         report.current.onSettled(reached);
       } finally {
         busy.current = false;
