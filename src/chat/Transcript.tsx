@@ -3,6 +3,11 @@ import { formatTime } from "./messages";
 import { renderMessage } from "./markdown";
 import Thinking from "./Thinking";
 
+/* Appended to the streamed HTML rather than rendered beside it, because the text
+   is set with innerHTML and would overwrite any sibling inside the same node on
+   every delta. It is ours, not the model's, so it is not run through the renderer. */
+const STREAM_CURSOR = '<span class="stream-cursor" aria-hidden="true"></span>';
+
 /**
  * The conversation, and nothing else.
  *
@@ -87,7 +92,7 @@ export default function Transcript({
         <article className="msg msg--assistant">
           <div
             className="msg__text"
-            dangerouslySetInnerHTML={{ __html: renderMessage(streaming) }}
+            dangerouslySetInnerHTML={{ __html: renderMessage(streaming) + STREAM_CURSOR }}
           />
         </article>
       )}

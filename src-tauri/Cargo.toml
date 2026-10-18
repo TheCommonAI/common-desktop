@@ -1,6 +1,6 @@
 [package]
 name = "common-desktop"
-version = "0.2.15"
+version = "0.2.16"
 description = "A client for a decentralised network of models running on the machines people already own."
 authors = ["Miles Hedrick"]
 edition = "2024"
