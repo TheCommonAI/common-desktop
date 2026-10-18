@@ -867,30 +867,53 @@ fn read_disk_blocking(path: &str) -> Result<DiskRead, String> {
 
 /// Free and total space on the volume the weights land on, the Windows way.
 ///
-/// `DriveInfo` rather than `Get-PSDrive` or `Win32_LogicalDisk`: it is the same
-/// numbers without a WMI round trip, and it takes a drive root directly. It
-/// wants the trailing separator, which is why `weights_volume` keeps one.
+/// `GetDiskFreeSpaceExW` accepts a directory path directly, including paths on
+/// network shares, and avoids passing the path through a command interpreter.
 #[cfg(windows)]
 fn read_disk_blocking(path: &str) -> Result<DiskRead, String> {
     let target = weights_volume(path)?;
-    let raw = powershell(&format!(
-        "$d=[System.IO.DriveInfo]::new('{target}'); \
-         \"$($d.TotalSize) $($d.AvailableFreeSpace)\""
-    ))?;
-    let mut cols = raw.split_whitespace();
-    let total_bytes = cols
-        .next()
-        .and_then(|v| v.parse::<u64>().ok())
-        .ok_or_else(|| format!("DriveInfo({target}) printed no total: {raw:?}"))?;
-    let free_bytes = cols
-        .next()
-        .and_then(|v| v.parse::<u64>().ok())
-        .ok_or_else(|| format!("DriveInfo({target}) printed no free space: {raw:?}"))?;
+    use std::os::windows::ffi::OsStrExt;
+
+    let mut target_wide: Vec<u16> = std::ffi::OsStr::new(&target).encode_wide().collect();
+    if target_wide.contains(&0) {
+        return Err(format!("disk path contains a null character: {target:?}"));
+    }
+    target_wide.push(0);
+
+    let mut free_bytes = 0u64;
+    let mut total_bytes = 0u64;
+    let result = unsafe {
+        get_disk_free_space_ex_w(
+            target_wide.as_ptr(),
+            &mut free_bytes,
+            &mut total_bytes,
+            std::ptr::null_mut(),
+        )
+    };
+    if result == 0 {
+        return Err(format!(
+            "couldn't read disk space for {target:?}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
     Ok(DiskRead {
         free_bytes,
         total_bytes,
         path: target,
     })
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    #[link_name = "GetDiskFreeSpaceExW"]
+    fn get_disk_free_space_ex_w(
+        directory_name: *const u16,
+        free_bytes_available_to_caller: *mut u64,
+        total_number_of_bytes: *mut u64,
+        total_number_of_free_bytes: *mut u64,
+    ) -> i32;
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
