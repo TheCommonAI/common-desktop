@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """COMMON. — the commons, belonging to everyone and no one.
 
-The Common Network Alpha (v0.1.9).
+The Common Network Alpha (v0.1.12).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -111,7 +111,7 @@ except ImportError:  # pragma: no cover - Windows
 # This CLI only reads it.
 IDENTITY_PATH = Path.home() / ".common-network" / "identity.json"
 
-VERSION = "0.1.9"
+VERSION = "0.1.12"
 RELEASE = "The Common Network Alpha"
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 REPO = "TheCommonAI/common-network"
@@ -1448,6 +1448,16 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
         print(GLYPH_RECV + dim(" streaming"))
         print()
 
+    # Streamed to stdout as it arrives when `--json` asks for a single node's
+    # own answer: a line per delta, `{"delta": "..."}`, flushed immediately so a
+    # reader watching the pipe sees each token the moment this process does. A
+    # panel or a composed answer is deliberately excluded -- see the header on
+    # `_sse_from_text` in the gateway: that text was synthesised whole before
+    # the first byte went out, so chunking it here would be inventing a
+    # generation that never happened, out of an answer that was never streamed
+    # to begin with. Checked once, before the loop starts reading the body,
+    # because `topology` does not change mid-response.
+    stream_json = as_json and topology == "single"
     full = []
     ttft_ms: int | None = None
     with resp:
@@ -1466,7 +1476,10 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
             if delta:
                 if ttft_ms is None:
                     ttft_ms = int((time.monotonic() - start) * 1000)
-                if as_json:
+                if stream_json:
+                    print(json.dumps({"delta": delta}), flush=True)
+                    full.append(delta)
+                elif as_json:
                     full.append(delta)
                 else:
                     print(paper(delta), end="", flush=True)
