@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """COMMON. — the commons, belonging to everyone and no one.
 
-The Common Network Alpha (v0.1.12).
+The Common Network Alpha (v0.1.13).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -98,6 +98,15 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+import concurrent.futures
+import threading
+try:
+    import requests
+    _REQUESTS_SESSION = requests.Session()
+except Exception:
+    requests = None
+    _REQUESTS_SESSION = None
+
 # Not available on Windows. Only used to cap CPU/memory when executing
 # model-generated code during thesis scoring; absence degrades to a plain
 # wall-clock timeout rather than disabling the check.
@@ -111,7 +120,7 @@ except ImportError:  # pragma: no cover - Windows
 # This CLI only reads it.
 IDENTITY_PATH = Path.home() / ".common-network" / "identity.json"
 
-VERSION = "0.1.12"
+VERSION = "0.1.13"
 RELEASE = "The Common Network Alpha"
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 REPO = "TheCommonAI/common-network"
@@ -326,6 +335,26 @@ def http_json(method: str, url: str, body: dict | None = None, headers: dict | N
     # sites is what makes "every gateway request carries it" true by
     # construction instead of by remembering.
     headers = gateway_headers(headers) if client else dict(headers or {})
+
+    # Use requests.Session for connection pooling when available; fall back to
+    # urllib for streaming or when requests is absent. Map exceptions to the
+    # urllib.error types callers already expect.
+    if _REQUESTS_SESSION is not None:
+        try:
+            resp = _REQUESTS_SESSION.request(method, url, json=body, headers=headers, timeout=timeout)
+            if resp.status_code >= 400:
+                # Build an urllib.error.HTTPError to keep callers unchanged.
+                from io import BytesIO
+                fp = BytesIO(resp.content or b"")
+                raise urllib.error.HTTPError(url, resp.status_code, resp.reason, resp.headers, fp)
+            try:
+                return resp.json()
+            except json.JSONDecodeError:
+                # Mirror the urllib behaviour: let the caller see the decode error.
+                raise
+        except requests.exceptions.RequestException as e:
+            raise urllib.error.URLError(str(e))
+
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     if data is not None:
         req.add_header("Content-Type", "application/json")
