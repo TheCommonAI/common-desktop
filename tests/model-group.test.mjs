@@ -22,7 +22,6 @@ const config = await import(
 );
 
 const {
-  CLI_COORDINATOR_PORT,
   DEFAULT_GROUP_PORT,
   DEFAULT_SETTINGS,
   DRAFT_TOKENS_MAX,
@@ -78,10 +77,9 @@ test("a port is an integer from 1024 to 65535, and nothing else", () => {
   assert.equal(isGroupPort(Number.NaN), false);
 });
 
-test("the default port is not the one the CLI's own llama-server uses", () => {
+test("the default port is not the one a normal join's llama-server uses", () => {
   assert.equal(DEFAULT_GROUP_PORT, 11437);
-  assert.equal(CLI_COORDINATOR_PORT, 11436);
-  assert.notEqual(DEFAULT_GROUP_PORT, CLI_COORDINATOR_PORT);
+  assert.notEqual(DEFAULT_GROUP_PORT, 11436);
 });
 
 test("stored settings fall back to the defaults, field by field", () => {
@@ -132,21 +130,18 @@ test("a group that is not configured says why, or that none is chosen", () => {
   );
 });
 
-test("Start is refused on a port the CLI will not serve, and says which one it will", () => {
-  const reason = startBlock(status(), DEFAULT_GROUP_PORT);
-  assert.ok(reason, "11437 is not the CLI's port, so Start must be refused");
-  assert.match(reason, /11436/);
-
-  assert.equal(startBlock(status(), CLI_COORDINATOR_PORT), null);
+test("Start is refused on a port that is not a usable coordinator port", () => {
+  assert.equal(startBlock(status(), DEFAULT_GROUP_PORT), null);
+  assert.match(startBlock(status(), 80), /1024/);
 });
 
 test("Start is refused with no group chosen, and while a coordinator is already running", () => {
   assert.match(
-    startBlock(status({ configured: false, modelName: null, devices: null }), CLI_COORDINATOR_PORT),
+    startBlock(status({ configured: false, modelName: null, devices: null }), DEFAULT_GROUP_PORT),
     /network\.json/,
   );
   assert.match(
-    startBlock(status({ coordinator: { state: "running" } }), CLI_COORDINATOR_PORT),
+    startBlock(status({ coordinator: { state: "running" } }), DEFAULT_GROUP_PORT),
     /already running/,
   );
 });

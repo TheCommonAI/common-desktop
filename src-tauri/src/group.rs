@@ -18,6 +18,8 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::sync::Mutex;
@@ -26,10 +28,8 @@ use tauri::Manager;
 
 use crate::backend::{self, Cli};
 
-/// The port the CLI binds for the coordinator. `join.py` takes it from `LLAMA_PORT`,
-/// and `--local-only` has no option or environment variable that changes it, so the
-/// desktop can start the coordinator only here until the CLI learns one.
-pub const COORDINATOR_PORT: u16 = 11436;
+/// The lowest port a group's coordinator may bind. Below this are system ports.
+pub const MIN_COORDINATOR_PORT: u16 = 1024;
 
 /// The range a group's `draft_tokens` may take. The CLI checks the same range in
 /// `DistributedConfig`. It is repeated here so the panel refuses a value before it
@@ -172,20 +172,14 @@ pub fn check_draft_tokens(value: u32) -> Result<u32, String> {
     }
 }
 
-/// Refuse to start on a port the CLI will not serve the coordinator on.
-///
-/// The panel's port is the one it probes. The CLI binds `COORDINATOR_PORT` whatever
-/// the panel says, so starting anywhere else would leave the panel asking the wrong
-/// port and reporting a healthy coordinator as stopped. Refusing is the honest answer
-/// until the CLI accepts a port.
+/// Refuse a port the coordinator cannot bind. The CLI takes the port as `--port`.
 pub fn check_start_port(port: u16) -> Result<(), String> {
-    if port == COORDINATOR_PORT {
-        Ok(())
-    } else {
+    if port < MIN_COORDINATOR_PORT {
         Err(format!(
-            "the CLI serves the coordinator on port {COORDINATOR_PORT} and has no option for another, \
-             so this group can only be started on {COORDINATOR_PORT}"
+            "the coordinator port must be {MIN_COORDINATOR_PORT} or higher"
         ))
+    } else {
+        Ok(())
     }
 }
 
@@ -339,17 +333,40 @@ pub async fn group_start(
             .arg("join")
             .arg("--distributed-config")
             .arg(&path)
-            .arg("--local-only");
+            .arg("--local-only")
+            .arg("--port")
+            .arg(port.to_string());
         backend::cli_env(&mut cmd);
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::from(log));
         cmd.stderr(Stdio::from(log_err));
 
+        // Its own process group, so Stop reaches the llama-server the CLI starts. Without
+        // it, a coordinator killed past the grace period leaves the runtime holding the port.
+        #[cfg(unix)]
+        cmd.process_group(0);
         let child = cmd.spawn().map_err(|e| backend::launch_error(&bin, e))?;
         *slot = Some(child);
         Ok(())
     })
     .await
+}
+
+/// Send a signal to the coordinator's process group, so its llama-server goes with it.
+#[cfg(unix)]
+fn signal_group(pid: u32, signal: &str) {
+    let _ = std::process::Command::new("kill")
+        .args(["-s", signal, "--", &format!("-{pid}")])
+        .status();
+}
+
+#[cfg(not(unix))]
+fn signal_group(pid: u32, signal: &str) {
+    if signal == "KILL" {
+        backend::kill_join(pid);
+    } else {
+        backend::terminate(pid);
+    }
 }
 
 /// Stop the coordinator: SIGTERM first, so the CLI stops its llama-server and the RPC
@@ -370,7 +387,7 @@ pub async fn group_stop(app: tauri::AppHandle) -> Result<bool, String> {
             return Ok(false);
         };
 
-        backend::terminate(pid);
+        signal_group(pid, "TERM");
         for _ in 0..STOP_POLLS {
             let state = app.state::<Coordinator>();
             let mut slot = lock(&state)?;
@@ -380,7 +397,7 @@ pub async fn group_stop(app: tauri::AppHandle) -> Result<bool, String> {
             drop(slot);
             std::thread::sleep(STOP_POLL_INTERVAL);
         }
-        backend::kill_join(pid);
+        signal_group(pid, "KILL");
         Ok(true)
     })
     .await
@@ -572,9 +589,9 @@ mod tests {
     }
 
     #[test]
-    fn the_coordinator_is_started_only_on_the_port_the_cli_serves() {
-        assert_eq!(check_start_port(COORDINATOR_PORT), Ok(()));
-        let refused = check_start_port(11437).expect_err("11437 is not the CLI's port");
-        assert!(refused.contains("11436"), "{refused}");
+    fn the_coordinator_port_must_be_a_usable_port() {
+        assert_eq!(check_start_port(11437), Ok(()));
+        assert_eq!(check_start_port(MIN_COORDINATOR_PORT), Ok(()));
+        assert!(check_start_port(80).is_err());
     }
 }

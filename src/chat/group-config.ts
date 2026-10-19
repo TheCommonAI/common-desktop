@@ -8,14 +8,9 @@
  * load it as it is.
  */
 
-/** The port the panel probes when nothing has been chosen. Not the CLI's port: that
- *  one is `CLI_COORDINATOR_PORT` below, and the coordinator binds it whatever the
- *  panel says. */
+/** The port the panel uses when nothing has been chosen. It is kept off 11436, the
+ *  default for a normal `join`'s own llama-server, so both can run on one machine. */
 export const DEFAULT_GROUP_PORT = 11437;
-
-/** The port the CLI's coordinator binds. `--local-only` has no option to change it,
- *  so the panel can start a coordinator only on this one, and says so. */
-export const CLI_COORDINATOR_PORT = 11436;
 
 /** Below 1024 needs privileges that nothing the coordinator does needs. */
 export const MIN_GROUP_PORT = 1024;
@@ -112,10 +107,8 @@ export function groupFact(status: GroupStatus): string {
 
 /** Why Start cannot be pressed, or `null` when it can. */
 export function startBlock(status: GroupStatus, port: number): string | null {
+  if (!isGroupPort(port)) return `The port must be a whole number from ${MIN_GROUP_PORT} to ${MAX_GROUP_PORT}.`;
   if (status.coordinator.state === "running") return "The coordinator is already running.";
   if (!status.configured) return "Choose a group's network.json first.";
-  if (port !== CLI_COORDINATOR_PORT) {
-    return `The CLI serves the coordinator on ${CLI_COORDINATOR_PORT}, so this group starts only on ${CLI_COORDINATOR_PORT}.`;
-  }
   return null;
 }
