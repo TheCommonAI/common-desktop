@@ -118,6 +118,11 @@ const NOTES: Record<string, readonly string[]> = {
     "The disk check on Windows no longer runs a command line with the drive path written into it.",
     "Answers have a wider reading column, and the setup screens are centred.",
   ],
+  "0.3.0": [
+    "On Windows the title bar is now the same dark as the app, instead of a light strip across the top of it. Windows 11 shows the full colour; Windows 10 keeps its own dark bar.",
+    "If Common crashes, it keeps the details on this machine and shows a restart screen with a feedback button. Nothing is sent anywhere. The details go into the diagnostics report only when you choose to copy or save it.",
+    "The diagnostics report also counts how many questions were asked, answered, failed or stopped, and how often a reconnect worked. Those counts stay on this machine and contain no conversation text.",
+  ],
 };
 
 /** Every version with notes, oldest first — the order the card reads them in,
@@ -142,6 +147,7 @@ const ORDER: readonly string[] = [
   "0.2.15",
   "0.2.16",
   "0.2.17",
+  "0.3.0",
 ];
 
 // <<< make-notes: end generated

@@ -20,6 +20,10 @@ mod fetch;
 // digest is a defensible thing to write by hand and an HTTP client is not.
 mod sha256;
 
+// The Windows caption, painted to the app's own ground. See `titlebar.rs` for why
+// it is painted rather than removed.
+mod titlebar;
+
 use tauri::{
     Manager, WindowEvent,
     image::Image,
@@ -136,6 +140,9 @@ pub fn run() {
         .manage(fetch::Bootstrap::default())
         .setup(|app| {
             build_tray(app.handle())?;
+            if let Some(window) = app.get_webview_window("main") {
+                titlebar::match_ground(&window);
+            }
             // Where the bundle unpacked the seed copy of the CLI. Resolved here and
             // nowhere else, because this is the one moment an `AppHandle` exists to
             // ask — the commands in `backend.rs` run their work through
