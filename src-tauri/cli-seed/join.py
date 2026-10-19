@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Join the Common Network as a node operator.
 
-The Common Network Alpha (v0.1.9).
+The Common Network Alpha (v0.1.13).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -129,7 +129,7 @@ TUNNEL_RATE_LIMITED_PATTERN = re.compile(r"\b1015\b|\b429\b|too many requests", 
 # join (or run) a different network entirely.
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 
-VERSION = "0.1.9"
+VERSION = "0.1.13"
 RELEASE = "The Common Network Alpha"
 REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/join.py"
@@ -379,6 +379,17 @@ def die(msg: str, code: int = 1) -> None:
 IDENTITY_PATH = Path.home() / ".common-network" / "identity.json"
 
 
+def default_node_name() -> str:
+    """A fresh node name: `common-node` and nine random digits.
+
+    Not the hostname. A machine whose hostname is its LAN address, or a laptop
+    named after its owner, would publish that to the whole network, and the
+    gateway's node list is public. Nine digits is enough that two nodes picking
+    one by chance is unlikely, and registration already refuses a name in use.
+    """
+    return f"common-node{secrets.randbelow(10 ** 9):09d}"
+
+
 def write_identity(gateway: str, name: str, node_id: str, catalogue_id: str | None, domain_tags: list[str] | None, node_token: str | None = None) -> None:
     """Local record of the most recent node this machine registered -- read by
     `common status` / `common whoami` / `common contrib`. Not a cryptographic
@@ -521,14 +532,16 @@ def fetch_update() -> bytes | None:
     return remote if remote != local else None
 
 
-def refresh_siblings() -> None:
+def refresh_siblings() -> bool:
     """Bring every sibling module join.py drives up to date with this script.
 
     join.py imports the worker and the runtime as siblings, so a self-update
     that replaced only join.py would leave a new joiner driving an old worker or
     an old runtime -- exactly the kind of version skew that shows up as a
-    security fix silently not applying. Best effort throughout: a failure here
-    must not block the join, because a working old sibling beats no node at all.
+    security fix silently not applying. A failure here must not block the join,
+    because a working old sibling beats no node at all. It is reported through
+    the return value, though, because the caller about to replace join.py has to
+    hold off when it cannot be sure the siblings match it.
 
     Writes only what differs, so the common case is two small GETs per run. Note
     that this compares contents and nothing else -- there is no checksum or
@@ -536,17 +549,22 @@ def refresh_siblings() -> None:
     oversight introduced here, and is worth knowing when reasoning about what a
     compromised raw.githubusercontent.com would be able to do.
 
-    Called from two places, deliberately: before join.py overwrites itself, so
-    the next process starts with siblings that match it, and from
-    _require_runtime() when runtime.py turns out not to be here at all. The second
-    is what makes a version that predates runtime.py able to upgrade onto it.
+    Called from three places: at startup, so a node left with a stale worker.py
+    recovers; before join.py overwrites itself, so the next process starts with
+    siblings that match it; and from _require_runtime() when runtime.py turns out
+    not to be here at all. The last is what makes a version that predates
+    runtime.py able to upgrade onto it.
+
+    Returns True only when every sibling was confirmed current.
     """
     here = os.path.dirname(os.path.abspath(__file__))
+    current = True
     for name in SIBLING_MODULES:
         try:
             with urllib.request.urlopen(SIBLING_UPDATE_URL.format(name), timeout=5) as resp:
                 remote = resp.read()
             if not remote.strip():
+                current = False
                 continue
             path = os.path.join(here, name)
             try:
@@ -558,12 +576,16 @@ def refresh_siblings() -> None:
             with open(path, "wb") as f:
                 f.write(remote)
         except (urllib.error.URLError, socket.timeout, OSError):
-            continue
+            current = False
+    return current
 
 
 def apply_update_and_restart(remote: bytes) -> None:
-    """Overwrite this script with `remote` and re-exec. Never returns on success."""
-    refresh_siblings()
+    """Overwrite this script with `remote` and re-exec. Never returns on success.
+
+    The caller has already brought the siblings up to date and seen
+    refresh_siblings() return True; see the update checks in main().
+    """
     local_path = os.path.abspath(__file__)
     try:
         with open(local_path, "wb") as f:
@@ -649,6 +671,21 @@ def stop_process(proc: subprocess.Popen | None, timeout: float = 5.0) -> None:
             pass
 
 
+def sleep_idle_seconds(mod) -> int:
+    """How long the model stays resident with no traffic, env or runtime default.
+
+    One reading for two consumers: llama-server is started with it, and the
+    worker needs the same number to schedule its keep-warm pings inside the
+    window. Both sides reading the env separately would be two parses to let
+    drift apart.
+    """
+    raw = os.environ.get("COMMON_SLEEP_IDLE_SECONDS")
+    try:
+        return int(raw) if raw else mod.DEFAULT_SLEEP_IDLE_SECONDS
+    except ValueError:
+        return mod.DEFAULT_SLEEP_IDLE_SECONDS
+
+
 def start_llama_server(gguf: Path, wire_name: str) -> subprocess.Popen:
     """Start llama-server on `gguf`, and block until it is actually serving.
 
@@ -674,11 +711,7 @@ def start_llama_server(gguf: Path, wire_name: str) -> subprocess.Popen:
                      f"Nothing was changed on this machine. Run this again to retry,\n"
                      f"  or fetch a build by hand from https://github.com/{mod.LLAMA_REPO}/releases")
 
-    sleep_idle = os.environ.get("COMMON_SLEEP_IDLE_SECONDS")
-    try:
-        sleep_idle = int(sleep_idle) if sleep_idle else mod.DEFAULT_SLEEP_IDLE_SECONDS
-    except ValueError:
-        sleep_idle = mod.DEFAULT_SLEEP_IDLE_SECONDS
+    sleep_idle = sleep_idle_seconds(mod)
 
     argv = mod.llama_server_argv(binary, gguf, LLAMA_PORT, alias=wire_name,
                                  sleep_idle_seconds=sleep_idle)
@@ -1121,6 +1154,19 @@ TUNNEL_HEALTH_CHECK_INTERVAL_SECONDS = 120  # quick tunnels can silently reconne
 # This timeout must exceed that window, otherwise the client aborts mid-retry.
 REGISTRATION_TIMEOUT = 90  # seconds — comfortably above gateway's 30s DNS retry
 
+# How a re-announce is retried once the gateway's copy of our address has gone
+# stale. Short and bounded, unlike the initial registration's 60s, because this
+# runs on the serving loop -- the same loop that notices a dead tunnel or a
+# dead model, and that must not sit in a retry while it does. Giving up here is
+# safe in a way it is not there: the disagreement this exists to fix outlives
+# the attempt, so the next pass simply tries again.
+# A restarted quick tunnel's hostname can take well over the old three attempts
+# (about six seconds) to resolve, and the gateway only waits about 30s itself. So
+# the schedule runs to roughly a minute: 2, 4, 8, then 10s between the rest.
+REANNOUNCE_ATTEMPTS = 8
+REANNOUNCE_BACKOFF_SECONDS = 2
+REANNOUNCE_MAX_BACKOFF_SECONDS = 10
+
 
 def tunnel_is_healthy(tunnel_url: str, worker_token: str) -> bool:
     """Is the tunnel still carrying traffic to our worker?
@@ -1170,6 +1216,68 @@ def wait_for_tunnel(tunnel_url: str, worker_token: str) -> bool:
             working(f"waiting for tunnel to become reachable (up to {TUNNEL_WARMUP_TIMEOUT_SECONDS}s)...")
         time.sleep(wait)
     return False
+
+
+def reannounce_target(tunnel_url: str, registered_url: str | None) -> str | None:
+    """The address the gateway should have for us, or None if it already has it.
+
+    A serving node has two addresses and they can disagree: the one it is
+    answering on, and the one the gateway has on file. Only the first is
+    anything this process can check from here -- which is the whole reason a
+    node can sit for hours looking perfectly fine locally while every request
+    the network sends it goes nowhere. A health check cannot see this
+    disagreement, because the tunnel really is healthy; what is stale is the
+    gateway's copy of where it points.
+
+    Both kinds of address land here, because both move for reasons the far end
+    cannot observe: a quick tunnel rotates its hostname without the cloudflared
+    process dying, and a DHCP lease renewal reassigns a LAN address.
+    """
+    wanted = f"{tunnel_url}/v1"
+    return None if wanted == registered_url else wanted
+
+
+def reannounce(gateway: str, payload: dict, node_token: str, wanted: str,
+               attempts: int = REANNOUNCE_ATTEMPTS,
+               backoff: float = REANNOUNCE_BACKOFF_SECONDS,
+               poster=None) -> tuple[dict | None, str | None]:
+    """Tell the gateway where we are now, retrying a bounded number of times.
+
+    Returns `(node, None)` on success, `(None, detail)` once every attempt has
+    failed -- and a failure here is deliberately not fatal. This is the one
+    case in this file where giving up is right: the disagreement this exists to
+    fix is still true after a failed attempt, so the caller retries on its next
+    pass rather than dying.
+
+    That shape is the fix for a real outage. The code here used to try exactly
+    once and then forget, while mutating the payload as if it had succeeded --
+    so after a rotation the node stayed registered against a hostname that no
+    longer existed, answering every heartbeat, until it was restarted by hand.
+    The retry is not a nicety: a restarted quick tunnel is NXDOMAIN for a while,
+    and the first attempt lands squarely in that window, so one retry is often
+    the difference between re-announcing and never re-announcing at all.
+
+    `poster` is injectable so the retry can be exercised without a gateway.
+    """
+    post = poster or http_json
+    # A copy: a failed attempt must leave `payload` -- and with it the address
+    # the rest of the loop believes the gateway holds -- exactly as it was.
+    body = dict(payload, endpoint_url=wanted)
+    detail = None
+    tries = max(1, attempts)
+    for attempt in range(tries):
+        try:
+            node = post("POST", f"{gateway}/nodes", body=body,
+                        headers=gateway_headers({"X-Common-Node-Token": node_token}),
+                        timeout=REGISTRATION_TIMEOUT)
+            return node, None
+        except urllib.error.HTTPError as e:
+            detail = f"{e.code} {e.read().decode(errors='ignore').strip()}"
+        except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+            detail = str(getattr(e, "reason", e))
+        if attempt + 1 < tries:
+            time.sleep(min(backoff * (2 ** attempt), REANNOUNCE_MAX_BACKOFF_SECONDS))
+    return None, detail
 
 
 def lan_ip() -> str | None:
@@ -1498,7 +1606,7 @@ def main() -> None:
     # often share a hostname) from colliding.
     # Default is None here; resolved below to either the persisted identity's
     # name (for stable node IDs across restarts) or a fresh hostname + suffix.
-    parser.add_argument("--name", default=None, help="Node name, published to the network (default: reuse previous name, or hostname + short random suffix)")
+    parser.add_argument("--name", default=None, help="Node name, published to the network (default: reuse previous name, or common-node + nine random digits)")
     parser.add_argument("--operator", default="friend", help="Name shown publicly as this node's operator (default: 'friend')")
     parser.add_argument("--region", default=None, help="Optional region hint, e.g. au-adelaide")
     parser.add_argument("--cost", type=float, default=0, help="Declared cost per 1k tokens (default: 0, it's free)")
@@ -1510,8 +1618,14 @@ def main() -> None:
     args = parser.parse_args()
 
     if not args.no_update:
+        # A node can be left running a join.py that expects a newer worker.py than
+        # the one beside it, and every start after that fails at serve() with a
+        # TypeError. Refreshing here, and reloading worker in this process, is what
+        # lets such a node recover without waiting for join.py itself to change.
+        if refresh_siblings():
+            importlib.reload(worker)
         remote = fetch_update()
-        if remote:
+        if remote and refresh_siblings():
             print(f"{GLYPH_WORK} {dim('updating to the latest version...')}")
             apply_update_and_restart(remote)
 
@@ -1531,7 +1645,7 @@ def main() -> None:
         if identity and identity.get("gateway") == gateway and identity.get("name"):
             args.name = identity["name"]
         else:
-            args.name = f"{socket.gethostname()}-{os.urandom(2).hex()}"
+            args.name = default_node_name()
 
     if args.list_catalogue:
         hw = probe_hardware()
@@ -1577,7 +1691,12 @@ def main() -> None:
     # itself never has to be reachable from outside, on either path.
     worker_token = secrets.token_urlsafe(24)
     try:
-        worker.serve(worker_token, wire_name, port=WORKER_PORT, upstream_url=LLAMA_URL)
+        # The sleep window goes in too, so the worker can keep the model
+        # resident for as long as this node is serving rather than letting the
+        # next user after a quiet half hour pay the reload. See _keep_warm in
+        # worker.py; the same number is llama-server's --sleep-idle-seconds.
+        worker.serve(worker_token, wire_name, port=WORKER_PORT, upstream_url=LLAMA_URL,
+                     sleep_idle_seconds=sleep_idle_seconds(_require_runtime()))
     except OSError as e:
         stop_process(llama_proc)
         die_with_fix(
@@ -1746,6 +1865,12 @@ def main() -> None:
 
     node_id = node["id"]
     node_token = node["node_token"]
+    # What the gateway has just been told, remembered for the life of this
+    # process. Every change to where this machine answers has to be reconciled
+    # against it -- see `reannounce_target` -- and it only ever moves once the
+    # gateway has confirmed the new address, never when a request to say so
+    # failed.
+    registered_url = payload["endpoint_url"]
     print(f"{GLYPH_DONE} {blue('you are live', bold=True)} · node id: {node_id}")
     print(comment("keep this window open to stay in the network — ctrl+c to leave."))
 
@@ -1788,51 +1913,58 @@ def main() -> None:
                   f"— code {llama_proc.returncode}. Leaving the network; restart to rejoin.")
             cleanup()
 
-        # A LAN node has no tunnel to rotate or restart, but its address can
-        # still change under it -- DHCP renewal on a school network reassigns
-        # addresses routinely, and a node registered at a stale IP is a node
-        # the gateway will mark unhealthy for reasons nobody can see.
-        if tunnel_proc is None and time.monotonic() - last_tunnel_check > TUNNEL_HEALTH_CHECK_INTERVAL_SECONDS:
+        if time.monotonic() - last_tunnel_check > TUNNEL_HEALTH_CHECK_INTERVAL_SECONDS:
             last_tunnel_check = time.monotonic()
-            current = lan_ip()
-            if current and f"http://{current}:{WORKER_PORT}" != tunnel_url:
-                tunnel_url = f"http://{current}:{WORKER_PORT}"
-                payload["endpoint_url"] = f"{tunnel_url}/v1"
-                print(f"{GLYPH_FORMING} this machine's address changed — re-registering at {blue(tunnel_url)}")
-                try:
-                    node = http_json("POST", f"{gateway}/nodes", body=payload,
-                                     headers=gateway_headers({"X-Common-Node-Token": node_token}),
-                                     timeout=REGISTRATION_TIMEOUT)
-                    node_id, node_token = node["id"], node["node_token"]
-                except (urllib.error.HTTPError, urllib.error.URLError, socket.timeout, TimeoutError) as e:
-                    err_msg = f"{e.code}" if isinstance(e, urllib.error.HTTPError) else str(e)
-                    print(f"{GLYPH_FAILED} {red(f'failed to re-register on the new address: {err_msg}')}", file=sys.stderr)
 
-        if tunnel_proc is not None and time.monotonic() - last_tunnel_check > TUNNEL_HEALTH_CHECK_INTERVAL_SECONDS:
-            last_tunnel_check = time.monotonic()
-            if not tunnel_is_healthy(tunnel_url, worker_token):
+            # Where are we serving from now? Two things can move that, and
+            # neither is visible from the far end.
+            #
+            # A LAN node has no tunnel to rotate or restart, but its address can
+            # still change under it -- DHCP renewal on a school network reassigns
+            # addresses routinely, and a node registered at a stale IP is a node
+            # the gateway will mark unhealthy for reasons nobody can see.
+            if tunnel_proc is None:
+                current = lan_ip()
+                if current and f"http://{current}:{WORKER_PORT}" != tunnel_url:
+                    tunnel_url = f"http://{current}:{WORKER_PORT}"
+            elif not tunnel_is_healthy(tunnel_url, worker_token):
                 print(f"{GLYPH_FORMING} {red('tunnel is no longer reachable')} (quick tunnels can silently rotate hostnames) — restarting it...")
                 stop_process(tunnel_proc)
                 tunnel_proc, tunnel_url = start_tunnel()
                 print(f"{GLYPH_DONE} tunnel live at {blue(tunnel_url)}")
-                payload["endpoint_url"] = f"{tunnel_url}/v1"
-                try:
-                    node = http_json("POST", f"{gateway}/nodes", body=payload,
-                                     headers=gateway_headers({"X-Common-Node-Token": node_token}),
-                                     timeout=REGISTRATION_TIMEOUT)
+
+            # Then tell the gateway, rather than only testing ourselves.
+            # Restarting the tunnel is half the job: the gateway still holds the
+            # old hostname, and the check above cannot notice that, because the
+            # tunnel is fine -- it is the gateway's copy of our address that is
+            # stale. So the re-announce is driven by the two addresses
+            # disagreeing, not by a health check that cannot see the
+            # disagreement at all.
+            #
+            # A failed attempt leaves them disagreeing on purpose, so the next
+            # pass tries again; see `reannounce` for why that is the shape.
+            wanted = reannounce_target(tunnel_url, registered_url)
+            if wanted is not None:
+                # The wording is the pre-existing wording for each case, kept
+                # exactly: the desktop app reads these lines.
+                if tunnel_proc is None:
+                    print(f"{GLYPH_FORMING} this machine's address changed — re-registering at {blue(tunnel_url)}")
+                node, detail = reannounce(gateway, payload, node_token, wanted)
+                if node is None:
+                    what = "on the new address" if tunnel_proc is None else "after tunnel restart"
+                    print(f"{GLYPH_FAILED} {red(f'failed to re-register {what}: {detail}')}", file=sys.stderr)
+                else:
                     node_id = node["id"]
                     node_token = node["node_token"]
-                    print(f"{GLYPH_DONE} re-registered '{args.name}' with the new tunnel url.")
-                except urllib.error.HTTPError as e:
-                    print(f"{GLYPH_FAILED} {red(f'failed to re-register after tunnel restart: {e.code} {e.read().decode()}')}", file=sys.stderr)
-                except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
-                    err_msg = str(e)
-                    print(f"{GLYPH_FAILED} {red(f'failed to re-register after tunnel restart: {err_msg}')}", file=sys.stderr)
+                    payload["endpoint_url"] = wanted
+                    registered_url = wanted
+                    if tunnel_proc is not None:
+                        print(f"{GLYPH_DONE} re-registered '{args.name}' with the new tunnel url.")
 
         if not args.no_update and time.monotonic() - last_update_check > UPDATE_CHECK_INTERVAL_SECONDS:
             last_update_check = time.monotonic()
             remote = fetch_update()
-            if remote:
+            if remote and refresh_siblings():
                 print(f"\n{GLYPH_WORK} {dim('a new version is available — restarting to update...')}")
                 deregister_and_stop()
                 apply_update_and_restart(remote)

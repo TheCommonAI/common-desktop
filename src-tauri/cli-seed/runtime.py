@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The model runtime: fetch llama.cpp, and fetch the weights it serves.
 
-The Common Network Alpha (v0.1.9).
+The Common Network Alpha (v0.1.13).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -100,9 +100,14 @@ DEFAULT_CTX = 4096
 # successor to the `keep_alive: "30m"` hint worker.py used to stamp on every
 # request, and it is a better mechanism for the same intent: the process that
 # owns the weights decides when to release them, instead of another process being
-# asked nicely each time. 30 minutes because a node that has run `common join`
-# has already decided its hardware is for this, and half an hour of quiet is
-# still a laptop's worth of courtesy before the RAM goes back.
+# asked nicely each time.
+#
+# While a node is joined, this window never actually arrives: the worker pings
+# the backend well inside it (see _keep_warm in worker.py), because a sleeping
+# server is woken by the next user, who then pays the reload. Half an hour of
+# quiet as a laptop's worth of courtesy is the right trade for the case that
+# remains -- the node has left, or the worker died and the backend is lingering
+# -- which is exactly when the keep-warm pings stop too.
 DEFAULT_SLEEP_IDLE_SECONDS = 1800
 
 # Streaming a 3-9GB model over a home connection, where the socket is idle far
@@ -268,8 +273,44 @@ class _Progress:
 
 # --- fetching ---------------------------------------------------------------
 
+# How many times one fetch tries before giving up, and how long it waits before
+# each retry (multiplied by the attempt number). Every try resumes from the partial
+# file, so a retry costs only the bytes that did not arrive. The join used to give
+# up on the first dropped connection, and the whole join then had to be started
+# again by hand.
+DOWNLOAD_ATTEMPTS = 4
+DOWNLOAD_RETRY_SECONDS = 5
+
+
+def _interrupted(e: FetchFailed) -> bool:
+    """True for a failure the next try can resume past, and False for one it cannot.
+
+    A dropped or stalled connection is worth another try. A checksum or size that
+    does not match is not: the file was complete and wrong, and a resume would
+    only append to the wrong thing.
+    """
+    text = str(e)
+    return "was interrupted" in text or "could not reach" in text
+
+
 def _download(url: str, dest: Path, expected_sha: str | None = None,
               expected_size: int | None = None, what: str = "") -> None:
+    """Fetch `url` to `dest`, retrying an interrupted attempt from where it stopped."""
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+        try:
+            _download_once(url, dest, expected_sha, expected_size, what)
+            return
+        except FetchFailed as e:
+            if attempt == DOWNLOAD_ATTEMPTS or not _interrupted(e):
+                raise
+            print(f"  the download of {what or url} was interrupted; trying again "
+                  f"from where it stopped ({attempt} of {DOWNLOAD_ATTEMPTS})",
+                  file=sys.stderr)
+            time.sleep(DOWNLOAD_RETRY_SECONDS * attempt)
+
+
+def _download_once(url: str, dest: Path, expected_sha: str | None = None,
+                   expected_size: int | None = None, what: str = "") -> None:
     """Fetch `url` to `dest`, resuming an interrupted attempt and verifying it.
 
     The registry answers a blob GET with a 307 to a pre-signed object-storage URL
@@ -336,7 +377,18 @@ def _download(url: str, dest: Path, expected_sha: str | None = None,
         try:
             with open(part, mode) as out:
                 while True:
-                    chunk = resp.read(1024 * 256)
+                    try:
+                        chunk = resp.read(1024 * 256)
+                    except OSError as e:
+                        # A stalled or dropped connection is the common way a
+                        # first-run download on a slow network fails, and it must
+                        # be said as a FetchFailed: the caller only handles that,
+                        # so anything else ends the join with a traceback. The
+                        # partial file is kept, so running again resumes from it.
+                        raise FetchFailed(
+                            f"the download of {what or url} was interrupted at "
+                            f"{_size(have)} ({e}); run this again and it resumes"
+                        ) from None
                     if not chunk:
                         break
                     out.write(chunk)
