@@ -31,7 +31,7 @@ terminal commands are needed.
 Three things keep those links working, and each is easy to undo by accident:
 
 - **the installer filenames carry no version.** Tauri names them
-  `Common_0.2.0_x64-setup.exe`; `publish-preview.yml` renames them to the three
+  `Common_0.3.0_x64-setup.exe`; `publish-preview.yml` renames them to the three
   above, and that workflow is the only place that does.
 - **the release is published as a full release, not a prerelease.**
   `/releases/latest/download/<file>` resolves only to the newest
@@ -52,7 +52,9 @@ answer says which machine gave it.
 downloads and serves the one model that would help. Your model runs here and
 answers here. Contributing needs a downloaded model and nothing installed by
 hand: the CLI the app runs fetches the model and the llama.cpp server that serves
-it, and neither is needed to use Chat.
+it, and neither is needed to use Chat. First run sets up one model on one machine.
+A model split across several machines is covered below and is not something the
+app sets up.
 
 On first launch, Common shows what it found on this machine, offers the model
 the network most needs that this machine can actually run, and says what
@@ -101,6 +103,29 @@ launcher resolves its own interpreter and does not consult `PATH`.
 Only the CLI is bundled, and it is AGPL-3.0-or-later, the same licence as this app.
 Python and cloudflared stay with their distributors — see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Model groups across machines
+
+A model too large for one machine can be split across several llama.cpp RPC
+devices, with a small draft model on the coordinator doing speculative decoding.
+This is operator-managed. First run does not set it up, the app fetches none of
+it, and the app has no setting for it. It needs the v0.2 line of the CLI, which the
+copy bundled here does not have.
+
+- Build llama.cpp with `-DGGML_RPC=ON`, plus the accelerator for that host, on
+  every machine in the group, all from the same revision. Common does not download
+  this build. The ordinary release the CLI fetches may not support it.
+- Run each RPC worker bound to `127.0.0.1` only. RPC has no authentication of its
+  own and must never be exposed publicly, not through a public port and not through
+  the Cloudflare tunnel. Reach each worker through an authenticated private
+  transport, such as an SSH forward.
+- Start the coordinator with `common join --distributed-config <network.json>`.
+  `--local-only` runs the model API on `127.0.0.1` with no gateway registration,
+  tunnel or identity change, for testing. Runtime diagnostics go to
+  `~/.common-network/runtime.log`.
+
+The configuration fields and the checks to run before serving are in the CLI's own
+documentation.
 
 ## Building from source
 

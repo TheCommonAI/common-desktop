@@ -61,7 +61,7 @@ use tauri::ipc::Channel;
 /// This matters more than a path lookup usually would: `~/.common-network` is
 /// where the CLI, the join log, the identity and the weights all live, so a
 /// missed home is not one broken feature but every network feature at once.
-fn home_dir() -> Result<PathBuf, String> {
+pub(crate) fn home_dir() -> Result<PathBuf, String> {
     if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(home));
     }
@@ -299,9 +299,9 @@ fn place_cli(seed: Option<&Path>, home: &Path) -> Option<PathBuf> {
 /// A `common` invocation, resolved.
 ///
 /// The command to run, and the path to name if it will not start.
-struct Cli {
-    cmd: Command,
-    named: PathBuf,
+pub(crate) struct Cli {
+    pub(crate) cmd: Command,
+    pub(crate) named: PathBuf,
 }
 
 /// Build a `common` invocation, whichever way this machine can run one.
@@ -319,7 +319,7 @@ struct Cli {
 ///
 /// `COMMON_BIN` still wins outright: it is how somebody runs this app against a
 /// checkout, and a seed must not get in the way of that.
-fn cli() -> Result<Cli, String> {
+pub(crate) fn cli() -> Result<Cli, String> {
     if let Ok(explicit) = std::env::var("COMMON_BIN")
         && !explicit.is_empty()
     {
@@ -383,7 +383,7 @@ fn cli_path() -> String {
 /// `join.py` of that time asked `shutil.which("ollama")` before it did anything at all
 /// and exited on the answer no. Both halves of that are gone: the join no longer looks
 /// for a daemon, and neither does anything here.
-fn cli_env(cmd: &mut Command) {
+pub(crate) fn cli_env(cmd: &mut Command) {
     // Belt and braces beside `--no-color`: the CLI also honours NO_COLOR, and a
     // stray escape sequence inside JSON is a parse error with a baffling cause.
     cmd.env("NO_COLOR", "1");
@@ -432,7 +432,7 @@ fn cli_env(cmd: &mut Command) {
 /// run is not runnable here, and no join has left the machine — so the sentence
 /// stands as written for both, and `common_names` is where the one case that
 /// would have made this confusing is dealt with instead.
-fn launch_error(bin: &std::path::Path, error: std::io::Error) -> String {
+pub(crate) fn launch_error(bin: &std::path::Path, error: std::io::Error) -> String {
     match error.kind() {
         std::io::ErrorKind::NotFound => format!(
             "Common's command-line tool is not installed ({})",
@@ -1088,7 +1088,7 @@ fn read_os_blocking() -> Result<OsRead, String> {
 /// on the main thread, and `read_graphics` on an Intel Mac is a
 /// multi-second `system_profiler` — long enough to freeze the window it is
 /// drawing.
-async fn off_thread<T, F>(work: F) -> Result<T, String>
+pub(crate) async fn off_thread<T, F>(work: F) -> Result<T, String>
 where
     F: FnOnce() -> Result<T, String> + Send + 'static,
     T: Send + 'static,
@@ -1453,7 +1453,7 @@ fn join_processes(_dir: &std::path::Path) -> Vec<u32> {
 
 /// Ask a process to stop, so that it gets to run its own cleanup.
 #[cfg(unix)]
-fn terminate(pid: u32) {
+pub(crate) fn terminate(pid: u32) {
     // SIGTERM and not SIGKILL, which is the whole point of the exercise: the
     // handler it triggers is what deregisters the node, forgets the identity and
     // closes the tunnel. Ending the process outright would leave all three.
@@ -1461,7 +1461,7 @@ fn terminate(pid: u32) {
 }
 
 #[cfg(windows)]
-fn terminate(pid: u32) {
+pub(crate) fn terminate(pid: u32) {
     // Without `/F`, which is as close to a polite request as Windows offers. It is
     // not SIGTERM and Python's handler does not run for it, so the caller has to
     // be ready for the process still being there afterwards — the hard ending
@@ -1474,17 +1474,17 @@ fn terminate(pid: u32) {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn terminate(_pid: u32) {}
+pub(crate) fn terminate(_pid: u32) {}
 
 /// End a process that would not go. `/T` on Windows takes the children with it,
 /// which is what stops an orphaned tunnel outliving the node it belonged to.
 #[cfg(unix)]
-fn kill_join(pid: u32) {
+pub(crate) fn kill_join(pid: u32) {
     let _ = silent("kill").arg("-KILL").arg(pid.to_string()).status();
 }
 
 #[cfg(windows)]
-fn kill_join(pid: u32) {
+pub(crate) fn kill_join(pid: u32) {
     let _ = silent("taskkill")
         .arg("/PID")
         .arg(pid.to_string())
@@ -1494,7 +1494,7 @@ fn kill_join(pid: u32) {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn kill_join(_pid: u32) {}
+pub(crate) fn kill_join(_pid: u32) {}
 
 /// Ask the local model something, through the same path the CLI uses.
 ///
@@ -1836,7 +1836,8 @@ pub async fn network_join(
             cmd.arg("--name").arg(n);
         }
         if lan {
-            // The computer-lab path: no tunnel, nothing exposed to the internet.
+            // The computer-lab path: a LAN worker address in place of the tunnel. The
+            // gateway still lists the node, so this is not an offline mode.
             cmd.arg("--lan");
         } else {
             // Unattended: `join` otherwise stops at a prompt for the model, and
@@ -2273,7 +2274,7 @@ const JOIN_PROGRESS_LINES: usize = 4;
 #[derive(Serialize)]
 pub struct JoinFetch {
     /// What is arriving, in the CLI's own words: the weights' wire name, or
-    /// `the llama.cpp runtime (b11700)`. Carried rather than translated, because
+    /// `the llama.cpp runtime (b11669)`. Carried rather than translated, because
     /// the app has no better name for it than the layer that went to get it.
     name: String,
     percent: u32,
@@ -2335,7 +2336,7 @@ pub async fn network_join_progress(from: u64) -> Result<Option<JoinFetch>, Strin
 ///
 /// Two spaces between the fields, the percentage padded to three columns. Parsed
 /// from the right, because `<what>` is free text — a wire name, or `the llama.cpp
-/// runtime (b11700)` — and `<done>` is a rendered size that carries a space of its
+/// runtime (b11669)` — and `<done>` is a rendered size that carries a space of its
 /// own. A line that does not fit the shape is not this line, and that is what keeps
 /// the join's ordinary output out of the answer: the percentage is the last thing
 /// that has to parse, and only a mark has one. A failure sentence such as
@@ -2804,6 +2805,70 @@ mod join_log {
         let long: String = (1..=40).map(|n| format!("line {n}\n")).collect();
         let tail = tail_from(&long, 0, 3);
         assert_eq!(tail, "line 38\nline 39\nline 40");
+    }
+}
+
+/// An answer the CLI could not finish. The CLI prints each word as it arrives and
+/// exits non-zero when the stream ends without `[DONE]`; the chat has already drawn
+/// those words by then, so the non-zero exit is what tells it to throw them away.
+#[cfg(all(test, unix))]
+mod ask {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A stand-in `common`, written to a scratch file of this test's own.
+    fn fake_cli(body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("common-ask-{}", std::process::id()));
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("a stand-in CLI");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("an executable stand-in CLI");
+        path
+    }
+
+    #[test]
+    fn a_cut_off_answer_is_a_failure_even_though_its_first_words_were_shown() {
+        let shown = Arc::new(AtomicUsize::new(0));
+        let counter = shown.clone();
+        let channel = Channel::new(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        let stand_in = fake_cli(
+            "printf '%s\\n' '{\"delta\": \"Partial \"}' '{\"delta\": \"answer\"}'\n\
+             echo '✗ the answer stream ended before it was complete.' >&2\n\
+             exit 1",
+        );
+        // SAFETY: no other test in this crate reads `COMMON_BIN`, and the two cases
+        // below run one after the other in this test rather than in parallel.
+        unsafe { std::env::set_var("COMMON_BIN", &stand_in) };
+
+        let result = tauri::async_runtime::block_on(network_ask("hello".into(), channel));
+        assert!(
+            matches!(&result, Err(e) if e.contains("ended before it was complete")),
+            "a stream cut before [DONE] must be an error, not an answer: {result:?}"
+        );
+        assert_eq!(
+            shown.load(Ordering::SeqCst),
+            2,
+            "the words were shown before the cut"
+        );
+        let _ = std::fs::remove_file(&stand_in);
+
+        // The same words with a summary and a clean exit are the answer, so the
+        // failure above is the exit code and not the deltas.
+        let stand_in = fake_cli(
+            "printf '%s\\n' '{\"delta\": \"Whole \"}' '{\"answer\": \"Whole answer\", \"node\": \"n\"}'",
+        );
+        unsafe { std::env::set_var("COMMON_BIN", &stand_in) };
+        let channel = Channel::new(|_| Ok(()));
+        let result = tauri::async_runtime::block_on(network_ask("hello".into(), channel));
+        let _ = std::fs::remove_file(&stand_in);
+        assert!(
+            matches!(&result, Ok(json) if json.contains("Whole answer")),
+            "a finished answer is returned whole: {result:?}"
+        );
     }
 }
 

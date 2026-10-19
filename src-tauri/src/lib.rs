@@ -24,6 +24,10 @@ mod sha256;
 // it is painted rather than removed.
 mod titlebar;
 
+// The distributed model group: its configuration, its health, and the local
+// coordinator that serves it. See `group.rs` for what it reads and starts.
+mod group;
+
 use tauri::{
     Manager, WindowEvent,
     image::Image,
@@ -138,6 +142,9 @@ pub fn run() {
         // one-off that installs three things in a row, and there is nothing a
         // second concurrent one could mean.
         .manage(fetch::Bootstrap::default())
+        // The local coordinator of the model group, held the same way the join is,
+        // so that a stop can be answered from the process handle.
+        .manage(group::Coordinator::default())
         .setup(|app| {
             build_tray(app.handle())?;
             if let Some(window) = app.get_webview_window("main") {
@@ -229,6 +236,13 @@ pub fn run() {
             // payload is a string and Rust never looks inside it — see `store.rs`.
             store::conversations_read,
             store::conversations_write,
+            // The model group: what its configuration says and what its coordinator
+            // answers, the start and stop of that coordinator, and the one field the
+            // panel writes back into the configuration.
+            group::group_status,
+            group::group_start,
+            group::group_stop,
+            group::group_set_draft_tokens,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
