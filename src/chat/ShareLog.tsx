@@ -1,6 +1,8 @@
 import { useState } from "react";
 import Control from "../onboarding/parts/Control";
 import { diagnostics, saveDiagnostics, type Diagnostics } from "./backend";
+import { recentReportEvents } from "./reporting";
+import { usageStats } from "./usage";
 
 /**
  * How to hand somebody the evidence, for when it will not connect.
@@ -94,6 +96,33 @@ export function reportText(d: Diagnostics): string {
     out.push("End of the log");
     out.push("");
     out.push(d.logTail);
+  }
+
+  out.push("");
+  const usage = usageStats();
+  out.push("Usage statistics (aggregate counts stored on this device)");
+  out.push("No conversation text or identifiers are included.");
+  row("  first used", usage.firstUsedAt);
+  row("  last used", usage.lastUsedAt);
+  row("  new chats", String(usage.conversationsStarted));
+  row("  questions", String(usage.questionsSent));
+  row("  answered", String(usage.answersReceived));
+  row("  failed", String(usage.answersFailed));
+  row("  stopped", String(usage.questionsStopped));
+  row("  reconnects", String(usage.reconnectAttempts));
+  row("  reconnected", String(usage.reconnectsSucceeded));
+  row("  reconnect fail", String(usage.reconnectsFailed));
+
+  out.push("");
+  const events = recentReportEvents();
+  if (events.length > 0) {
+    out.push("Recent automatically captured events (stored on this device)");
+    out.push("These are included only when you choose to copy or save this report.");
+    for (const event of events) {
+      out.push("");
+      out.push(`${event.occurredAt}  ${event.kind}`);
+      out.push(event.message);
+    }
   }
 
   out.push("");

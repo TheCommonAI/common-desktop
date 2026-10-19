@@ -15,6 +15,7 @@ import {
 } from "./conversations";
 import { promptFor } from "./context";
 import { NO_ANSWER, stoppedAfter, type ChatMessage } from "./messages";
+import { recordUsage } from "./usage";
 import { askNetwork, gatewaySeesUs, stopAsk, type NetworkAnswer } from "./backend";
 import { useRejoin } from "./useRejoin";
 import {
@@ -386,6 +387,7 @@ export default function Chat() {
       // `context.ts` for the budget and for what is deliberately left out.
       const prompt = promptFor(active.messages, question);
       askingSince.current = Date.now();
+      recordUsage("questionsSent");
       append(id, { role: "user", text: question });
       setThinking(true);
       setStreaming("");
@@ -404,10 +406,12 @@ export default function Chat() {
             text: reply.answer,
             servedBy: provenance(reply),
           });
+          recordUsage("answersReceived");
         })
         .catch(() => {
           if (generation.current !== mine) return;
           append(id, { role: "assistant", text: NO_ANSWER, failed: true });
+          recordUsage("answersFailed");
         })
         .finally(() => {
           // Only the newest conversation owns the composer's busy state. A
@@ -457,6 +461,7 @@ export default function Chat() {
       if (askingSince.current !== 0) {
         const since = askingSince.current;
         askingSince.current = 0;
+        recordUsage("questionsStopped");
         append(id, {
           role: "assistant",
           text: stoppedAfter(waitedMs ?? Date.now() - since),
@@ -505,6 +510,7 @@ export default function Chat() {
   const newChat = useCallback(() => {
     release(chats.activeId);
     const chat = newConversation();
+    recordUsage("conversationsStarted");
     setChats((current) => ({ list: [chat, ...current.list], activeId: chat.id }));
   }, [chats.activeId, release]);
 
