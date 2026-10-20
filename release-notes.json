@@ -156,6 +156,13 @@
         "If a connection drops partway through an answer, Common now shows the answer as failed instead of showing the partial text as complete.",
         "Common's bundled network software is updated to the current release, so fixes to the network reach you with this update."
       ]
+    },
+    {
+      "version": "0.3.2",
+      "notes": [
+        "Common now uses the network's latest connection software. It no longer checks GitHub for updates to that software on every start.",
+        "The bundled network software is the current release, with the fixes that come with it."
+      ]
     }
   ]
 }
