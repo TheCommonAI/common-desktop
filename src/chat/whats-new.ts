@@ -123,6 +123,10 @@ const NOTES: Record<string, readonly string[]> = {
     "If Common crashes, it keeps the details on this machine and shows a restart screen with a feedback button. Nothing is sent anywhere. The details go into the diagnostics report only when you choose to copy or save it.",
     "The diagnostics report also counts how many questions were asked, answered, failed or stopped, and how often a reconnect worked. Those counts stay on this machine and contain no conversation text.",
   ],
+  "0.3.1": [
+    "If a connection drops partway through an answer, Common now shows the answer as failed instead of showing the partial text as complete.",
+    "Common's bundled network software is updated to the current release, so fixes to the network reach you with this update.",
+  ],
 };
 
 /** Every version with notes, oldest first — the order the card reads them in,
@@ -148,6 +152,7 @@ const ORDER: readonly string[] = [
   "0.2.16",
   "0.2.17",
   "0.3.0",
+  "0.3.1",
 ];
 
 // <<< make-notes: end generated
