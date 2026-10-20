@@ -1737,6 +1737,73 @@ body {
   margin-top: 0.75rem;
 }
 
+/* The model group panel. Facts above, then fields on the same hairline the time
+   fields use, so the panel reads as one more row of the card and not a form
+   dropped into it. */
+.group {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.group__field {
+  display: grid;
+  gap: 0.3rem;
+  margin-top: 0.4rem;
+}
+
+.group__label {
+  font: 400 0.75rem/1.4 var(--font-note);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-quiet);
+}
+
+.group__input {
+  appearance: none;
+  width: 100%;
+  padding: 0 0 0.15rem;
+  border: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--ink) 30%, transparent);
+  background: none;
+  font: 700 0.95rem/1.4 var(--font-body);
+  color: var(--ink);
+}
+
+.group__input--narrow {
+  width: 8rem;
+}
+
+.group__input:focus-visible {
+  outline: none;
+  border-bottom: 2px solid var(--ink);
+}
+
+.group__input:disabled {
+  color: var(--ink-quiet);
+}
+
+.group__draft {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+}
+
+.group__draft input[type="range"] {
+  flex: 1;
+  accent-color: var(--ink);
+}
+
+.group__draft input[type="range"]:disabled {
+  opacity: 0.5;
+}
+
+.group__draft output {
+  min-width: 2ch;
+  font: 700 0.95rem/1.4 var(--font-body);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
 .settings__controls {
   display: flex;
   flex-wrap: wrap;

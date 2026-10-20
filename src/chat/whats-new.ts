@@ -131,6 +131,10 @@ const NOTES: Record<string, readonly string[]> = {
     "Common now uses the network's latest connection software. It no longer checks GitHub for updates to that software on every start.",
     "The bundled network software is the current release, with the fixes that come with it.",
   ],
+  "0.3.3": [
+    "The model group panel is in Settings. It starts and stops a distributed model group on your own machines and sets its draft length.",
+    "Common uses a network CLI with distributed support, so the group panel's Start works in this release.",
+  ],
 };
 
 /** Every version with notes, oldest first — the order the card reads them in,
@@ -158,6 +162,7 @@ const ORDER: readonly string[] = [
   "0.3.0",
   "0.3.1",
   "0.3.2",
+  "0.3.3",
 ];
 
 // <<< make-notes: end generated

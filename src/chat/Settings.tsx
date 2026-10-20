@@ -11,6 +11,7 @@ import { networkFact, type Rejoin } from "./rejoin";
 import { busy, type UpdateOffer } from "./updates";
 import { findPlace, readPlace, type Place } from "./geo";
 import Globe from "./Globe";
+import ModelGroup from "./ModelGroup";
 import ShareLog from "./ShareLog";
 import Feedback from "./Feedback";
 
@@ -463,6 +464,16 @@ export default function Settings({
           <p className="settings__said" role="status">
             {rejoin.kind === "failed" ? (rejoin.detail ?? networkFact(seen, rejoin)) : ""}
           </p>
+        </div>
+
+        {/* A model split across several machines, and the coordinator that serves
+            it. Asked for only while this card is open — see `ModelGroup`. The
+            facts are read from the group's file and its coordinator. The panel
+            writes two things: its own port and path, and the draft length in the
+            group's file, which the coordinator reads at its next start. */}
+        <div className="settings__row">
+          <p className="settings__label">Model group</p>
+          <ModelGroup open={open} />
         </div>
 
         {/* The same report the join screen offers at the moment it fails, kept
