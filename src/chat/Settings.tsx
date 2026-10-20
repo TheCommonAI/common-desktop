@@ -471,12 +471,10 @@ export default function Settings({
             facts are read from the group's file and its coordinator. The panel
             writes two things: its own port and path, and the draft length in the
             group's file, which the coordinator reads at its next start. */}
-        {import.meta.env.DEV && (
-          <div className="settings__row">
-            <p className="settings__label">Model group</p>
-            <ModelGroup open={open} />
-          </div>
-        )}
+        <div className="settings__row">
+          <p className="settings__label">Model group</p>
+          <ModelGroup open={open} />
+        </div>
 
         {/* The same report the join screen offers at the moment it fails, kept
             here as well because the failure is not always noticed then — a

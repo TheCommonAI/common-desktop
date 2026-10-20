@@ -241,23 +241,12 @@ fn lock(state: &Coordinator) -> Result<std::sync::MutexGuard<'_, Option<Child>>,
 }
 
 /// The whole of the panel's picture: the file, the coordinator process, and `/health`.
-/// The group commands are for development builds only. A release build refuses them
-/// here, so the webview cannot start the CLI there even if the panel is reached.
-fn dev_only() -> Result<(), String> {
-    if cfg!(debug_assertions) {
-        Ok(())
-    } else {
-        Err("the model group is only available in development builds".to_string())
-    }
-}
-
 #[tauri::command]
 pub async fn group_status(
     app: tauri::AppHandle,
     config_path: String,
     port: u16,
 ) -> Result<GroupStatus, String> {
-    dev_only()?;
     backend::off_thread(move || {
         let state = app.state::<Coordinator>();
         let mut slot = lock(&state)?;
@@ -303,7 +292,6 @@ pub async fn group_start(
     config_path: String,
     port: u16,
 ) -> Result<(), String> {
-    dev_only()?;
     backend::off_thread(move || {
         check_start_port(port)?;
         let named = expand(config_path.trim());
@@ -386,7 +374,6 @@ fn signal_group(pid: u32, signal: &str) {
 /// `false` when this app had no coordinator running.
 #[tauri::command]
 pub async fn group_stop(app: tauri::AppHandle) -> Result<bool, String> {
-    dev_only()?;
     backend::off_thread(move || {
         let pid = {
             let state = app.state::<Coordinator>();
@@ -421,7 +408,6 @@ pub async fn group_stop(app: tauri::AppHandle) -> Result<bool, String> {
 /// the next start.
 #[tauri::command]
 pub async fn group_set_draft_tokens(config_path: String, draft_tokens: u32) -> Result<u32, String> {
-    dev_only()?;
     backend::off_thread(move || {
         let named = expand(config_path.trim());
         let path = std::fs::canonicalize(&named).map_err(|e| {
