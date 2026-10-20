@@ -170,6 +170,12 @@
         "The model group panel is in Settings. It starts and stops a distributed model group on your own machines and sets its draft length.",
         "Common uses a network CLI with distributed support, so the group panel's Start works in this release."
       ]
+    },
+    {
+      "version": "0.3.4",
+      "notes": [
+        "Fixes the first run of Common on a new computer, which could fail with 'No module named worker' in 0.3.2 and 0.3.3."
+      ]
     }
   ]
 }

@@ -135,6 +135,9 @@ const NOTES: Record<string, readonly string[]> = {
     "The model group panel is in Settings. It starts and stops a distributed model group on your own machines and sets its draft length.",
     "Common uses a network CLI with distributed support, so the group panel's Start works in this release.",
   ],
+  "0.3.4": [
+    "Fixes the first run of Common on a new computer, which could fail with 'No module named worker' in 0.3.2 and 0.3.3.",
+  ],
 };
 
 /** Every version with notes, oldest first — the order the card reads them in,
@@ -163,6 +166,7 @@ const ORDER: readonly string[] = [
   "0.3.1",
   "0.3.2",
   "0.3.3",
+  "0.3.4",
 ];
 
 // <<< make-notes: end generated
