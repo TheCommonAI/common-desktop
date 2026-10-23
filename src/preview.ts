@@ -18,12 +18,16 @@ export interface Preview {
   chat: boolean;
   settings: boolean;
   at: number | null;
+  /** `?update=0`: no offer of a newer version, so the card does not cover what is being looked at. */
+  noUpdate: boolean;
+  /** Any jump (`?step=`, `?chat=1`) skips the pauses a person would sit through. */
+  quick: boolean;
 }
 
 const STEPS: readonly StepId[] = ["welcome", "scan", "limits", "download", "join"];
 
 export function preview(): Preview {
-  const none: Preview = { step: null, chat: false, settings: false, at: null };
+  const none: Preview = { step: null, chat: false, settings: false, at: null, noUpdate: false, quick: false };
   if (typeof window === "undefined" || "__TAURI_INTERNALS__" in window) return none;
   try {
     const q = new URLSearchParams(window.location.search);
@@ -34,6 +38,8 @@ export function preview(): Preview {
       chat: q.get("chat") === "1",
       settings: q.get("settings") === "1",
       at: q.has("at") && Number.isFinite(at) ? at : null,
+      noUpdate: q.get("update") === "0",
+      quick: step !== null || q.get("chat") === "1",
     };
   } catch {
     return none;

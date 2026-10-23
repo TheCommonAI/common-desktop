@@ -1,5 +1,6 @@
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
+import { preview } from "../preview";
 
 /**
  * What the chat asks of the app itself: save a report, and the app's own updates.
@@ -52,7 +53,7 @@ export interface UpdateStatus {
  * failure that reads as success is how an app goes a year without updating.
  */
 export async function updateCheck(): Promise<UpdateStatus> {
-  if (!insideApp()) return PREVIEW_UPDATE;
+  if (!insideApp()) return preview().noUpdate ? { current: PREVIEW_UPDATE.current, available: null } : PREVIEW_UPDATE;
   return await invoke<UpdateStatus>("update_check");
 }
 

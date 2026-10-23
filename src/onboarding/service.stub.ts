@@ -1,3 +1,4 @@
+import { preview } from "../preview";
 import {
   OnboardingError,
   type HardwareReport,
@@ -99,7 +100,7 @@ function scanHardware(opts?: ProgressOptions<ScanProgress>): Task<HardwareReport
     for (const field of ["memory", "graphics", "disk", "power"] as const) {
       if (cancelled()) throw new OnboardingError("cancelled", "Stopped.");
       opts?.onProgress?.({ field });
-      await wait(260);
+      await wait(preview().quick ? 0 : 260);
     }
     if (kind === "fail") {
       throw new OnboardingError("permission-denied", "The system refused that.", "preview: ?hardware=fail");
