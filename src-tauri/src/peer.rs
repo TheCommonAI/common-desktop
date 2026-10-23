@@ -35,7 +35,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::backend::{cli, cli_env, cli_path, cli_version, home_dir, launch_error, silent, tail_lines, Cli};
+use crate::backend::{
+    Cli, cli, cli_env, cli_path, cli_version, home_dir, launch_error, silent, tail_lines,
+};
 
 /// The port the peer serves its chat API on unless the status file says otherwise.
 const DEFAULT_API_PORT: u16 = 11440;
@@ -99,7 +101,10 @@ fn scrub(value: &mut Value) {
         Value::Object(map) => {
             map.retain(|key, _| {
                 let k = key.to_ascii_lowercase();
-                !(k.contains("token") || k.contains("secret") || k.contains("password") || k == "key")
+                !(k.contains("token")
+                    || k.contains("secret")
+                    || k.contains("password")
+                    || k == "key")
             });
             for v in map.values_mut() {
                 scrub(v);
@@ -238,7 +243,10 @@ fn view(inner: &mut Inner) -> PeerView {
     // Alive means a process is there and, when we only have its pid, that it is
     // still writing. A pid that was reused by something else would not be fresh.
     let running = handle_alive || (pid_ok && fresh && !matches!(state, "stopped"));
-    let crashed = status.is_some() && !finished && !running && age.map(|a| a > STALE_SECONDS).unwrap_or(false);
+    let crashed = status.is_some()
+        && !finished
+        && !running
+        && age.map(|a| a > STALE_SECONDS).unwrap_or(false);
     PeerView {
         want_running: inner.want,
         running,
@@ -248,8 +256,12 @@ fn view(inner: &mut Inner) -> PeerView {
         restarts: inner.restarts,
         last_exit: inner.last_exit.clone(),
         problem: inner.problem.clone(),
-        log_path: log_path().map(|p| p.display().to_string()).unwrap_or_default(),
-        status_path: status_path().map(|p| p.display().to_string()).unwrap_or_default(),
+        log_path: log_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
+        status_path: status_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
     }
 }
 
@@ -284,7 +296,10 @@ fn spawn(network: Option<&str>) -> Result<Child, String> {
         .try_clone()
         .map_err(|e| format!("couldn't duplicate the log handle: {e}"))?;
 
-    cmd.arg("--no-color").arg("--no-update").arg("join").arg("--network");
+    cmd.arg("--no-color")
+        .arg("--no-update")
+        .arg("join")
+        .arg("--network");
     if let Some(net) = network.filter(|n| !n.trim().is_empty()) {
         cmd.arg(net.trim());
     }
@@ -311,14 +326,14 @@ fn start_now(inner: &mut Inner) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn peer_start(
-    app: AppHandle,
-    network: Option<String>,
-) -> Result<PeerView, String> {
+pub async fn peer_start(app: AppHandle, network: Option<String>) -> Result<PeerView, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<Peer>();
         {
-            let mut inner = state.0.lock().map_err(|_| "peer state is poisoned".to_string())?;
+            let mut inner = state
+                .0
+                .lock()
+                .map_err(|_| "peer state is poisoned".to_string())?;
             inner.want = true;
             inner.network = network.filter(|n| !n.trim().is_empty());
             inner.restarts = 0;
@@ -327,7 +342,10 @@ pub async fn peer_start(
         }
         // The check can take a moment and the lock should not be held across it.
         let ok = cli_knows_layer_network();
-        let mut inner = state.0.lock().map_err(|_| "peer state is poisoned".to_string())?;
+        let mut inner = state
+            .0
+            .lock()
+            .map_err(|_| "peer state is poisoned".to_string())?;
         match ok {
             Err(message) => {
                 inner.want = false;
@@ -347,7 +365,9 @@ pub async fn peer_start(
         // A peer that is already running (started by a previous run of the app, or
         // from a terminal) is adopted rather than started twice.
         let adopted = read_status()
-            .map(|s| status_age(&s) <= STALE_SECONDS && status_pid(&s).map(pid_alive).unwrap_or(false))
+            .map(|s| {
+                status_age(&s) <= STALE_SECONDS && status_pid(&s).map(pid_alive).unwrap_or(false)
+            })
             .unwrap_or(false);
         if !adopted {
             start_now(&mut inner)?;
@@ -367,7 +387,9 @@ pub async fn peer_start(
 fn interrupt(pid: u32) {
     #[cfg(windows)]
     {
-        let _ = silent("taskkill").args(["/PID", &pid.to_string(), "/T"]).output();
+        let _ = silent("taskkill")
+            .args(["/PID", &pid.to_string(), "/T"])
+            .output();
     }
     #[cfg(not(windows))]
     {
@@ -378,7 +400,9 @@ fn interrupt(pid: u32) {
 fn force(pid: u32) {
     #[cfg(windows)]
     {
-        let _ = silent("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output();
+        let _ = silent("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output();
     }
     #[cfg(not(windows))]
     {
@@ -431,7 +455,10 @@ pub async fn peer_stop(app: AppHandle) -> Result<PeerView, String> {
     tauri::async_runtime::spawn_blocking(move || {
         stop_blocking(&app);
         let state = app.state::<Peer>();
-        let mut inner = state.0.lock().map_err(|_| "peer state is poisoned".to_string())?;
+        let mut inner = state
+            .0
+            .lock()
+            .map_err(|_| "peer state is poisoned".to_string())?;
         Ok(view(&mut inner))
     })
     .await
@@ -442,7 +469,10 @@ pub async fn peer_stop(app: AppHandle) -> Result<PeerView, String> {
 pub async fn peer_status(app: AppHandle) -> Result<PeerView, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<Peer>();
-        let mut inner = state.0.lock().map_err(|_| "peer state is poisoned".to_string())?;
+        let mut inner = state
+            .0
+            .lock()
+            .map_err(|_| "peer state is poisoned".to_string())?;
         Ok(view(&mut inner))
     })
     .await
@@ -467,45 +497,50 @@ pub fn shutdown(app: &AppHandle) {
 /// Watches the peer for the life of the app: tells the page what it sees, and
 /// restarts the peer, with a growing pause, when it dies while it is wanted.
 pub fn supervise(app: AppHandle) {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(TICK);
-        let state = app.state::<Peer>();
-        let snapshot = {
-            let mut inner = match state.0.lock() {
-                Ok(g) => g,
-                Err(_) => continue,
-            };
-            let mut snap = view(&mut inner);
-            if let Some(started) = inner.started
-                && snap.running
-                && started.elapsed() > HEALTHY_AFTER
-            {
-                inner.restarts = 0;
-            }
-            if inner.want && !snap.running && inner.problem.is_none() {
-                let due = inner.next_try.map(|t| Instant::now() >= t).unwrap_or(true);
-                // A peer takes a while to write its first status, and on Windows the
-                // process this app holds hands off and exits at once. Until the grace
-                // has passed, "no status yet" must not read as "dead", or a second
-                // peer would be started on top of the first.
-                let settled = inner.started.map(|t| t.elapsed() > START_GRACE).unwrap_or(true);
-                if due && settled {
-                    let wait = (2u64 << inner.restarts.min(5)).min(MAX_BACKOFF);
-                    inner.next_try = Some(Instant::now() + Duration::from_secs(wait));
-                    inner.restarts = inner.restarts.saturating_add(1);
-                    // The first start is the user's own; anything after it is a
-                    // restart, and a failure to start is recorded, not retried hot.
-                    if inner.started.is_some() || snap.crashed {
-                        if let Err(message) = start_now(&mut inner) {
-                            inner.problem = Some(message);
-                        }
-                    }
-                    snap = view(&mut inner);
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(TICK);
+            let state = app.state::<Peer>();
+            let snapshot = {
+                let mut inner = match state.0.lock() {
+                    Ok(g) => g,
+                    Err(_) => continue,
+                };
+                let mut snap = view(&mut inner);
+                if let Some(started) = inner.started
+                    && snap.running
+                    && started.elapsed() > HEALTHY_AFTER
+                {
+                    inner.restarts = 0;
                 }
-            }
-            snap
-        };
-        let _ = app.emit("peer-status", &snapshot);
+                if inner.want && !snap.running && inner.problem.is_none() {
+                    let due = inner.next_try.map(|t| Instant::now() >= t).unwrap_or(true);
+                    // A peer takes a while to write its first status, and on Windows the
+                    // process this app holds hands off and exits at once. Until the grace
+                    // has passed, "no status yet" must not read as "dead", or a second
+                    // peer would be started on top of the first.
+                    let settled = inner
+                        .started
+                        .map(|t| t.elapsed() > START_GRACE)
+                        .unwrap_or(true);
+                    if due && settled {
+                        let wait = (2u64 << inner.restarts.min(5)).min(MAX_BACKOFF);
+                        inner.next_try = Some(Instant::now() + Duration::from_secs(wait));
+                        inner.restarts = inner.restarts.saturating_add(1);
+                        // The first start is the user's own; anything after it is a
+                        // restart, and a failure to start is recorded, not retried hot.
+                        if inner.started.is_some() || snap.crashed {
+                            if let Err(message) = start_now(&mut inner) {
+                                inner.problem = Some(message);
+                            }
+                        }
+                        snap = view(&mut inner);
+                    }
+                }
+                snap
+            };
+            let _ = app.emit("peer-status", &snapshot);
+        }
     });
 }
 
@@ -516,7 +551,10 @@ pub async fn peer_log_tail(lines: Option<usize>) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let path = log_path()?;
         match std::fs::read(&path) {
-            Ok(bytes) => Ok(tail_lines(&String::from_utf8_lossy(&bytes), lines.unwrap_or(60).min(400))),
+            Ok(bytes) => Ok(tail_lines(
+                &String::from_utf8_lossy(&bytes),
+                lines.unwrap_or(60).min(400),
+            )),
             Err(_) => Ok(String::new()),
         }
     })
@@ -543,7 +581,10 @@ pub async fn diagnostics(app: AppHandle) -> Result<Diagnostics, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<Peer>();
         let view = {
-            let mut inner = state.0.lock().map_err(|_| "peer state is poisoned".to_string())?;
+            let mut inner = state
+                .0
+                .lock()
+                .map_err(|_| "peer state is poisoned".to_string())?;
             view(&mut inner)
         };
         let log_tail = log_path()
@@ -597,13 +638,17 @@ impl Lines {
 
 /// One `data:` line of the stream, as the page needs it.
 fn handle_sse(emit: Emit, id: &str, line: &str, done: &mut bool) {
-    let Some(data) = line.strip_prefix("data:") else { return };
+    let Some(data) = line.strip_prefix("data:") else {
+        return;
+    };
     let data = data.trim();
     if data == "[DONE]" {
         *done = true;
         return;
     }
-    let Ok(value) = serde_json::from_str::<Value>(data) else { return };
+    let Ok(value) = serde_json::from_str::<Value>(data) else {
+        return;
+    };
     if let Some(error) = value.get("error") {
         let message = error
             .get("message")
@@ -640,7 +685,9 @@ fn read_chunked(reader: &mut impl BufRead, mut piece: impl FnMut(&[u8])) -> bool
             return true;
         }
         let size_text = size_line.trim().split(';').next().unwrap_or("");
-        let Ok(size) = usize::from_str_radix(size_text, 16) else { return false };
+        let Ok(size) = usize::from_str_radix(size_text, 16) else {
+            return false;
+        };
         if size == 0 {
             return true;
         }
@@ -678,7 +725,9 @@ fn run_chat(port: u16, emit: Emit, id: &str, body: String, run: &Arc<Run>) {
         body
     );
     if stream.write_all(request.as_bytes()).is_err() {
-        emit(json!({"id": id, "kind": "error", "status": 0, "message": "Couldn't reach chat on this computer."}));
+        emit(
+            json!({"id": id, "kind": "error", "status": 0, "message": "Couldn't reach chat on this computer."}),
+        );
         return;
     }
 
@@ -686,11 +735,17 @@ fn run_chat(port: u16, emit: Emit, id: &str, body: String, run: &Arc<Run>) {
     let mut status_line = String::new();
     if reader.read_line(&mut status_line).unwrap_or(0) == 0 {
         if !run.cancel.load(Ordering::SeqCst) {
-            emit(json!({"id": id, "kind": "error", "status": 0, "message": "Chat closed the connection."}));
+            emit(
+                json!({"id": id, "kind": "error", "status": 0, "message": "Chat closed the connection."}),
+            );
         }
         return;
     }
-    let status: u16 = status_line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     let mut chunked = false;
     loop {
         let mut header = String::new();
@@ -768,7 +823,10 @@ pub fn chat_stream(
     });
     {
         let chats = app.state::<Chats>();
-        let mut map = chats.0.lock().map_err(|_| "chat state is poisoned".to_string())?;
+        let mut map = chats
+            .0
+            .lock()
+            .map_err(|_| "chat state is poisoned".to_string())?;
         map.insert(id.clone(), run.clone());
     }
     std::thread::spawn(move || {
@@ -824,7 +882,10 @@ mod tests {
         assert!(!text.contains("secret_thing"));
         assert!(!text.contains("\"key\""));
         assert!(text.contains("\"ok\":4"));
-        assert!(text.contains("api_key"), "only exactly `key` or the listed words go");
+        assert!(
+            text.contains("api_key"),
+            "only exactly `key` or the listed words go"
+        );
     }
 
     #[test]
@@ -857,7 +918,8 @@ mod tests {
         let v = view(&mut inner);
         assert!(v.crashed && !v.running);
         // A cleanly stopped peer is not a crash, however old the file.
-        let stopped = json!({"v": 1, "state": "stopped", "pid": 999_999, "ts": now_seconds() - 120.0});
+        let stopped =
+            json!({"v": 1, "state": "stopped", "pid": 999_999, "ts": now_seconds() - 120.0});
         std::fs::write(&file, stopped.to_string()).unwrap();
         let v = view(&mut inner);
         assert!(!v.crashed && !v.running);
@@ -894,7 +956,11 @@ mod tests {
                 // not what is under test.
                 let want = String::from_utf8_lossy(&seen)
                     .lines()
-                    .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").and_then(|v| v.trim().parse::<usize>().ok()))
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                    })
                     .unwrap_or(0);
                 let mut body = vec![0u8; want];
                 let _ = stream.read_exact(&mut body);
@@ -908,13 +974,26 @@ mod tests {
 
     fn chat_events(port: u16) -> Vec<Value> {
         let events = StdMutex::new(Vec::new());
-        let run = Arc::new(Run { cancel: AtomicBool::new(false), socket: Mutex::new(None) });
-        run_chat(port, &|v| events.lock().unwrap().push(v), "t", "{}".to_string(), &run);
+        let run = Arc::new(Run {
+            cancel: AtomicBool::new(false),
+            socket: Mutex::new(None),
+        });
+        run_chat(
+            port,
+            &|v| events.lock().unwrap().push(v),
+            "t",
+            "{}".to_string(),
+            &run,
+        );
         events.into_inner().unwrap()
     }
 
     fn text_of(events: &[Value]) -> String {
-        events.iter().filter(|e| e["kind"] == "delta").filter_map(|e| e["text"].as_str()).collect()
+        events
+            .iter()
+            .filter(|e| e["kind"] == "delta")
+            .filter_map(|e| e["text"].as_str())
+            .collect()
     }
 
     const SSE: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n\
@@ -933,13 +1012,18 @@ mod tests {
         let events = chat_events(fake_peer(reply, Duration::from_millis(0)));
         assert_eq!(text_of(&events), "Hello");
         assert_eq!(events.last().unwrap()["kind"], "done");
-        assert!(events.iter().any(|e| e["kind"] == "finish" && e["reason"] == "stop"));
+        assert!(
+            events
+                .iter()
+                .any(|e| e["kind"] == "finish" && e["reason"] == "stop")
+        );
     }
 
     #[test]
     fn a_close_delimited_stream_works_too() {
         // What Python's http.server sends: HTTP/1.0 style, no length, ends when the socket closes.
-        let reply = format!("HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{SSE}").into_bytes();
+        let reply =
+            format!("HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{SSE}").into_bytes();
         let events = chat_events(fake_peer(reply, Duration::from_millis(0)));
         assert_eq!(text_of(&events), "Hello");
         assert_eq!(events.last().unwrap()["kind"], "done");
@@ -957,7 +1041,10 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["kind"], "error");
         assert_eq!(events[0]["status"], 503);
-        assert_eq!(events[0]["message"], "Not enough peers are online to answer yet.");
+        assert_eq!(
+            events[0]["message"],
+            "Not enough peers are online to answer yet."
+        );
     }
 
     #[test]
@@ -969,21 +1056,36 @@ mod tests {
         let events = chat_events(port);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["status"], 0);
-        assert!(events[0]["message"].as_str().unwrap().contains("Chat isn't running"));
+        assert!(
+            events[0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Chat isn't running")
+        );
     }
 
     #[test]
     fn stopping_wakes_a_read_that_is_waiting_for_the_next_word() {
         let first = "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n";
-        let reply = format!("HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{first}").into_bytes();
+        let reply = format!("HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{first}")
+            .into_bytes();
         // The peer then goes quiet for far longer than the test waits.
         let port = fake_peer(reply, Duration::from_secs(30));
         let events = Arc::new(StdMutex::new(Vec::new()));
-        let run = Arc::new(Run { cancel: AtomicBool::new(false), socket: Mutex::new(None) });
+        let run = Arc::new(Run {
+            cancel: AtomicBool::new(false),
+            socket: Mutex::new(None),
+        });
         let (e2, r2) = (events.clone(), run.clone());
         let started = Instant::now();
         let worker = std::thread::spawn(move || {
-            run_chat(port, &|v| e2.lock().unwrap().push(v), "t", "{}".to_string(), &r2);
+            run_chat(
+                port,
+                &|v| e2.lock().unwrap().push(v),
+                "t",
+                "{}".to_string(),
+                &r2,
+            );
         });
         // Wait for the first word, then stop it the way `chat_stop` does.
         while events.lock().unwrap().is_empty() {
@@ -995,8 +1097,14 @@ mod tests {
             let _ = socket.shutdown(Shutdown::Both);
         }
         worker.join().unwrap();
-        assert!(started.elapsed() < Duration::from_secs(5), "the read was not woken");
-        assert!(events.lock().unwrap().iter().all(|e| e["kind"] != "done"), "a stopped answer is not a finished one");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the read was not woken"
+        );
+        assert!(
+            events.lock().unwrap().iter().all(|e| e["kind"] != "done"),
+            "a stopped answer is not a finished one"
+        );
     }
 
     /* ---- against a real node, when one is running ---- */
@@ -1016,21 +1124,33 @@ mod tests {
         assert_eq!(status["state"], "up");
         assert_eq!(status["api"]["ready"], true);
         assert!(status_age(&status) < STALE_SECONDS, "status is stale");
-        assert!(status_pid(&status).map(pid_alive).unwrap_or(false), "its pid is not alive");
+        assert!(
+            status_pid(&status).map(pid_alive).unwrap_or(false),
+            "its pid is not alive"
+        );
         let text = status.to_string().to_ascii_lowercase();
-        assert!(!text.contains("token") && !text.contains("secret"), "a credential reached the page");
+        assert!(
+            !text.contains("token") && !text.contains("secret"),
+            "a credential reached the page"
+        );
 
         let port = api_port();
         let body = json!({"model": "common", "stream": true, "max_tokens": 48, "temperature": 0,
             "messages": [{"role": "user", "content": "What is the capital of France? Answer in one short sentence."}]})
             .to_string();
         let events = StdMutex::new(Vec::new());
-        let run = Arc::new(Run { cancel: AtomicBool::new(false), socket: Mutex::new(None) });
+        let run = Arc::new(Run {
+            cancel: AtomicBool::new(false),
+            socket: Mutex::new(None),
+        });
         run_chat(port, &|v| events.lock().unwrap().push(v), "e2e", body, &run);
         let events = events.into_inner().unwrap();
         let answer = text_of(&events);
         eprintln!("answer: {answer:?}");
-        assert!(events.iter().all(|e| e["kind"] != "error"), "chat errored: {events:?}");
+        assert!(
+            events.iter().all(|e| e["kind"] != "error"),
+            "chat errored: {events:?}"
+        );
         assert!(answer.contains("Paris"), "unexpected answer: {answer:?}");
         assert_eq!(events.last().unwrap()["kind"], "done");
     }
@@ -1049,13 +1169,19 @@ mod tests {
         interrupt(pid);
         let started = Instant::now();
         while pid_alive(pid) {
-            assert!(started.elapsed() < GRACE, "it did not leave within the grace period");
+            assert!(
+                started.elapsed() < GRACE,
+                "it did not leave within the grace period"
+            );
             std::thread::sleep(Duration::from_millis(250));
         }
         eprintln!("left in {:.1}s", started.elapsed().as_secs_f64());
         let status = read_status().expect("status vanished");
         eprintln!("final state: {}", status["state"]);
-        assert!(matches!(status["state"].as_str(), Some("stopped") | Some("leaving")));
+        assert!(matches!(
+            status["state"].as_str(),
+            Some("stopped") | Some("leaving")
+        ));
         let mut inner = Inner::default();
         let v = view(&mut inner);
         assert!(!v.crashed && !v.running);
@@ -1073,10 +1199,18 @@ mod tests {
         let status = read_status().expect("no status");
         let pid = status_pid(&status).expect("no pid");
         assert!(!pid_alive(pid), "the process is still there");
-        eprintln!("state in file: {}, age {:.0}s", status["state"], status_age(&status));
+        eprintln!(
+            "state in file: {}, age {:.0}s",
+            status["state"],
+            status_age(&status)
+        );
         let mut inner = Inner::default();
         let v = view(&mut inner);
-        assert!(v.crashed, "a killed peer should read as crashed: {:?}", v.status_age);
+        assert!(
+            v.crashed,
+            "a killed peer should read as crashed: {:?}",
+            v.status_age
+        );
         assert!(!v.running);
     }
 }

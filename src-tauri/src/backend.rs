@@ -161,7 +161,14 @@ fn cli_home(home: &Path) -> PathBuf {
 /// migration and was missing from this list until 0.2.9 — a seed without it is a
 /// bundled CLI that cannot be imported at all, on the one machine that has nothing
 /// else to fall back on.
-const CLI_FILES: [&str; 6] = ["common.py", "join.py", "worker.py", "runtime.py", "chat.py", "layers.py"];
+const CLI_FILES: [&str; 6] = [
+    "common.py",
+    "join.py",
+    "worker.py",
+    "runtime.py",
+    "chat.py",
+    "layers.py",
+];
 
 /// The `(major, minor, patch)` in a CLI file's `VERSION = "0.1.7"` line.
 ///
@@ -1121,7 +1128,6 @@ fn safe_stem(name: &str) -> String {
     }
 }
 
-
 #[cfg(test)]
 mod seed_tests {
     use super::*;
@@ -1146,7 +1152,10 @@ mod seed_tests {
 
     #[test]
     fn a_dev_suffix_is_still_a_version() {
-        assert_eq!(declared_version("VERSION = \"0.2.0-dev\"\n"), Some((0, 2, 0)));
+        assert_eq!(
+            declared_version("VERSION = \"0.2.0-dev\"\n"),
+            Some((0, 2, 0))
+        );
         assert_eq!(declared_version("VERSION = \"0.1.13\"\n"), Some((0, 1, 13)));
         assert_eq!(declared_version("nothing here"), None);
     }
@@ -1162,10 +1171,18 @@ mod seed_tests {
         let root = scratch("replace");
         let (seed, installed) = (root.join("seed"), root.join("home"));
         write_cli(&seed, "0.2.0-dev", &CLI_FILES);
-        write_cli(&installed, "0.1.13", &["common.py", "join.py", "worker.py", "runtime.py", "chat.py"]);
+        write_cli(
+            &installed,
+            "0.1.13",
+            &["common.py", "join.py", "worker.py", "runtime.py", "chat.py"],
+        );
         seed_cli(&seed, &installed).unwrap();
         assert!(installed.join("layers.py").is_file());
-        assert!(std::fs::read_to_string(installed.join("join.py")).unwrap().contains("0.2.0-dev"));
+        assert!(
+            std::fs::read_to_string(installed.join("join.py"))
+                .unwrap()
+                .contains("0.2.0-dev")
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1174,10 +1191,17 @@ mod seed_tests {
         let root = scratch("keep");
         let (seed, installed) = (root.join("seed"), root.join("home"));
         write_cli(&seed, "0.2.0-dev", &CLI_FILES);
-        write_cli(&installed, "0.2.0-dev", &["common.py", "join.py", "worker.py", "runtime.py", "chat.py"]);
+        write_cli(
+            &installed,
+            "0.2.0-dev",
+            &["common.py", "join.py", "worker.py", "runtime.py", "chat.py"],
+        );
         std::fs::write(installed.join("join.py"), "# customised\n").unwrap();
         seed_cli(&seed, &installed).unwrap();
-        assert_eq!(std::fs::read_to_string(installed.join("join.py")).unwrap(), "# customised\n");
+        assert_eq!(
+            std::fs::read_to_string(installed.join("join.py")).unwrap(),
+            "# customised\n"
+        );
         assert!(installed.join("layers.py").is_file());
         let _ = std::fs::remove_dir_all(&root);
     }
