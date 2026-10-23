@@ -1,9 +1,11 @@
 # Common
 
-Common is a client for a decentralised network of models running on the machines
-people already own. A machine on its own answers everything badly; a network of
-ordinary computers, each holding the thing it does well, answers most things
-well. That is the whole idea, and the app has one side for each half of it.
+Common is a client for a decentralised network that runs one large model across
+the machines people already own. No single computer holds the model: each holds a
+slice of its layers, passes the work to the next, and the answer is the whole
+network's. A machine that can't run the model alone can still be one slice of it,
+and the more machines there are, the more it can carry. This app is both halves of
+that: it makes your computer one of the slices, and it lets you talk to the whole.
 
 **[Download it here.](https://commonai.com.au/join)**
 
@@ -42,32 +44,45 @@ Three things keep those links working, and each is easy to undo by accident:
 
 ## What it does
 
-**Chat** asks the network a question. There is no model picker and no local
-switch, and both omissions are deliberate: the question goes to the gateway,
-which routes it to whichever machine is the best fit for what was actually
-asked. The question does leave this computer — that is what routing is — and the
-answer says which machine gave it.
+**Joining** is one step and sets itself up. The app reads this computer, tells you
+plainly whether it can serve part of the model (an Apple silicon Mac or an NVIDIA
+graphics card with enough memory), and then runs the network's own peer,
+`common join --network --api`. The peer prepares its runtime, downloads only the
+layers it will serve, opens its own connection (nothing to forward on a router) and
+announces itself to the others. The app shows what it is doing while it works: real
+download progress, which layers are yours, how many other machines are online and
+whether every part of the model has somebody serving it.
 
-**Contribute** reads this computer, asks the network what it is short of, and
-downloads and serves the one model that would help. Your model runs here and
-answers here. Contributing needs a downloaded model and nothing installed by
-hand: the CLI the app runs fetches the model and the llama.cpp server that serves
-it, and neither is needed to use Chat. First run sets up one model on one machine.
-A model split across several machines is covered below and is not something the
-app sets up.
+**Chat** goes to that same peer on this computer, which sends the question through
+the layers held across the network and streams the answer back word by word. If a
+computer drops out mid-answer another takes its place and the answer carries on. If
+there aren't enough machines online yet, chat says so rather than guessing.
 
-On first launch, Common shows what it found on this machine, offers the model
-the network most needs that this machine can actually run, and says what
-serving it will cost in disk and memory before anything is downloaded. Resource
-limits are yours to set and can be changed in Settings afterwards, along with
-leaving the network, which forgets this machine's key.
+**Settings** shows the peer's own account of itself (state, layers, address, who
+else is online), the address a friend can join through, and a Leave / Rejoin
+control. Leaving tells the other machines you are going, so nobody sends you work.
+You can also choose to contribute only when plugged in, and to rest overnight; the
+app holds itself to those by stopping and starting the peer, because the network
+has no throttle to turn. There is no "how much of the processor" setting for that
+reason.
+
+The network is open: a peer's address is public, and the machines serving the other
+layers see the activations passing through them, which reveal a lot about the text.
+Don't put anything private on it.
 
 ## Requirements
 
 - **macOS** 10.15 or newer, **Windows** 10 or newer. Linux packaging is
   experimental and not published.
-- For Chat, nothing else at all. Contribute needs a model, which the app fetches
-  and runs itself — see below.
+- The `common` command-line tool, a version that knows `join --network` (the layer
+  network). The app runs it rather than reimplementing it, and tells you if the
+  installed one is too old. The app looks in `~/.common-network/bin` before `PATH`,
+  and `COMMON_BIN` overrides both.
+- An Apple silicon Mac, or a Windows or Linux PC with an NVIDIA graphics card. The
+  Windows/NVIDIA path is written but has not been run on real hardware yet.
+- A few gigabytes of free disk for your share of the model, once.
+- Nothing else: no Ollama, no Python to install by hand. The peer sets up its own
+  runtime the first time.
 
 Two of the three things the app needs from outside itself are **fetched on first
 run**, not shipped inside the installer. That is what keeps the download a few
@@ -78,12 +93,13 @@ does not match is deleted and reported, never installed. **Anything already on t
 machine wins** — nothing is fetched over a working install.
 
 - **The `common` command-line tool**, which the app runs rather than
-  reimplementing. It **ships inside the installer** — five Python files, 350 KB —
+  reimplementing. It **ships inside the installer** — six Python files, about 431 KB —
   because the network publishes no release carrying a downloadable build, so there
   is nothing for a first run to fetch. It is a *seed* and not a pinned copy: the
   first time it runs it updates itself from the network's `main` branch, so a fix to
-  the CLI reaches you without a new release of this app. An existing install under
-  `~/.common-network` is never written over, and `COMMON_BIN` overrides everything.
+  the CLI reaches you without a new release of this app. An install under
+  `~/.common-network` is only replaced by a *newer* bundled version, never by an older one, and `COMMON_BIN`
+  overrides everything.
 - **Python**, but only when there is no `python3` 3.9 or newer on `PATH`: a
   relocatable runtime from
   [python-build-standalone](https://github.com/astral-sh/python-build-standalone),
@@ -104,29 +120,6 @@ Only the CLI is bundled, and it is AGPL-3.0-or-later, the same licence as this a
 Python and cloudflared stay with their distributors — see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-## Model groups across machines
-
-A model too large for one machine can be split across several llama.cpp RPC
-devices, with a small draft model on the coordinator doing speculative decoding.
-This is operator-managed. First run does not set it up, the app fetches none of
-it, and the app has no setting for it. It needs the v0.2 line of the CLI, which the
-copy bundled here does not have.
-
-- Build llama.cpp with `-DGGML_RPC=ON`, plus the accelerator for that host, on
-  every machine in the group, all from the same revision. Common does not download
-  this build. The ordinary release the CLI fetches may not support it.
-- Run each RPC worker bound to `127.0.0.1` only. RPC has no authentication of its
-  own and must never be exposed publicly, not through a public port and not through
-  the Cloudflare tunnel. Reach each worker through an authenticated private
-  transport, such as an SSH forward.
-- Start the coordinator with `common join --distributed-config <network.json>`.
-  `--local-only` runs the model API on `127.0.0.1` with no gateway registration,
-  tunnel or identity change, for testing. Runtime diagnostics go to
-  `~/.common-network/runtime.log`.
-
-The configuration fields and the checks to run before serving are in the CLI's own
-documentation.
-
 ## Building from source
 
 Node 24, Rust stable, and whichever platform toolchain
@@ -135,6 +128,7 @@ Node 24, Rust stable, and whichever platform toolchain
 ```sh
 npm ci
 npm run tauri dev      # Vite on :1420, in the app shell
+npm run dev            # just the page, in a browser, with a scripted peer
 npm run tauri build    # a bundle in src-tauri/target/release/bundle
 ```
 
@@ -187,3 +181,16 @@ grant.
 
 AGPL-3.0-or-later, matching the network it talks to. See [LICENSE](LICENSE) and
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Looking at the screens without the app
+
+`npm run dev` serves the page in a browser with a scripted stand-in for the peer,
+so every state can be looked at on purpose. Add `?peer=` to pick one: nothing for
+the whole arrival (about twenty seconds), `up`, `lonely` (chat answers "not enough
+peers"), `crash`, `old-cli` and `error`. Add `?hardware=` to pick the machine:
+`small`, `nvidia`, `none` or `fail`.
+
+## Tests
+
+`cargo test` in `src-tauri` covers the status-file validation and crash detection,
+the credential scrub, the chunked-stream decoder and the conversation store.

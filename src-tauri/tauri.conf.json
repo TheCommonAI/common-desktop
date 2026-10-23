@@ -44,6 +44,7 @@
       "cli-seed/join.py": "cli/join.py",
       "cli-seed/worker.py": "cli/worker.py",
       "cli-seed/runtime.py": "cli/runtime.py",
+      "cli-seed/layers.py": "cli/layers.py",
       "cli-seed/chat.py": "cli/chat.py",
       "cli-seed/NOTICE": "cli/NOTICE"
     },

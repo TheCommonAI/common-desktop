@@ -138,6 +138,14 @@ const NOTES: Record<string, readonly string[]> = {
   "0.3.4": [
     "Fixes the first run of Common on a new computer, which could fail with 'No module named worker' in 0.3.2 and 0.3.3.",
   ],
+  "0.4.0": [
+    "Common now runs on the new layer network. Your computer holds a few layers of one shared model and the other machines hold the rest, so no one machine has to be big and there is no central server in the middle.",
+    "Setup is shorter: scan, choose your limits, and Common gets its share of the model and joins. There is no model to choose and nothing to download by hand.",
+    "Chat goes through your own computer to the network, word by word. If there are not enough machines online yet, it says so instead of waiting.",
+    "If another machine drops out mid-answer, the answer carries on from a replacement. If you close Common, your computer tells the others it is leaving.",
+    "Settings shows your share of the model, how many machines are online, and an address friends can use to join through you. Leave and Rejoin are there too.",
+    "The model group panel is gone: the distributed prototype it controlled has been replaced by the layer network.",
+  ],
 };
 
 /** Every version with notes, oldest first — the order the card reads them in,
@@ -167,6 +175,7 @@ const ORDER: readonly string[] = [
   "0.3.2",
   "0.3.3",
   "0.3.4",
+  "0.4.0",
 ];
 
 // <<< make-notes: end generated

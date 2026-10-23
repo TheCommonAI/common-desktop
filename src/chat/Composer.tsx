@@ -26,6 +26,13 @@ export interface ComposerProps {
    * four minutes.
    */
   busy?: boolean;
+  /**
+   * Why a question cannot be sent right now, when that is not because one is
+   * already out: the network is off, this machine is still getting its share,
+   * chat is still loading. The field still takes a draft; the mark stops looking
+   * pressable and the placeholder says what is being waited on.
+   */
+  unavailable?: string;
 }
 
 /**
@@ -48,7 +55,8 @@ function SendMark() {
   );
 }
 
-export default function Composer({ onSend, busy = false }: ComposerProps) {
+export default function Composer({ onSend, busy = false, unavailable }: ComposerProps) {
+  const blocked = busy || unavailable !== undefined;
   const [text, setText] = useState("");
 
   const submit = (event: FormEvent) => {
@@ -68,7 +76,7 @@ export default function Composer({ onSend, busy = false }: ComposerProps) {
         // is a message and reads as one, and only the placeholder is set in the
         // display face — the app asking in its own voice, the same voice as the
         // wordmark above it, where the line itself is set in the body face.
-        placeholder={busy ? "Waiting for the network....." : "Type here....."}
+        placeholder={unavailable ?? (busy ? "Waiting for the network....." : "Type here.....")}
         aria-label="Message"
         autoComplete="off"
         spellCheck={false}
@@ -78,7 +86,7 @@ export default function Composer({ onSend, busy = false }: ComposerProps) {
           Enter in the field above still reaches `submit`, still calls `onSend`,
           still gets `false` and still keeps the draft — so a question typed
           during a wait is neither sent nor lost. */}
-      <button className="composer__send" type="submit" aria-label="Send" disabled={busy}>
+      <button className="composer__send" type="submit" aria-label="Send" disabled={blocked}>
         <SendMark />
       </button>
     </form>

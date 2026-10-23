@@ -13,11 +13,11 @@ import {
   saveConversations,
   type Conversation,
 } from "./conversations";
-import { promptFor } from "./context";
+import { messagesFor } from "./context";
 import { NO_ANSWER, stoppedAfter, type ChatMessage } from "./messages";
-import { recordUsage } from "./usage";
-import { askNetwork, gatewaySeesUs, stopAsk, type NetworkAnswer } from "./backend";
-import { useRejoin } from "./useRejoin";
+import { chatReady, otherPeers, peer, phaseOf, readEnabled, stagesCovered, usePeer, useAutostart } from "../peer/peer";
+import { preview } from "../preview";
+import { useContributionPolicy } from "./policy";
 import {
   lookForUpdate,
   restartIntoUpdate,
@@ -26,6 +26,7 @@ import {
   type UpdateOffer,
 } from "./updates";
 import { readSeenVersion, rememberSeenVersion, whatsNewFor } from "./whats-new";
+import { recordUsage } from "./usage";
 
 /**
  * What the flow hands over to.
@@ -36,10 +37,9 @@ import { readSeenVersion, rememberSeenVersion, whatsNewFor } from "./whats-new";
  * told they are live, and a screen that then asks them to set something up
  * would be taking that back.
  *
- * The question goes to the network, not to the model on this machine, and the
- * answer says which machine gave it. See `backend.askNetwork` for why the local
- * path was the wrong one, and `messages.GREETING` for the sentence that had to
- * change with it.
+ * The question goes to this machine's own peer, which passes it through the layers
+ * of the model held by the network, and the answer streams back as it is made. See
+ * `peer/` for the peer, and `messages.GREETING` for the sentence that says so.
  *
  * There is more than one conversation now, and they outlive the window: the list
  * is read off disk on the way in and written back on every change. This component
@@ -49,20 +49,37 @@ import { readSeenVersion, rememberSeenVersion, whatsNewFor } from "./whats-new";
  * nothing here but the words and the machines that answered them.
  */
 
-/** Which machine answered, in the CLI's own register.
- *
- *  The CLI prints `answered by <node> · closest of 4 nodes`, and a footer saying
- *  `composed by 3 specialists + <aggregator>` when the network judged the
- *  question to want more than one machine. The candidate count is left off here:
- *  it is routing detail, and the CLI itself only shows it because a terminal has
- *  room for it. What the conversation needs is the thing a chat window normally
- *  hides — that this answer came from somewhere, and from whose machine.
- *
- *  `undefined` rather than a stand-in text when the gateway named nobody, so a
- *  line that would say nothing is not printed at all. */
-function provenance(reply: NetworkAnswer): string | undefined {
-  if (reply.panel.length > 1) return `composed by ${reply.panel.length} machines`;
-  return reply.node === null ? undefined : `served by ${reply.node}`;
+/**
+ * Why a question cannot be sent right now, in the composer's own voice, or
+ * `undefined` when it can. Only what the peer has said: it never guesses a state.
+ */
+function unavailableReason(phase: ReturnType<typeof phaseOf>, view: ReturnType<typeof usePeer>, paused: string | null): string | undefined {
+  if (paused !== null) return `${paused}.....`;
+  const status = view?.status;
+  switch (phase) {
+    case "unknown":
+    case "starting":
+      return "Getting ready.....";
+    case "downloading": {
+      const d = status?.download;
+      const pct = d && d.total > 0 ? ` ${Math.round((d.bytes / d.total) * 100)}%` : "";
+      return `Getting your share${pct}.....`;
+    }
+    case "loading":
+    case "moving":
+      return "Loading your share.....";
+    case "leaving":
+      return "Leaving the network.....";
+    case "off":
+      return "Not on the network — turn it on in Settings.....";
+    case "problem":
+    case "error":
+      return "Can't join — see Settings.....";
+    case "crashed":
+      return "It stopped — see Settings.....";
+    case "up":
+      return status?.api?.ready === true ? undefined : "Loading the chat part.....";
+  }
 }
 
 /** Every chat, and which one is on screen. */
@@ -104,17 +121,25 @@ export default function Chat() {
     return { list: [first], activeId: first.id };
   });
   const [thinking, setThinking] = useState(false);
-  // The answer as it is typed out, or `""` before the first word of it has
-  // arrived. Separate from `thinking` rather than folded into it: the two cover
-  // different stretches of the same wait — `thinking` for however long routing
-  // and model load take, with nothing to show yet, and this for the part where
-  // there is something to show, word by word, before the whole answer is ready
-  // to become a committed `ChatMessage`. It is never read for a panel's answer
-  // — see `askNetwork`'s header — so that case is simply the old wait with
-  // nothing streamed into it, the same as before this existed.
-  const [streaming, setStreaming] = useState("");
-  const [seen, setSeen] = useState<boolean | null>(null);
-  const [settings, setSettings] = useState(false);
+  // True from the first word of an answer until it ends. `thinking` covers the wait
+  // before the first word; this covers the words arriving, when the composer is
+  // still busy but the "Thinking" mark has done its job.
+  const [streaming, setStreaming] = useState(false);
+  const [settings, setSettings] = useState(() => preview().settings);
+
+  const view = usePeer();
+  const phase = phaseOf(view);
+  const paused = useContributionPolicy();
+  // Bring the peer up on launch if the user left it on. Policy may then hold it
+  // back; that is the policy's call, not this effect's.
+  useAutostart(readEnabled() && paused === null);
+  // The peer's latest view, for the line under an answer — read when the answer
+  // finishes, not when it starts.
+  const latestView = useRef(view);
+  latestView.current = view;
+
+  // The one stream in flight, so it can be let go of.
+  const stopStream = useRef<(() => void) | null>(null);
 
   // The notes for a version that has just arrived, or `null` for the ordinary
   // launch where there is nothing to say. Read once, at launch, off the same
@@ -145,52 +170,6 @@ export default function Chat() {
   const [wavedAway, setWavedAway] = useState<string | null>(null);
 
   const active = chats.list.find((chat) => chat.id === chats.activeId) ?? chats.list[0];
-
-  /**
-   * Read whether the gateway can reach this machine.
-   *
-   * A callback rather than the body of one effect, because the answer is allowed
-   * to change and three things now ask again: the window coming back, the end of
-   * a reconnect, and the mount below. It used to be read once, on the way in, and
-   * never again — which is most of why a machine that lost its join on a reboot
-   * went on showing whatever it had been showing at launch.
-   *
-   * Not guarded against an unmount, which the effect it replaces was. React 19
-   * dropped the warning about setting state on a gone component, and this is the
-   * root screen: unmounting it means the app is closing. The update check below
-   * makes the same call for the same reason.
-   */
-  const refreshSeen = useCallback(
-    () =>
-      gatewaySeesUs().then(
-        (answer) => setSeen(answer),
-        // A gateway that will not answer is the unseen state, not an error this
-        // screen has anything to say about: the conversation works either way.
-        () => setSeen(false),
-      ),
-    [],
-  );
-
-  useEffect(() => {
-    void refreshSeen();
-  }, [refreshSeen]);
-
-  /**
-   * And again whenever the window comes back.
-   *
-   * The case a launch-time read cannot cover, and the one the report this feature
-   * came from is about: a laptop that was asleep, or an app left in the tray,
-   * wakes up with whatever was serving it gone. The update check below wakes on
-   * the same event for the same reason; this is the half of that reading which is
-   * about the network rather than about the release feed.
-   */
-  useEffect(() => {
-    const onWake = () => {
-      if (document.visibilityState === "visible") void refreshSeen();
-    };
-    document.addEventListener("visibilitychange", onWake);
-    return () => document.removeEventListener("visibilitychange", onWake);
-  }, [refreshSeen]);
 
   /**
    * The chats on disk, once, on the way in.
@@ -241,32 +220,6 @@ export default function Chat() {
     onDisk.current = chats.list;
     saveConversations(chats.list);
   }, [chats.list]);
-
-  /**
-   * The reconnect, and its automatic half.
-   *
-   * Mount-time rather than Rust's `setup()`, and the reason is that this is where
-   * the service's reuse guard already behaves correctly: this process has started
-   * no join, so the guard asks the gateway whether it can reach this machine and
-   * starts a join only when it cannot. Doing it from `setup()` would mean
-   * re-deriving the gate, the identity check and the node token in Rust, for no
-   * gain over letting the code that already owns them decide.
-   *
-   * `onStart` blanks the reading rather than leaving it: a rail that went on
-   * saying Connected while the machine was in the middle of coming back would be
-   * claiming routing this app had not established. `onSettled` hands the verdict
-   * back to the one piece of state the rail and the Settings card both read.
-   *
-   * The automatic pass runs once per process — see `useRejoin` — which matters
-   * because the window is hidden rather than unmounted when the app is left in the
-   * tray, and because StrictMode fires a mount effect twice in development.
-   */
-  const blankSeen = useCallback(() => setSeen(null), []);
-  const rejoin = useRejoin({ onStart: blankSeen, onSettled: setSeen });
-  const { auto: rejoinOnLaunch } = rejoin;
-  useEffect(() => {
-    rejoinOnLaunch();
-  }, [rejoinOnLaunch]);
 
   /**
    * Look for a new version, on the way in and whenever the window comes back.
@@ -362,7 +315,7 @@ export default function Chat() {
    * that has been deleted in the meantime simply does not match, and the line goes
    * nowhere — which is right: there is no conversation left for it to belong to.
    */
-  const append = useCallback((id: string, line: Omit<ChatMessage, "id" | "at">) => {
+  const append = useCallback((id: string, line: Omit<ChatMessage, "id" | "at">): number => {
     const message: ChatMessage = { ...line, id: nextId.current++, at: new Date() };
     const now = Date.now();
     setChats((current) => ({
@@ -371,64 +324,99 @@ export default function Chat() {
         chat.id === id ? { ...chat, updatedAt: now, messages: [...chat.messages, message] } : chat,
       ),
     }));
+    return message.id;
+  }, []);
+
+  /** Add words to an answer that is still arriving, or set the line under it. */
+  const extend = useCallback((id: string, messageId: number, patch: { more?: string; servedBy?: string }) => {
+    const now = Date.now();
+    setChats((current) => ({
+      ...current,
+      list: current.list.map((chat) =>
+        chat.id === id
+          ? {
+              ...chat,
+              updatedAt: now,
+              messages: chat.messages.map((m) =>
+                m.id === messageId
+                  ? { ...m, text: patch.more ? m.text + patch.more : m.text, servedBy: patch.servedBy ?? m.servedBy }
+                  : m,
+              ),
+            }
+          : chat,
+      ),
+    }));
   }, []);
 
   const send = useCallback(
     (question: string): boolean => {
-      // One at a time. A second question while the first is still out would
-      // start a second `common` process and land the two answers in whichever
-      // order they finished, which is not the order they were asked.
+      // One at a time. A second question while the first is still being answered
+      // would interleave two streams into one transcript.
       if (answering.current) return false;
+      if (!chatReady(latestView.current)) return false;
       answering.current = true;
+      recordUsage("questionsSent");
       const mine = generation.current;
       const id = active.id;
-      // What actually goes out, which is not what was typed: `common ask` carries
-      // one string and no turns, so the history is rendered into it here. See
-      // `context.ts` for the budget and for what is deliberately left out.
-      const prompt = promptFor(active.messages, question);
+      // Real turns, not a flattened string: the peer's API takes a conversation.
+      const turns = messagesFor(active.messages, question);
       askingSince.current = Date.now();
-      recordUsage("questionsSent");
       append(id, { role: "user", text: question });
       setThinking(true);
-      setStreaming("");
-      askNetwork(prompt, (delta) => {
-        if (generation.current !== mine) return;
-        // The first delta ends the wait that had nothing to show — `thinking`
-        // and this are drawn by the same line in `Transcript`, in that order,
-        // so the mark gives way to the words the moment there are any.
+
+      // The answer's own message, made when its first word arrives so the wait
+      // before it is shown as the wait and not as an empty bubble.
+      let answerId: number | null = null;
+      const done = () => {
+        askingSince.current = 0;
+        answering.current = false;
+        stopStream.current = null;
         setThinking(false);
-        setStreaming((soFar) => soFar + delta);
-      })
-        .then((reply) => {
+        setStreaming(false);
+      };
+      stopStream.current = peer.chat(`q${Date.now()}`, turns, {
+        onDelta: (text) => {
           if (generation.current !== mine) return;
-          append(id, {
-            role: "assistant",
-            text: reply.answer,
-            servedBy: provenance(reply),
-          });
-          recordUsage("answersReceived");
-        })
-        .catch(() => {
+          if (answerId === null) {
+            answerId = append(id, { role: "assistant", text });
+            setThinking(false);
+            setStreaming(true);
+          } else {
+            extend(id, answerId, { more: text });
+          }
+        },
+        onDone: () => {
           if (generation.current !== mine) return;
-          append(id, { role: "assistant", text: NO_ANSWER, failed: true });
+          if (answerId === null) {
+            // The stream ended without a word: the network answered with nothing.
+            append(id, { role: "assistant", text: NO_ANSWER, failed: true });
+            recordUsage("answersFailed");
+          } else {
+            recordUsage("answersReceived");
+            const status = latestView.current?.status;
+            const covered = stagesCovered(status);
+            const online = otherPeers(status).length + 1;
+            if (covered !== null) {
+              extend(id, answerId, {
+                servedBy: `answered across ${covered.total} parts of the model · ${online} ${online === 1 ? "machine" : "machines"} online`,
+              });
+            }
+          }
+          done();
+        },
+        onError: (_status, message) => {
+          if (generation.current !== mine) return;
+          // The server's own sentence is already for a person ("not enough peers
+          // yet"); it is shown as the line under the question, and anything that
+          // had arrived before it stays above.
+          append(id, { role: "assistant", text: message || NO_ANSWER, failed: true });
           recordUsage("answersFailed");
-        })
-        .finally(() => {
-          // Only the newest conversation owns the composer's busy state. A
-          // stale reply must not clear a flag the new chat has already set.
-          if (generation.current !== mine) return;
-          askingSince.current = 0;
-          answering.current = false;
-          setThinking(false);
-          // Cleared rather than left to show the finished answer twice: the
-          // committed message above has just been appended with the identical
-          // text, and the transcript draws from `messages`, not from this, the
-          // moment it exists.
-          setStreaming("");
-        });
+          done();
+        },
+      });
       return true;
     },
-    [active, append],
+    [active, append, extend],
   );
 
   /**
@@ -461,21 +449,19 @@ export default function Chat() {
       if (askingSince.current !== 0) {
         const since = askingSince.current;
         askingSince.current = 0;
-        recordUsage("questionsStopped");
+        // Words that already arrived stay; the note goes under them.
         append(id, {
           role: "assistant",
           text: stoppedAfter(waitedMs ?? Date.now() - since),
           stopped: true,
         });
       }
-      stopAsk();
+      stopStream.current?.();
+      stopStream.current = null;
       generation.current += 1;
       answering.current = false;
       setThinking(false);
-      // Whatever had streamed in dies with the question: the stopped line above
-      // is what the transcript keeps, not a partial answer trailing off
-      // mid-sentence with nothing saying it was cut short.
-      setStreaming("");
+      setStreaming(false);
     },
     [append],
   );
@@ -483,6 +469,7 @@ export default function Chat() {
   /** `Stop waiting`, whose number comes from the clock the user was watching. */
   const stopWaiting = useCallback(
     (waitedMs: number) => {
+      recordUsage("questionsStopped");
       release(active.id, waitedMs);
     },
     [active.id, release],
@@ -508,9 +495,9 @@ export default function Chat() {
    *  difference from the single-chat version of this: the chat you were in is
    *  still there when you come back. */
   const newChat = useCallback(() => {
+    recordUsage("conversationsStarted");
     release(chats.activeId);
     const chat = newConversation();
-    recordUsage("conversationsStarted");
     setChats((current) => ({ list: [chat, ...current.list], activeId: chat.id }));
   }, [chats.activeId, release]);
 
@@ -593,8 +580,7 @@ export default function Chat() {
   return (
     <section className="chat" aria-label="Chat">
       <Sidebar
-        seen={seen}
-        rejoin={rejoin.state}
+        paused={paused}
         chats={chats.list}
         activeId={chats.activeId}
         onSelect={selectChat}
@@ -606,13 +592,8 @@ export default function Chat() {
         onRestart={restartForUpdate}
       />
       <div className="chat__main">
-        <Transcript
-          messages={active.messages}
-          thinking={thinking}
-          streaming={streaming}
-          onStop={stopWaiting}
-        />
-        <Composer onSend={send} busy={thinking || streaming !== ""} />
+        <Transcript messages={active.messages} thinking={thinking} onStop={stopWaiting} />
+        <Composer onSend={send} busy={thinking || streaming} unavailable={unavailableReason(phase, view, paused)} />
       </div>
       {/* Kept mounted and driven by `open`, rather than mounted on demand. A
           `<dialog>` that is closed is `display: none` and costs nothing, and
@@ -624,9 +605,6 @@ export default function Chat() {
       <Settings
         open={settings}
         onClose={() => setSettings(false)}
-        seen={seen}
-        rejoin={rejoin.state}
-        onReconnect={rejoin.manual}
         version={version}
         offer={offer}
         onCheck={checkForUpdate}

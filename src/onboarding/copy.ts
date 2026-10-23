@@ -59,3 +59,11 @@ export function formatClock(hhmm: string): string {
 export function formatLatency(milliseconds: number): string {
   return `${(milliseconds / 1000).toFixed(1)} s`;
 }
+
+/** The same clauses as one line of text. The stylesheet draws the middots
+ *  between caption parts so that nothing extra lands in the accessible name,
+ *  but the gauge and a reader both need the line as a string, and one place
+ *  that knows the separator is better than several that guess it. */
+export function captionText(...parts: readonly (string | null | undefined)[]): string {
+  return parts.filter((part): part is string => typeof part === "string").join(" · ");
+}
