@@ -529,10 +529,10 @@ pub fn supervise(app: AppHandle) {
                         inner.restarts = inner.restarts.saturating_add(1);
                         // The first start is the user's own; anything after it is a
                         // restart, and a failure to start is recorded, not retried hot.
-                        if inner.started.is_some() || snap.crashed {
-                            if let Err(message) = start_now(&mut inner) {
-                                inner.problem = Some(message);
-                            }
+                        if (inner.started.is_some() || snap.crashed)
+                            && let Err(message) = start_now(&mut inner)
+                        {
+                            inner.problem = Some(message);
                         }
                         snap = view(&mut inner);
                     }
