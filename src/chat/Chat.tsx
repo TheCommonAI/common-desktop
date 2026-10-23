@@ -16,6 +16,7 @@ import {
 import { messagesFor } from "./context";
 import { NO_ANSWER, stoppedAfter, type ChatMessage } from "./messages";
 import { chatReady, otherPeers, peer, phaseOf, readEnabled, stagesCovered, usePeer, useAutostart } from "../peer/peer";
+import { preview } from "../preview";
 import { useContributionPolicy } from "./policy";
 import {
   lookForUpdate,
@@ -123,7 +124,7 @@ export default function Chat() {
   // before the first word; this covers the words arriving, when the composer is
   // still busy but the "Thinking" mark has done its job.
   const [streaming, setStreaming] = useState(false);
-  const [settings, setSettings] = useState(false);
+  const [settings, setSettings] = useState(() => preview().settings);
 
   const view = usePeer();
   const phase = phaseOf(view);

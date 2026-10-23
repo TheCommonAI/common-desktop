@@ -579,9 +579,8 @@ struct Run {
 #[derive(Default)]
 pub struct Chats(Mutex<HashMap<String, Arc<Run>>>);
 
-fn emit(app: &AppHandle, payload: Value) {
-    let _ = app.emit("chat", payload);
-}
+/// Where a chat event goes. The command sends them to the page; a test collects them.
+type Emit<'a> = &'a dyn Fn(Value);
 
 /// Splits a byte stream into lines without losing a line that straddles two reads.
 #[derive(Default)]
@@ -598,7 +597,7 @@ impl Lines {
 }
 
 /// One `data:` line of the stream, as the page needs it.
-fn handle_sse(app: &AppHandle, id: &str, line: &str, done: &mut bool) {
+fn handle_sse(emit: Emit, id: &str, line: &str, done: &mut bool) {
     let Some(data) = line.strip_prefix("data:") else { return };
     let data = data.trim();
     if data == "[DONE]" {
@@ -611,7 +610,7 @@ fn handle_sse(app: &AppHandle, id: &str, line: &str, done: &mut bool) {
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or("The network stopped answering.");
-        emit(app, json!({"id": id, "kind": "error", "status": 200, "message": message}));
+        emit(json!({"id": id, "kind": "error", "status": 200, "message": message}));
         *done = true;
         return;
     }
@@ -619,13 +618,10 @@ fn handle_sse(app: &AppHandle, id: &str, line: &str, done: &mut bool) {
     if let Some(text) = choice["delta"]["content"].as_str()
         && !text.is_empty()
     {
-        emit(app, json!({"id": id, "kind": "delta", "text": text}));
+        emit(json!({"id": id, "kind": "delta", "text": text}));
     }
     if choice["finish_reason"].is_string() {
-        emit(
-            app,
-            json!({"id": id, "kind": "finish", "reason": choice["finish_reason"].clone()}),
-        );
+        emit(json!({"id": id, "kind": "finish", "reason": choice["finish_reason"].clone()}));
     }
 }
 
@@ -659,17 +655,13 @@ fn read_chunked(reader: &mut impl BufRead, mut piece: impl FnMut(&[u8])) -> bool
     }
 }
 
-fn run_chat(app: &AppHandle, id: &str, body: String, run: &Arc<Run>) {
-    let port = api_port();
+fn run_chat(port: u16, emit: Emit, id: &str, body: String, run: &Arc<Run>) {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = match TcpStream::connect_timeout(&addr, Duration::from_secs(3)) {
         Ok(s) => s,
         Err(_) => {
-            emit(
-                app,
-                json!({"id": id, "kind": "error", "status": 0,
-                       "message": "Chat isn't running on this computer yet. Give it a moment after joining."}),
-            );
+            emit(json!({"id": id, "kind": "error", "status": 0,
+                        "message": "Chat isn't running on this computer yet. Give it a moment after joining."}));
             return;
         }
     };
@@ -687,7 +679,7 @@ fn run_chat(app: &AppHandle, id: &str, body: String, run: &Arc<Run>) {
         body
     );
     if stream.write_all(request.as_bytes()).is_err() {
-        emit(app, json!({"id": id, "kind": "error", "status": 0, "message": "Couldn't reach chat on this computer."}));
+        emit(json!({"id": id, "kind": "error", "status": 0, "message": "Couldn't reach chat on this computer."}));
         return;
     }
 
@@ -695,7 +687,7 @@ fn run_chat(app: &AppHandle, id: &str, body: String, run: &Arc<Run>) {
     let mut status_line = String::new();
     if reader.read_line(&mut status_line).unwrap_or(0) == 0 {
         if !run.cancel.load(Ordering::SeqCst) {
-            emit(app, json!({"id": id, "kind": "error", "status": 0, "message": "Chat closed the connection."}));
+            emit(json!({"id": id, "kind": "error", "status": 0, "message": "Chat closed the connection."}));
         }
         return;
     }
@@ -725,7 +717,7 @@ fn run_chat(app: &AppHandle, id: &str, body: String, run: &Arc<Run>) {
             .and_then(|v| v["error"]["message"].as_str())
             .unwrap_or("The network couldn't answer that just now.")
             .to_string();
-        emit(app, json!({"id": id, "kind": "error", "status": status, "message": message}));
+        emit(json!({"id": id, "kind": "error", "status": status, "message": message}));
         return;
     }
 
@@ -733,7 +725,7 @@ fn run_chat(app: &AppHandle, id: &str, body: String, run: &Arc<Run>) {
     let mut done = false;
     if chunked {
         read_chunked(&mut reader, |piece| {
-            lines.push(piece, |line| handle_sse(app, id, line, &mut done));
+            lines.push(piece, |line| handle_sse(emit, id, line, &mut done));
         });
     } else {
         let mut buffer = [0u8; 4096];
@@ -743,12 +735,12 @@ fn run_chat(app: &AppHandle, id: &str, body: String, run: &Arc<Run>) {
             }
             match reader.read(&mut buffer) {
                 Ok(0) | Err(_) => break,
-                Ok(n) => lines.push(&buffer[..n], |line| handle_sse(app, id, line, &mut done)),
+                Ok(n) => lines.push(&buffer[..n], |line| handle_sse(emit, id, line, &mut done)),
             }
         }
     }
     if !run.cancel.load(Ordering::SeqCst) {
-        emit(app, json!({"id": id, "kind": "done"}));
+        emit(json!({"id": id, "kind": "done"}));
     }
 }
 
@@ -781,7 +773,11 @@ pub fn chat_stream(
         map.insert(id.clone(), run.clone());
     }
     std::thread::spawn(move || {
-        run_chat(&app, &id, body, &run);
+        let port = api_port();
+        let send = |payload: Value| {
+            let _ = app.emit("chat", payload);
+        };
+        run_chat(port, &send, &id, body, &run);
         if let Ok(mut map) = app.state::<Chats>().0.lock() {
             map.remove(&id);
         }
@@ -873,5 +869,215 @@ mod tests {
         assert!(read_status().is_none());
         unsafe { std::env::remove_var("COMMONNET_STATUS_FILE") };
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /* ---- chat, against a fake peer on loopback ---- */
+
+    use std::net::TcpListener;
+    use std::sync::Mutex as StdMutex;
+
+    /// A one-shot HTTP server: reads the request head, writes `reply`, then holds the
+    /// connection for `hold` before closing. Returns the port.
+    fn fake_peer(reply: Vec<u8>, hold: Duration) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut seen = Vec::new();
+                let mut byte = [0u8; 1];
+                while !seen.ends_with(b"\r\n\r\n") {
+                    if stream.read(&mut byte).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    seen.push(byte[0]);
+                }
+                // The body is read off so the client's write does not block; its content is
+                // not what is under test.
+                let want = String::from_utf8_lossy(&seen)
+                    .lines()
+                    .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").and_then(|v| v.trim().parse::<usize>().ok()))
+                    .unwrap_or(0);
+                let mut body = vec![0u8; want];
+                let _ = stream.read_exact(&mut body);
+                let _ = stream.write_all(&reply);
+                let _ = stream.flush();
+                std::thread::sleep(hold);
+            }
+        });
+        port
+    }
+
+    fn chat_events(port: u16) -> Vec<Value> {
+        let events = StdMutex::new(Vec::new());
+        let run = Arc::new(Run { cancel: AtomicBool::new(false), socket: Mutex::new(None) });
+        run_chat(port, &|v| events.lock().unwrap().push(v), "t", "{}".to_string(), &run);
+        events.into_inner().unwrap()
+    }
+
+    fn text_of(events: &[Value]) -> String {
+        events.iter().filter(|e| e["kind"] == "delta").filter_map(|e| e["text"].as_str()).collect()
+    }
+
+    const SSE: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n\
+                       data: {\"choices\":[{\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"stop\"}]}\n\n\
+                       data: [DONE]\n\n";
+
+    #[test]
+    fn a_chunked_event_stream_arrives_as_deltas_then_done() {
+        let mut reply = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        // Split mid-event on purpose: a chunk boundary is not an event boundary.
+        let (a, b) = SSE.split_at(40);
+        for part in [a, b] {
+            reply.extend_from_slice(format!("{:x}\r\n{}\r\n", part.len(), part).as_bytes());
+        }
+        reply.extend_from_slice(b"0\r\n\r\n");
+        let events = chat_events(fake_peer(reply, Duration::from_millis(0)));
+        assert_eq!(text_of(&events), "Hello");
+        assert_eq!(events.last().unwrap()["kind"], "done");
+        assert!(events.iter().any(|e| e["kind"] == "finish" && e["reason"] == "stop"));
+    }
+
+    #[test]
+    fn a_close_delimited_stream_works_too() {
+        // What Python's http.server sends: HTTP/1.0 style, no length, ends when the socket closes.
+        let reply = format!("HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{SSE}").into_bytes();
+        let events = chat_events(fake_peer(reply, Duration::from_millis(0)));
+        assert_eq!(text_of(&events), "Hello");
+        assert_eq!(events.last().unwrap()["kind"], "done");
+    }
+
+    #[test]
+    fn a_503_becomes_one_error_with_the_servers_own_sentence() {
+        let body = r#"{"error":{"message":"Not enough peers are online to answer yet.","type":"unavailable"}}"#;
+        let reply = format!(
+            "HTTP/1.0 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes();
+        let events = chat_events(fake_peer(reply, Duration::from_millis(0)));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["kind"], "error");
+        assert_eq!(events[0]["status"], 503);
+        assert_eq!(events[0]["message"], "Not enough peers are online to answer yet.");
+    }
+
+    #[test]
+    fn nothing_listening_is_a_friendly_error_not_a_hang() {
+        let port = {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let events = chat_events(port);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["status"], 0);
+        assert!(events[0]["message"].as_str().unwrap().contains("Chat isn't running"));
+    }
+
+    #[test]
+    fn stopping_wakes_a_read_that_is_waiting_for_the_next_word() {
+        let first = "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n";
+        let reply = format!("HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{first}").into_bytes();
+        // The peer then goes quiet for far longer than the test waits.
+        let port = fake_peer(reply, Duration::from_secs(30));
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let run = Arc::new(Run { cancel: AtomicBool::new(false), socket: Mutex::new(None) });
+        let (e2, r2) = (events.clone(), run.clone());
+        let started = Instant::now();
+        let worker = std::thread::spawn(move || {
+            run_chat(port, &|v| e2.lock().unwrap().push(v), "t", "{}".to_string(), &r2);
+        });
+        // Wait for the first word, then stop it the way `chat_stop` does.
+        while events.lock().unwrap().is_empty() {
+            assert!(started.elapsed() < Duration::from_secs(5), "no first word");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        run.cancel.store(true, Ordering::SeqCst);
+        if let Some(socket) = run.socket.lock().unwrap().as_ref() {
+            let _ = socket.shutdown(Shutdown::Both);
+        }
+        worker.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5), "the read was not woken");
+        assert!(events.lock().unwrap().iter().all(|e| e["kind"] != "done"), "a stopped answer is not a finished one");
+    }
+
+    /* ---- against a real node, when one is running ---- */
+
+    /// Point `COMMON_E2E_STATUS` at a real peer's status file (and have it started with
+    /// `--api`) to run this; without it the test does nothing. It checks the real file
+    /// through the same reader the app uses, then asks the real chat API a question.
+    #[test]
+    fn a_real_node_is_read_and_answers() {
+        let Some(path) = std::env::var_os("COMMON_E2E_STATUS") else {
+            eprintln!("skipped: COMMON_E2E_STATUS is not set");
+            return;
+        };
+        unsafe { std::env::set_var("COMMONNET_STATUS_FILE", &path) };
+        let status = read_status().expect("the status file was not a valid v1 document");
+        eprintln!("status: state={} api={}", status["state"], status["api"]);
+        assert_eq!(status["state"], "up");
+        assert_eq!(status["api"]["ready"], true);
+        assert!(status_age(&status) < STALE_SECONDS, "status is stale");
+        assert!(status_pid(&status).map(pid_alive).unwrap_or(false), "its pid is not alive");
+        let text = status.to_string().to_ascii_lowercase();
+        assert!(!text.contains("token") && !text.contains("secret"), "a credential reached the page");
+
+        let port = api_port();
+        let body = json!({"model": "common", "stream": true, "max_tokens": 48, "temperature": 0,
+            "messages": [{"role": "user", "content": "What is the capital of France? Answer in one short sentence."}]})
+            .to_string();
+        let events = StdMutex::new(Vec::new());
+        let run = Arc::new(Run { cancel: AtomicBool::new(false), socket: Mutex::new(None) });
+        run_chat(port, &|v| events.lock().unwrap().push(v), "e2e", body, &run);
+        let events = events.into_inner().unwrap();
+        let answer = text_of(&events);
+        eprintln!("answer: {answer:?}");
+        assert!(events.iter().all(|e| e["kind"] != "error"), "chat errored: {events:?}");
+        assert!(answer.contains("Paris"), "unexpected answer: {answer:?}");
+        assert_eq!(events.last().unwrap()["kind"], "done");
+    }
+
+    /// With `COMMON_E2E_LEAVE` pointing at a live peer's status file: the app's polite
+    /// interrupt makes it say goodbye and exit, and it is not mistaken for a crash.
+    #[test]
+    fn a_real_node_leaves_cleanly_when_interrupted() {
+        let Some(path) = std::env::var_os("COMMON_E2E_LEAVE") else {
+            eprintln!("skipped: COMMON_E2E_LEAVE is not set");
+            return;
+        };
+        unsafe { std::env::set_var("COMMONNET_STATUS_FILE", &path) };
+        let pid = status_pid(&read_status().expect("no status")).expect("no pid");
+        assert!(pid_alive(pid));
+        interrupt(pid);
+        let started = Instant::now();
+        while pid_alive(pid) {
+            assert!(started.elapsed() < GRACE, "it did not leave within the grace period");
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        eprintln!("left in {:.1}s", started.elapsed().as_secs_f64());
+        let status = read_status().expect("status vanished");
+        eprintln!("final state: {}", status["state"]);
+        assert!(matches!(status["state"].as_str(), Some("stopped") | Some("leaving")));
+        let mut inner = Inner::default();
+        let v = view(&mut inner);
+        assert!(!v.crashed && !v.running);
+    }
+
+    /// With `COMMON_E2E_CRASHED` pointing at the status file of a peer that was
+    /// killed (SIGKILL) more than 15 s ago: it reads as crashed, and not as running.
+    #[test]
+    fn a_real_killed_node_reads_as_crashed() {
+        let Some(path) = std::env::var_os("COMMON_E2E_CRASHED") else {
+            eprintln!("skipped: COMMON_E2E_CRASHED is not set");
+            return;
+        };
+        unsafe { std::env::set_var("COMMONNET_STATUS_FILE", &path) };
+        let status = read_status().expect("no status");
+        let pid = status_pid(&status).expect("no pid");
+        assert!(!pid_alive(pid), "the process is still there");
+        eprintln!("state in file: {}, age {:.0}s", status["state"], status_age(&status));
+        let mut inner = Inner::default();
+        let v = view(&mut inner);
+        assert!(v.crashed, "a killed peer should read as crashed: {:?}", v.status_age);
+        assert!(!v.running);
     }
 }

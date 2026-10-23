@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type ComponentType } from "react";
-import { INITIAL_FLOW, readProgress, writeProgress, type FlowState, type Progress } from "./flow";
+import { preview } from "../preview";
+import { INITIAL_FLOW, defaultLimits, readProgress, writeProgress, type FlowState, type Progress } from "./flow";
 import DownloadModel from "./screens/DownloadModel";
 import HardwareScan from "./screens/HardwareScan";
 import JoinNetwork from "./screens/JoinNetwork";
@@ -48,12 +49,19 @@ export interface OnboardingProps {
   onComplete?: () => void;
 }
 
+/** A preview jump (browser only): the flow at a chosen screen, with the answers it needs. */
+function jumped(): Progress | null {
+  const step = preview().step;
+  if (step === null) return null;
+  return { step, flow: { ...INITIAL_FLOW, limits: defaultLimits(null) } };
+}
+
 export default function Onboarding({ onComplete }: OnboardingProps) {
   const [position, setPosition] = useState<Position>(() => ({
     // A restored step is one the carried data still supports; `readProgress`
     // walks a step back to the last one it can actually show. Reading it is
     // guarded the same way the opening is: any failure simply starts at the top.
-    progress: readProgress() ?? { step: "welcome", flow: INITIAL_FLOW },
+    progress: jumped() ?? readProgress() ?? { step: "welcome", flow: INITIAL_FLOW },
     dir: "none",
   }));
 

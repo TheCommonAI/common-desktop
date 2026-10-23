@@ -1,3 +1,4 @@
+import { preview } from "../preview";
 import type { ChatHandlers, PeerDiagnostics, PeerEntry, PeerStatus, PeerView } from "./types";
 
 /**
@@ -47,8 +48,10 @@ const OTHERS: readonly PeerEntry[] = [
 
 const TOTAL = 1_240_000_000;
 
-let wanted = false;
-let startedAt = 0;
+// `?at=N` (see `preview.ts`) starts the script already N seconds into its arrival.
+const jumpAt = preview().at;
+let wanted = jumpAt !== null;
+let startedAt = jumpAt !== null ? Date.now() - jumpAt * 1000 : 0;
 let stoppedAt = 0;
 const listeners = new Set<(view: PeerView) => void>();
 

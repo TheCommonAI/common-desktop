@@ -1,6 +1,7 @@
 import { useState } from "react";
 import Chat from "./chat/Chat";
 import Onboarding from "./onboarding/Onboarding";
+import { preview } from "./preview";
 import Wordmark from "./Wordmark";
 import "./App.css";
 
@@ -47,9 +48,12 @@ function prefersReducedMotion(): boolean {
 type Phase = "intro" | "leaving" | "onboarding" | "chat";
 
 export default function App() {
-  const [phase, setPhase] = useState<Phase>(() =>
-    seen(LIVE_SEEN) ? "chat" : seen(INTRO_SEEN) ? "onboarding" : "intro",
-  );
+  const [phase, setPhase] = useState<Phase>(() => {
+    const jump = preview();
+    if (jump.chat) return "chat";
+    if (jump.step !== null) return "onboarding";
+    return seen(LIVE_SEEN) ? "chat" : seen(INTRO_SEEN) ? "onboarding" : "intro";
+  });
 
   const begin = () => {
     if (phase !== "intro") return;
