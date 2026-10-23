@@ -1,6 +1,10 @@
-// The connect-and-contribute backend seam. See `backend.rs` for what it does
-// and why it is shaped the way it is.
+// The machine seam: hardware reads, finding the CLI, saving a report. See
+// `backend.rs`.
 mod backend;
+
+// The layer-network peer this app runs, its status, and chat through it. See
+// `peer.rs` for why the app runs the CLI's own peer rather than a network of its own.
+mod peer;
 
 // Updating the app from the release it is published to. See `update.rs` for why
 // this is driven from here rather than from the web layer.
@@ -114,17 +118,14 @@ pub fn run() {
         // webview calls it — the three commands in `update.rs` do — so this adds
         // no permission for the page and changes no capability.
         .plugin(tauri_plugin_updater::Builder::new().build())
-        // The pulls this app has running, so a pause can find the transfer it
-        // means to stop. The webview picks the id and hands the same one back to
-        // `ollama_pull_cancel`; the map itself never leaves Rust.
-        .manage(backend::Pulls::default())
-        // The join this app started, so that "is it still working?" is answered by
-        // the process handle rather than by hunting for its pid with a second
-        // program. On Windows those two answers disagree, and the disagreement cost
-        // a friend a working node reported as a dead network — see `JoinState`.
-        .manage(backend::Join::default())
+        // The peer this app runs, and the chats streaming through it. The peer is
+        // held as a handle plus the status file it writes: Windows hands the process
+        // off, so the file's pid, not the handle, is what says it is alive.
+        .manage(peer::Peer::default())
+        .manage(peer::Chats::default())
         .setup(|app| {
             build_tray(app.handle())?;
+            peer::supervise(app.handle().clone());
             Ok(())
         })
         // Closing the window hides it. The app is a thing that lives in the menu
@@ -149,41 +150,19 @@ pub fn run() {
             backend::read_disk,
             backend::read_power,
             backend::read_os,
-            // The network verbs. Thin passthroughs to `common --json …`.
-            backend::network_recommend,
-            backend::network_status,
-            backend::network_whoami,
-            backend::network_contrib,
-            backend::network_leave,
-            backend::network_ask_local,
-            backend::network_ask,
-            backend::network_ask_stop,
-            backend::network_join,
-            // Not a `common` verb: the catalogue lives at the gateway, so that a
-            // download knows which tag to pull.
-            backend::network_catalogue,
-            // What the `join` this app started is doing. The join outlives the call
-            // that made it, so what is held is its handle and not its answer.
-            backend::network_join_state,
-            // And what it said, for the case the handle cannot answer: on Windows the
-            // wrapper exits cleanly having handed off, so a join can die without this
-            // app being able to see it. The log is the only witness.
-            backend::network_join_tail,
-            // Where the weights are, for the one field of `DownloadResult` that
-            // has to be a real path.
-            backend::ollama_models_dir,
-            // The download itself, streamed from ollama through Rust rather than
-            // fetched by the webview. `ollama_pull` says why the hop exists.
-            backend::ollama_pull,
-            backend::ollama_pull_cancel,
-            // The one read that leaves the machine without being asked to.
-            // Asked for once, and cached in the web layer — see `backend.rs`.
-            backend::where_am_i,
+            // The layer-network peer: start it, stop it (politely, so it tells the
+            // others it is leaving), read what it says about itself.
+            peer::peer_start,
+            peer::peer_stop,
+            peer::peer_status,
+            peer::peer_log_tail,
             // What to hand somebody when it will not connect. Reads only this
-            // machine — no network call, and no node token — so it still answers
-            // in exactly the case it exists for.
-            backend::diagnostics,
+            // machine, and the status file is scrubbed of anything secret.
+            peer::diagnostics,
             backend::save_diagnostics,
+            // Chat through the peer's own API on loopback, streamed to the page.
+            peer::chat_stream,
+            peer::chat_stop,
             // Updating the app itself, from the release it is published to.
             update::update_check,
             update::update_stage,
@@ -208,7 +187,10 @@ pub fn run() {
             if let RunEvent::Reopen { .. } = event {
                 show_main(app);
             }
-            #[cfg(not(target_os = "macos"))]
-            let _ = (app, event);
+            // Quitting leaves the network properly: the peer is told to say goodbye
+            // rather than being cut off, so nobody keeps sending it work.
+            if let tauri::RunEvent::Exit = event {
+                peer::shutdown(app);
+            }
         });
 }
