@@ -297,6 +297,9 @@ body {
   /* A very wide window would otherwise stretch a 3rem line to a hundred
      characters. */
   max-width: 44rem;
+  /* Centred, so the sentence sits in the middle of the window. The controls row
+     is flex, so it is centred separately below. */
+  text-align: center;
 }
 
 .sheet--forward {
@@ -361,6 +364,7 @@ body {
 .sheet__controls {
   display: flex;
   flex-wrap: wrap;
+  justify-content: center;
   align-items: baseline;
   gap: 0.6rem 1.75rem;
   margin-top: 2.25rem;
@@ -1045,14 +1049,40 @@ body {
   padding: 3.5rem clamp(2rem, 8%, 4.5rem) 1.5rem;
 }
 
-/* The measure, and deliberately short of the column. The mock leaves more
-   ground to the right of a message than the message takes, and that is not
-   waste: a transcript that fills its column reads as a terminal, and a line of
-   prose that runs the full width of a wide window is one the eye has to hunt
-   back along. */
+/* The measure: short of the column, but not a narrow strip down the middle of
+   it. A transcript that fills its column reads as a terminal, and a line of prose
+   that runs the full width of a wide window is one the eye has to hunt back along,
+   so the cap sits at a comfortable reading width and the column still gets used. */
 .msg {
-  max-width: 20rem;
+  max-width: min(40rem, 100%);
   margin: 0;
+}
+
+/* The mark at the end of a streamed answer: a small circle that breathes while
+   the words are still arriving. It sits on the baseline so it reads as part of
+   the line, and it is removed with the rest of the streamed text once the answer
+   lands as a message. */
+.stream-cursor {
+  display: inline-block;
+  width: 0.45em;
+  height: 0.45em;
+  margin-left: 0.2em;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: baseline;
+  animation: stream-breathe 1.2s ease-in-out infinite;
+}
+
+@keyframes stream-breathe {
+  0%,
+  100% {
+    transform: scale(0.6);
+    opacity: 0.35;
+  }
+  50% {
+    transform: scale(1);
+    opacity: 0.9;
+  }
 }
 
 /* What arrives here is the renderer's HTML, not a string: markdown-it's tags
@@ -1281,7 +1311,7 @@ body {
      wrote is theirs to see whole, and the model's reply is the thing being
      disciplined. */
   align-self: flex-end;
-  max-width: min(22rem, 82%);
+  max-width: min(32rem, 82%);
   padding: 0.5rem 1.1rem 0.45rem;
   border-radius: 22px;
   background: var(--raise);
@@ -1568,6 +1598,64 @@ body {
   margin-bottom: 0;
 }
 
+.feedback {
+  margin-top: 0.6rem;
+}
+
+.feedback__button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: 700 0.9rem/1.5 var(--font-body);
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.feedback__button:hover,
+.feedback__button:focus-visible {
+  text-decoration-color: currentColor;
+}
+
+.feedback__button:focus-visible {
+  outline: 2px solid var(--ink-quiet);
+  outline-offset: 3px;
+}
+
+.feedback__note {
+  min-height: 1.2em;
+  margin: 0.25rem 0 0;
+  color: var(--ink-quiet);
+  font: 400 0.75rem/1.4 var(--font-body);
+}
+
+.crash {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.75rem;
+  width: min(34rem, calc(100% - 3rem));
+  height: 100%;
+  margin: auto;
+}
+
+.crash h1,
+.crash p {
+  margin: 0;
+}
+
+.crash h1 {
+  font: 700 1.25rem/1.4 var(--font-body);
+}
+
+.crash p {
+  color: var(--ink-quiet);
+  font: 400 0.9rem/1.5 var(--font-body);
+}
+
 /* The hatch. It is a button and it is not dressed as one: no underline, no hue,
    no box, and a default cursor rather than a pointing hand. Nothing here may
    invite the press, because the whole feature is that it is not on offer.
@@ -1625,11 +1713,95 @@ body {
   color: var(--ink-quiet);
 }
 
+/* What the network said about leaving, and what went wrong when it could not be
+   asked. A live region, so it is mounted from the start and filled later — one
+   that appears already holding its text is missed by most screen readers — and
+   it collapses to nothing while empty rather than pushing the row down. The same
+   shape as `.share__note`, for the same reason. */
+.settings__said {
+  margin: 0.6rem 0 0;
+  min-height: 1.125rem;
+  font: 700 0.75rem/1.5 var(--font-body);
+  color: var(--ink-quiet);
+}
+
+.settings__said:empty {
+  margin: 0;
+  min-height: 0;
+}
+
 .settings__times {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem 1.5rem;
   margin-top: 0.75rem;
+}
+
+/* The model group panel. Facts above, then fields on the same hairline the time
+   fields use, so the panel reads as one more row of the card and not a form
+   dropped into it. */
+.group {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.group__field {
+  display: grid;
+  gap: 0.3rem;
+  margin-top: 0.4rem;
+}
+
+.group__label {
+  font: 400 0.75rem/1.4 var(--font-note);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-quiet);
+}
+
+.group__input {
+  appearance: none;
+  width: 100%;
+  padding: 0 0 0.15rem;
+  border: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--ink) 30%, transparent);
+  background: none;
+  font: 700 0.95rem/1.4 var(--font-body);
+  color: var(--ink);
+}
+
+.group__input--narrow {
+  width: 8rem;
+}
+
+.group__input:focus-visible {
+  outline: none;
+  border-bottom: 2px solid var(--ink);
+}
+
+.group__input:disabled {
+  color: var(--ink-quiet);
+}
+
+.group__draft {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+}
+
+.group__draft input[type="range"] {
+  flex: 1;
+  accent-color: var(--ink);
+}
+
+.group__draft input[type="range"]:disabled {
+  opacity: 0.5;
+}
+
+.group__draft output {
+  min-width: 2ch;
+  font: 700 0.95rem/1.4 var(--font-body);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .settings__controls {
@@ -1877,15 +2049,23 @@ body {
   }
 
   .word,
-  .onboarding {
+  .onboarding,
+  .stream-cursor {
     animation: none;
   }
 
-  .rule__dot {
-    transition: none;
-  }
+  /* The gauge is left alone, and it is the only thing here that is. Its single
+     transition is a background-colour fade across marks three pixels wide:
+     nothing in it moves and nothing in it scales, so there is no motion for this
+     preference to be about, and the row inking in from the left *is* this
+     screen's subject rather than an ornament on it. Suppressing it turned the
+     download into one leap from empty to full, which is the one thing a progress
+     gauge exists not to do. Everything that travels — the opening, the steps,
+     the update card — is stopped on either side of this comment. */
 
-  /* Nothing to hold still here: `ThinkingMark` draws one frame and stops under
-     this preference rather than being animated and then suppressed, so the dots
-     land where they are and stay. */
+  /* And nothing to hold still for `ThinkingMark` or the globe: each draws a
+     single frame and stops under this preference rather than being animated and
+     then suppressed, so the dots and the sphere land where they are and stay.
+     The sphere is still draggable in that frame, which is motion the user is
+     making rather than motion being made at them. */
 }

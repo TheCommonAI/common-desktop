@@ -14,6 +14,20 @@ mod update;
 // storage plugin, so this is the only door the chats can go through.
 mod store;
 
+// The first run: fetching, checking and placing the Python runtime, the Common
+// CLI that runs under it and cloudflared, so that arriving without them is no
+// longer fatal. See `fetch.rs` for what it can and cannot get today.
+mod fetch;
+
+// SHA-256 for the check above. Hand-written rather than pulled in, under the
+// no-new-dependency rule in `backend.rs`'s header — see `sha256.rs` for why a
+// digest is a defensible thing to write by hand and an HTTP client is not.
+mod sha256;
+
+// The Windows caption, painted to the app's own ground. See `titlebar.rs` for why
+// it is painted rather than removed.
+mod titlebar;
+
 use tauri::{
     Manager, WindowEvent,
     image::Image,
@@ -123,8 +137,26 @@ pub fn run() {
         // off, so the file's pid, not the handle, is what says it is alive.
         .manage(peer::Peer::default())
         .manage(peer::Chats::default())
+        // The first-run fetch that is in flight, so that a cancel can find the
+        // `curl` it means to stop.
+        .manage(fetch::Bootstrap::default())
         .setup(|app| {
             build_tray(app.handle())?;
+            if let Some(window) = app.get_webview_window("main") {
+                titlebar::match_ground(&window);
+            }
+            // Where the bundle unpacked the seed copy of the CLI. Resolved here and
+            // nowhere else, because this is the one moment an `AppHandle` exists to
+            // ask; the answer is stashed in a `OnceLock` for `backend::cli()`.
+            if let Ok(dir) = app
+                .path()
+                .resolve("cli", tauri::path::BaseDirectory::Resource)
+            {
+                backend::use_cli_seed(dir);
+            }
+            // Off the launch path: the update runs on its own thread and nothing here
+            // waits for it. See `refresh_cli_in_background` for why it is needed.
+            backend::refresh_cli_in_background();
             peer::supervise(app.handle().clone());
             Ok(())
         })
@@ -163,6 +195,14 @@ pub fn run() {
             // Chat through the peer's own API on loopback, streamed to the page.
             peer::chat_stream,
             peer::chat_stop,
+            // The first run. First what it *would* fetch, before it fetches
+            // anything — no network, no writes, just what is already on the
+            // machine and what could be added — then the fetch itself, streamed
+            // so the screen can draw a transfer, and the way out of one, which
+            // stops the `curl` and not the app.
+            fetch::bootstrap_status,
+            fetch::bootstrap_run,
+            fetch::bootstrap_cancel,
             // Updating the app itself, from the release it is published to.
             update::update_check,
             update::update_stage,

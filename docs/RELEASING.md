@@ -138,6 +138,51 @@ in the manifest.
 `tauri::is_dev()`. The only way to exercise the update path is a signed release
 build.
 
+## What first run fetches, and what it costs a release
+
+The installer carries **exactly one payload**: the CLI seed — five `.py` files,
+350 KB — declared under `resources` in `tauri.conf.json`. `externalBin` stays empty
+and must. Python and cloudflared are still downloaded on first run by
+`src-tauri/src/fetch.rs` into `~/.common-network`, which is why the download on the
+website stays a few megabytes.
+
+The CLI is the exception because it is the one payload that **cannot** be fetched:
+`TheCommonAI/common-network` carries no release assets, so a fetch would fail on
+exactly the machine it exists for. The seed needs no attention at release time —
+the copy placed on a user's machine updates itself from the network's `main` branch
+the first time it runs outside this app — but when the CLI changes in a way that
+matters to the app's parsing, refreshing `src-tauri/cli-seed/` from `common-network`
+is worth doing, so a machine that never runs the CLI from a terminal does not start
+from something stale.
+
+The consequence for a release is that **the URLs the app fetches from are not part
+of the release at all.** They are constants at the top of `fetch.rs`, pinned to a
+specific tag: `PBS_BUILD` and `PYTHON_VERSION` for the runtime, and
+`CLOUDFLARED_VERSION` for the tunnel. Bumping one is an app release, and it is the
+only way a fetched payload changes.
+
+Each fetched payload is verified before anything is unpacked, in one of two ways,
+and `bootstrap_status` reports which:
+
+- **pinned** — the digest is compiled in, so the bytes are tied to the source
+  file rather than to whatever the server is serving today.
+- **published** — a `sha256sum`-style file fetched beside the payload. This
+  proves the transfer is intact and that the asset is the one that release
+  published; it is *not* a defence against a compromised origin, because the
+  checksum comes over the same connection from the same host. Python uses this,
+  because pinning a digest would mean the app went stale the day the publisher
+  cut a build. cloudflared is **pinned** instead: Cloudflare publishes no sums
+  file, only a list of digests in the release body, which is not the same thing.
+
+The bundled seed is not verified, and does not need to be: it is compiled into the
+release and covered by whatever signs it, rather than arriving over a connection
+somebody else controls. `TheCommonAI/common-network` carries **no release assets**,
+so there is no fetch for the CLI to be verified by. `CLI_ASSETS`, `CLI_TAG` and an
+empty `CLI_SHA256` remain in `fetch.rs` as the shape a fetch would take should a
+release ever publish a build — the names in `CLI_ASSETS` are **invented**, not names
+observed in the wild, and the empty digest fails closed — but nothing on the
+shipping path consults them. `cli_script` in `backend.rs` is what places the CLI.
+
 ## Signing and Gatekeeper
 
 Mac builds are **ad-hoc signed** (`signingIdentity: "-"` in `tauri.conf.json`), not
@@ -147,3 +192,13 @@ SmartScreen know nothing about it and may still object to the replaced bundle on
 the next launch. A Developer ID certificate and an Apple notarisation key are the
 only real fix, and `signed-build.yml` is where they would go. It is inert today: all
 nine of its secrets and variables are absent.
+
+The first-run fetch does not change any of that, and it is worth being precise
+about what it does and does not buy. The Python runtime and cloudflared it installs
+are unsigned and unnotarised, exactly as the app is. What is true — and it is the
+one reason fetching at runtime is less bad than it sounds — is that **`curl` does
+not set the quarantine attribute** the way a browser does, so a payload fetched
+this way is not quarantined and macOS does not refuse it on first launch the way
+it refuses a downloaded `.app`. That is a property of `curl`, not a signature, and
+it is not a substitute for one. On Windows the fetched binaries carry no
+Mark-of-the-Web either, for the same reason, so SmartScreen does not vet them.

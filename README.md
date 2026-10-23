@@ -33,7 +33,7 @@ terminal commands are needed.
 Three things keep those links working, and each is easy to undo by accident:
 
 - **the installer filenames carry no version.** Tauri names them
-  `Common_0.2.0_x64-setup.exe`; `publish-preview.yml` renames them to the three
+  `Common_0.3.0_x64-setup.exe`; `publish-preview.yml` renames them to the three
   above, and that workflow is the only place that does.
 - **the release is published as a full release, not a prerelease.**
   `/releases/latest/download/<file>` resolves only to the newest
@@ -84,6 +84,42 @@ Don't put anything private on it.
 - Nothing else: no Ollama, no Python to install by hand. The peer sets up its own
   runtime the first time.
 
+Two of the three things the app needs from outside itself are **fetched on first
+run**, not shipped inside the installer. That is what keeps the download a few
+megabytes, and it means a payload can be replaced without cutting a release of
+the app. Each is downloaded to a scratch directory, checked against a published
+checksum or one compiled into the app, and only then unpacked; a download that
+does not match is deleted and reported, never installed. **Anything already on the
+machine wins** — nothing is fetched over a working install.
+
+- **The `common` command-line tool**, which the app runs rather than
+  reimplementing. It **ships inside the installer** — six Python files, about 431 KB —
+  because the network publishes no release carrying a downloadable build, so there
+  is nothing for a first run to fetch. It is a *seed* and not a pinned copy: the
+  first time it runs it updates itself from the network's `main` branch, so a fix to
+  the CLI reaches you without a new release of this app. An install under
+  `~/.common-network` is only replaced by a *newer* bundled version, never by an older one, and `COMMON_BIN`
+  overrides everything.
+- **Python**, but only when there is no `python3` 3.9 or newer on `PATH`: a
+  relocatable runtime from
+  [python-build-standalone](https://github.com/astral-sh/python-build-standalone),
+  unpacked under `~/.common-network/runtime/python`. Never the system Python, and
+  never over one.
+- **cloudflared**, the tunnel the CLI opens so this machine can be reached, and
+  the one thing it cannot fetch for itself. It comes from
+  [Cloudflare's releases](https://github.com/cloudflare/cloudflared/releases),
+  unpacked into `~/.common-network/bin`. A machine that already has one, there or
+  on `PATH`, keeps the copy it has.
+
+The app runs the CLI by naming the interpreter and the script — `python3
+common.py` — rather than through the `bin/common` launcher beside it. That is what
+lets a Python this app fetched actually be the Python the CLI runs under; the
+launcher resolves its own interpreter and does not consult `PATH`.
+
+Only the CLI is bundled, and it is AGPL-3.0-or-later, the same licence as this app.
+Python and cloudflared stay with their distributors — see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 ## Building from source
 
 Node 24, Rust stable, and whichever platform toolchain
@@ -128,6 +164,9 @@ updater plugin's own parser, which is the check that catches it.
 | `src/chat/` | the conversation, Settings, the rail, and the calls into Rust |
 | `src/onboarding/` | first run: read the machine, offer a model, join |
 | `src-tauri/src/backend.rs` | every read of this machine and every call to `common` |
+| `src-tauri/src/fetch.rs` | first run: fetch, check and install Python and cloudflared |
+| `src-tauri/src/sha256.rs` | the digest that check is made with, written out rather than pulled in |
+| `src-tauri/cli-seed/` | the CLI itself, shipped — placed once, then it keeps itself current |
 | `src-tauri/src/lib.rs` | the window and the menu-bar icon |
 | `src-tauri/src/update.rs` | check, stage, restart — driven from Rust, not the webview |
 | `src-tauri/tests/manifest.rs` | the update manifest contract |

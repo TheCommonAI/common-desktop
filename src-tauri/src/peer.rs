@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::backend::{cli_env, cli_version, common_bin, home_dir, launch_error, silent, tail_lines};
+use crate::backend::{cli, cli_env, cli_path, cli_version, home_dir, launch_error, silent, tail_lines, Cli};
 
 /// The port the peer serves its chat API on unless the status file says otherwise.
 const DEFAULT_API_PORT: u16 = 11440;
@@ -258,11 +258,11 @@ fn view(inner: &mut Inner) -> PeerView {
 /// Does the installed CLI know `join --network`? An older CLI would reject the flag
 /// with a usage error that means nothing to the user, so ask first.
 fn cli_knows_layer_network() -> Result<bool, String> {
-    let bin = common_bin();
-    let out = silent(&bin)
+    let Cli { mut cmd, named } = cli()?;
+    let out = cmd
         .args(["--no-color", "--no-update", "join", "--help"])
         .output()
-        .map_err(|e| launch_error(&bin, e))?;
+        .map_err(|e| launch_error(&named, e))?;
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -272,7 +272,7 @@ fn cli_knows_layer_network() -> Result<bool, String> {
 }
 
 fn spawn(network: Option<&str>) -> Result<Child, String> {
-    let bin = common_bin();
+    let Cli { mut cmd, named } = cli()?;
     let dir = net_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("couldn't create {}: {e}", dir.display()))?;
     let log = std::fs::OpenOptions::new()
@@ -284,7 +284,6 @@ fn spawn(network: Option<&str>) -> Result<Child, String> {
         .try_clone()
         .map_err(|e| format!("couldn't duplicate the log handle: {e}"))?;
 
-    let mut cmd = silent(&bin);
     cmd.arg("--no-color").arg("--no-update").arg("join").arg("--network");
     if let Some(net) = network.filter(|n| !n.trim().is_empty()) {
         cmd.arg(net.trim());
@@ -296,7 +295,7 @@ fn spawn(network: Option<&str>) -> Result<Child, String> {
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::from(log));
     cmd.stderr(Stdio::from(log_err));
-    cmd.spawn().map_err(|e| launch_error(&bin, e))
+    cmd.spawn().map_err(|e| launch_error(&named, e))
 }
 
 fn start_now(inner: &mut Inner) -> Result<(), String> {
@@ -554,7 +553,7 @@ pub async fn diagnostics(app: AppHandle) -> Result<Diagnostics, String> {
             .unwrap_or_default();
         Ok(Diagnostics {
             app_version: app.package_info().version.to_string(),
-            cli_path: common_bin().display().to_string(),
+            cli_path: cli_path(),
             cli_version: cli_version(),
             cli_knows_layer_network: cli_knows_layer_network().ok(),
             os: std::env::consts::OS.to_string(),

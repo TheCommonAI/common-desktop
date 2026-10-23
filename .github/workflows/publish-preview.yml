@@ -176,27 +176,19 @@ jobs:
           print("\n".join(lines))
           PY
 
+      # `release-notes.md` is cut from `release-notes.json` by the generator, which
+      # also writes the app's in-app card from the same file — so the release page
+      # and the card cannot say different things. The heredoc that used to be here
+      # was boilerplate, identical for every 0.2.x and with no per-version content.
+      # The build-run line is the one thing that is a fact about *this* run rather
+      # than about the release, so it is still appended here, not in the source.
       - name: Write the release notes
         shell: bash
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          cat > release-notes.md <<'NOTES'
-          Download the installer for your computer below. No Node.js, Python, or source-code build is needed.
-
-          - **Windows x64:** open the .exe. Common installs for your user and launches automatically.
-          - **Mac with Apple silicon (M-series):** open the arm64 .dmg and drag Common to Applications.
-          - **Mac with an Intel processor:** use the x64 .dmg.
-
-          On first launch, choose Chat, Contribute, or Both. The app guides contributors through installing Ollama and downloading a local model. Ollama's own installer may require confirmation; model downloads require internet access and disk space.
-
-          **Already have an older Common?** This build is a different application underneath — a Tauri client replacing the Electron one — and it cannot update the earlier version into itself. Download and install it by hand once. From this version onward the app checks for new releases on its own, and the copy you install now will update itself from here.
-
-          Ad-hoc signing checks bundle integrity; it does not verify Common's publisher. The Mac apps are not Developer ID signed or Apple notarized, and Windows remains unsigned. Operating-system warnings or launch blocks are still possible. For a trusted test download, macOS may offer Open Anyway in System Settings > Privacy & Security. Do not disable Gatekeeper globally. Native packaging and automated tests passed; interactive installation and live-network inference still need testing on real PCs.
-
-          SHA256SUMS.txt records the installer checksums.
-          NOTES
+          node scripts/make-notes.mjs notes "$VERSION" release-notes.md
           printf '\nBuilt from commit %s in [native build run](https://github.com/%s/actions/runs/%s).\n' \
             "${{ steps.source.outputs.sha }}" "$GH_REPO" "$BUILD_RUN" >> release-notes.md
 

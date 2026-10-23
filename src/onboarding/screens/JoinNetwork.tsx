@@ -1,6 +1,8 @@
 import { type ReactNode } from "react";
 import ShareLog from "../../chat/ShareLog";
 import ThinkingMark from "../../chat/ThinkingMark";
+import { preparingSentences } from "../../provision";
+import { useProvision } from "../../useProvision";
 import Control from "../parts/Control";
 import Statement from "../parts/Statement";
 import type { ScreenProps } from "../steps";
@@ -24,6 +26,9 @@ import { chatReady, layersLabel, otherPeers, phaseOf, startPeer, stagesCovered, 
 
 export default function JoinNetwork({ next, back }: ScreenProps) {
   const view = usePeer();
+  // The machine being got ready (Python, the tunnel). Subscribed, not started: the fetch belongs to
+  // the app and begins at launch, so a screen that started it could abandon it.
+  const provision = useProvision();
   const phase = phaseOf(view);
   const status = view?.status ?? null;
   const others = otherPeers(status).length;
@@ -36,7 +41,12 @@ export default function JoinNetwork({ next, back }: ScreenProps) {
   let controls: ReactNode | undefined;
   let live = false;
 
-  if (phase === "up" && chatReady(view)) {
+  if ((provision.kind === "checking" || provision.kind === "working") && phase !== "up") {
+    const preparing = preparingSentences(provision);
+    statement = preparing.statement;
+    caption = preparing.caption;
+    gauge = <ThinkingMark />;
+  } else if (phase === "up" && chatReady(view)) {
     const whole = covered !== null && covered.covered === covered.total;
     live = whole;
     statement = whole ? "You're part of the network." : "You're on the network.";

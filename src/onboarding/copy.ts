@@ -1,5 +1,5 @@
 /**
- * The three ways a number becomes a word.
+ * How a number becomes a word.
  *
  * Captions in this flow are uppercase fragments, so every one of these returns
  * something that survives being shouted: no full stops, no trailing unit
@@ -42,16 +42,6 @@ export function formatBytes(bytes: number): string {
 export function formatTransfer(receivedBytes: number, totalBytes: number): string {
   const total = scale(totalBytes);
   return `${trim(receivedBytes / total.divisor, total.digits)} of ${trim(total.value, total.digits)} ${total.unit}`;
-}
-
-/** How long is left, in words. `null` while the rate is still settling — the
- *  caller omits the clause entirely rather than printing a dash, because a dash
- *  where an estimate should be reads as a failure. */
-export function formatEta(seconds: number | null): string | null {
-  if (seconds === null || !Number.isFinite(seconds)) return null;
-  if (seconds < 45) return "almost done";
-  if (seconds < 90) return "about a minute left";
-  return `about ${Math.round(seconds / 60)} minutes left`;
 }
 
 /** "22:00" → "10pm", "07:30" → "7:30am". Local wall clock, as the user set it. */

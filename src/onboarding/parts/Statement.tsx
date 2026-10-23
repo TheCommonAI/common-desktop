@@ -44,8 +44,8 @@ export interface StatementProps {
    * The rule the screens follow: focus moves whenever a state change *replaces
    * the controls*, because the control the user was on has just unmounted and
    * focus would otherwise fall to the body. Where a state change leaves the
-   * controls alone and only rewrites the sentence — the lane picker — nothing
-   * moves and `announce` is used instead.
+   * controls alone and only rewrites the sentence — the model recommendation —
+   * nothing moves and `announce` is used instead.
    */
   focusKey?: string | number;
   /**

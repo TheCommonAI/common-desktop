@@ -8,6 +8,7 @@ import { onboardingService, type ResourceLimits } from "../onboarding/service";
 import { layersLabel, otherPeers, peer, phaseOf, stagesCovered, startPeer, stopPeer, usePeer, writeEnabled } from "../peer/peer";
 import { busy, type UpdateOffer } from "./updates";
 import Globe from "./Globe";
+import Feedback from "./Feedback";
 import ShareLog from "./ShareLog";
 
 /**
@@ -318,6 +319,15 @@ export default function Settings({ open, onClose, version, offer, onCheck, onIns
           )}
           {view?.logPath ? <p className="settings__note">{`Log: ${view.logPath}`}</p> : null}
           <ShareLog />
+        </div>
+
+        <div className="settings__row">
+          <p className="settings__label">Feedback</p>
+          <p className="settings__fact">
+            Tell us what went wrong or what could be better. Reports stay on this device until you
+            copy or save them; nothing is uploaded automatically.
+          </p>
+          <Feedback />
         </div>
 
         <div className="settings__row">

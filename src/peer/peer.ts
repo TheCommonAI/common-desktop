@@ -2,6 +2,7 @@ import { useEffect, useSyncExternalStore } from "react";
 import { real } from "./real";
 import { stub } from "./stub";
 import type { PeerStatus, PeerView } from "./types";
+import { provisionNow, startProvisioning } from "../provision";
 
 /**
  * The one peer, as the screens see it.
@@ -56,13 +57,24 @@ export function usePeer(): PeerView | null {
   return useSyncExternalStore(subscribe, () => latest);
 }
 
+/**
+ * Python and the tunnel come before the CLI can run at all. On a machine with neither, the first call
+ * to the CLI fails with a misleading "not installed", so the peer waits for the one install the app
+ * runs at launch (see `provision.ts`). Already-ready machines pay one comparison. `failed` is not
+ * waited on: there is nothing left to wait for, and the start reports its own, better sentence.
+ */
+async function provisioned(): Promise<void> {
+  const now = provisionNow().kind;
+  if (now !== "ready" && now !== "failed") await startProvisioning();
+}
+
 /** Start the peer if the user has it switched on. For launch. */
 export function useAutostart(enabled: boolean): void {
   useEffect(() => {
     if (!enabled) return;
     peer.status().then(
       (view) => {
-        if (!view.running && !view.wantRunning) peer.start().catch(() => {});
+        if (!view.running && !view.wantRunning) provisioned().then(() => peer.start()).catch(() => {});
       },
       () => {},
     );
@@ -71,6 +83,7 @@ export function useAutostart(enabled: boolean): void {
 
 /** Wrap a start/stop so the store updates at once rather than on the next tick. */
 export async function startPeer(network?: string): Promise<PeerView> {
+  await provisioned();
   const view = await peer.start(network);
   publish(view);
   return view;

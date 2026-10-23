@@ -3,6 +3,8 @@ import Control from "../onboarding/parts/Control";
 import { peer } from "../peer/peer";
 import type { PeerDiagnostics } from "../peer/types";
 import { saveDiagnostics } from "./backend";
+import { recentReportEvents } from "./reporting";
+import { usageStats } from "./usage";
 
 /**
  * How to hand somebody the evidence, for when it will not connect.
@@ -91,6 +93,30 @@ export function reportText(d: PeerDiagnostics): string {
     row("  coverage", status.coverage ? status.coverage.join(" ") : null);
     row("  others online", (status.peers ?? []).filter((p) => !p.me && p.state === "up").length);
     row("  error", status.error);
+  }
+
+  out.push("");
+  const usage = usageStats();
+  out.push("Usage statistics (aggregate counts stored on this device)");
+  out.push("No conversation text or identifiers are included.");
+  row("  first used", usage.firstUsedAt);
+  row("  last used", usage.lastUsedAt);
+  row("  new chats", String(usage.conversationsStarted));
+  row("  questions", String(usage.questionsSent));
+  row("  answered", String(usage.answersReceived));
+  row("  failed", String(usage.answersFailed));
+  row("  stopped", String(usage.questionsStopped));
+
+  const events = recentReportEvents();
+  if (events.length > 0) {
+    out.push("");
+    out.push("Recent automatically captured events (stored on this device)");
+    out.push("These are included only when you choose to copy or save this report.");
+    for (const event of events) {
+      out.push("");
+      out.push(`${event.occurredAt}  ${event.kind}`);
+      out.push(event.message);
+    }
   }
 
   out.push("");

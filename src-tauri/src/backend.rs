@@ -16,8 +16,10 @@
 //! `spawn_blocking`, because a synchronous Tauri command runs on the main thread.
 
 use serde::Serialize;
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
+use std::time::Duration;
 // `Manager` puts `path()` on the app handle, which is where a report is written.
 use tauri::Manager;
 
@@ -85,12 +87,306 @@ pub(crate) fn silent(program: impl AsRef<std::ffi::OsStr>) -> Command {
     cmd
 }
 
-/// The environment every CLI child gets.
+/// Where the bundle unpacked the seed copy of the CLI, if it carries one.
 ///
-/// `NO_COLOR` is belt and braces beside `--no-color`: a stray escape sequence in a
-/// log the user is asked to send is a baffling thing to read.
+/// Set once, from `lib.rs`'s `setup`, because that is the only moment an
+/// `AppHandle` exists to ask for the resource directory — and because `run_common`
+/// and its four siblings are plain functions reached through `spawn_blocking`,
+/// which have no handle and could not ask for themselves.
+///
+/// A `OnceLock` rather than managed state for the same reason: `State` is
+/// reachable only from inside a command, and the callers here sit one layer below
+/// that.
+static CLI_SEED: OnceLock<PathBuf> = OnceLock::new();
+
+/// Record where the bundled seed was unpacked. Called once, at startup.
+pub fn use_cli_seed(dir: PathBuf) {
+    let _ = CLI_SEED.set(dir);
+}
+
+/// How long a launch-time CLI update may run before it is abandoned.
+const CLI_UPDATE_LIMIT: Duration = Duration::from_secs(60);
+
+/// Let the installed CLI bring itself up to date, off the launch path.
+///
+/// Every question the app asks runs the CLI with `--no-update`, so answering never
+/// waits on GitHub. The cost is that a machine which only ever runs this app would
+/// never see a CLI fix without a new app release. So once per launch the app runs
+/// the CLI without that flag, on its own thread: the CLI's own check replaces the
+/// installed copy when GitHub has something newer. Nothing waits on it, and an
+/// attempt that runs past `CLI_UPDATE_LIMIT` is killed. A failed or slow update
+/// leaves the copy that was already there.
+pub fn refresh_cli_in_background() {
+    std::thread::spawn(|| {
+        let Ok(Cli { mut cmd, .. }) = cli() else {
+            return;
+        };
+        // `--help` is enough: the update runs before arguments are read, and it asks
+        // for nothing else. Output goes nowhere, since nobody is waiting for it.
+        cmd.arg("--no-color")
+            .arg("--help")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let Ok(mut child) = cmd.spawn() else {
+            return;
+        };
+        let started = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(None) if started.elapsed() < CLI_UPDATE_LIMIT => {
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+                _ => return,
+            }
+        }
+    });
+}
+
+/// `~/.common-network`, the directory the CLI's own installer owns.
+fn cli_home(home: &Path) -> PathBuf {
+    home.join(".common-network")
+}
+
+/// The files the seed places.
+///
+/// The siblings are neither optional nor decoration. `join.py` imports `worker.py`
+/// and `runtime.py` as siblings, which is why the CLI's own installer fetches them
+/// together rather than one at a time. `runtime.py` arrived with the llama.cpp
+/// migration and was missing from this list until 0.2.9 — a seed without it is a
+/// bundled CLI that cannot be imported at all, on the one machine that has nothing
+/// else to fall back on.
+const CLI_FILES: [&str; 6] = ["common.py", "join.py", "worker.py", "runtime.py", "chat.py", "layers.py"];
+
+/// The `(major, minor, patch)` in a CLI file's `VERSION = "0.1.7"` line.
+///
+/// Read rather than executed, because this app may be looking at a CLI written for a
+/// version of itself that no longer exists and must not run it to find out. Scoped to
+/// the first line that begins with `VERSION`, so the string appearing inside prose or
+/// a changelog cannot be mistaken for the declaration.
+///
+/// `None` is not an error. It means this copy cannot be judged, and every caller
+/// treats that as a reason to overwrite nothing.
+fn declared_version(source: &str) -> Option<(u32, u32, u32)> {
+    let line = source
+        .lines()
+        .find(|line| line.trim_start().starts_with("VERSION"))?;
+    let rest = line.split('"').nth(1)?;
+    let mut parts = rest.trim().split('.');
+    let major = parts.next()?.trim().parse().ok()?;
+    let minor = parts.next()?.trim().parse().ok()?;
+    // "0.2.0-dev" is a version: the digits before any suffix are the patch. Reading it as
+    // unparseable made a bundled CLI at 0.2.0-dev unable to replace an installed 0.1.13.
+    let patch = parts
+        .next()?
+        .trim()
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()?;
+    Some((major, minor, patch))
+}
+
+/// Whether the bundled CLI is strictly newer than the one already in place.
+///
+/// The seed moves as one and is compared by `common.py`'s version, because
+/// `runtime.py` and `worker.py` carry no `VERSION` line — they are the siblings of a
+/// versioned CLI, not versions of their own.
+///
+/// Anything unjudgeable answers `false`, and that direction is the point. An existing
+/// install is the user's: it may be one their own `common` has since updated from
+/// `main`, and replacing it with a bundle this app cannot prove is newer would be a
+/// downgrade wearing the costume of a fix.
+fn seed_is_newer(seed: &Path, dir: &Path) -> bool {
+    let Ok(installed) = std::fs::read_to_string(dir.join("common.py")) else {
+        return true; // nothing is there to protect
+    };
+    let Ok(bundled) = std::fs::read_to_string(seed.join("common.py")) else {
+        return false;
+    };
+    match (declared_version(&bundled), declared_version(&installed)) {
+        (Some(bundled), Some(installed)) => bundled > installed,
+        _ => false,
+    }
+}
+
+/// Copy the bundled CLI into `~/.common-network`, over nothing that is newer.
+///
+/// Not fatal when it fails: the fallback in `cli` still finds a `common` installed
+/// the traditional way, and that is a working app.
+///
+/// "Over nothing" once meant *literally* nothing, and that turned out to be a bug
+/// with a long tail: this app runs the CLI with `--no-update`, so a machine that took
+/// the seed once could never take a newer one — not from here, and not from the CLI's
+/// own self-update either. This machine sat on 0.1.3 across three releases that way,
+/// including one whose entire purpose was to make a failure legible. So an install
+/// older than the bundle is now replaced, and anything else is left exactly as found.
+fn seed_cli(seed: &Path, dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let replace = seed_is_newer(seed, dir);
+    for name in CLI_FILES {
+        let to = dir.join(name);
+        if to.exists() && !replace {
+            continue;
+        }
+        std::fs::copy(seed.join(name), &to)?;
+    }
+    Ok(())
+}
+
+/// The CLI script this app runs, keeping the bundled seed in place on the way.
+///
+/// The seed is what makes arriving with nothing work at all: without it the app
+/// would have an interpreter and no program to hand it, which is precisely the
+/// state `~/.common-network` is in on a machine that has only ever run this app.
+///
+/// The seed is consulted on every launch, and not only when `common.py` is absent.
+/// Returning early on an existing `common.py` looked like the "do not clobber" rule
+/// and was really a way to skip the repair entirely, which cost a release. This
+/// machine had `common.py` at 0.1.7 and no `runtime.py` beside it, so `join.py`
+/// imported `~/.common-network/runtime/` — the directory the llama.cpp runtime
+/// unpacks into, which Python is perfectly happy to import as a namespace package —
+/// and died on `module 'runtime' has no attribute 'is_installable'`. Nothing in the
+/// app's logs said so, because nothing had been attempted. The five files travel
+/// together or the CLI does not run.
+///
+/// What may be overwritten is still not decided here: `seed_cli` places what is
+/// missing and replaces only what is strictly older, so a user whose own `common`
+/// has moved ahead of the bundle keeps the copy they have.
+fn cli_script(home: &Path) -> Option<PathBuf> {
+    place_cli(CLI_SEED.get().map(PathBuf::as_path), home)
+}
+
+/// `cli_script` with the seed passed in, so the rule above can be tested without a
+/// process-global `OnceLock` and without an app around it.
+fn place_cli(seed: Option<&Path>, home: &Path) -> Option<PathBuf> {
+    let dir = cli_home(home);
+    if let Some(seed) = seed
+        && let Err(e) = seed_cli(seed, &dir)
+    {
+        // Worth a line rather than a shrug: a seed that could not be placed is a
+        // first run that cannot work, with nothing anywhere saying why.
+        eprintln!("could not place the bundled CLI at {}: {e}", dir.display());
+    }
+    let script = dir.join("common.py");
+    script.is_file().then_some(script)
+}
+
+/// A `common` invocation, resolved.
+///
+/// The command to run, and the path to name if it will not start.
+pub(crate) struct Cli {
+    pub(crate) cmd: Command,
+    pub(crate) named: PathBuf,
+}
+
+/// Build a `common` invocation, whichever way this machine can run one.
+///
+/// The invocation is `python3 <script>`, and not the `bin/common` wrapper sitting
+/// beside it, for a reason that is not stylistic. The wrapper is a shell script
+/// that resolves its own interpreter — and the ones this app was tested against
+/// resolve it from a hardcoded list of absolute system paths, never consulting
+/// `PATH`. So a Python this app fetched could sit at
+/// `~/.common-network/runtime/python/bin/python3` for the life of the install and
+/// never once be the Python the CLI ran under, which would make the fetch pure
+/// ceremony. Naming the interpreter and the script outright is also the one form
+/// that is identical on all three platforms, where the wrapper needs a POSIX shell
+/// that Windows does not have.
+///
+/// `COMMON_BIN` still wins outright: it is how somebody runs this app against a
+/// checkout, and a seed must not get in the way of that.
+pub(crate) fn cli() -> Result<Cli, String> {
+    if let Ok(explicit) = std::env::var("COMMON_BIN")
+        && !explicit.is_empty()
+    {
+        let path = PathBuf::from(explicit);
+        return Ok(Cli {
+            cmd: silent(&path),
+            named: path,
+        });
+    }
+
+    let home = home_dir()?;
+
+    // The interpreter first, so that a machine with no Python is not seeded with a
+    // script it could not run anyway.
+    if let Some(python) = crate::fetch::python_for_cli(&home)
+        && let Some(script) = cli_script(&home)
+    {
+        let mut cmd = silent(&python);
+        cmd.arg(&script);
+        return Ok(Cli { cmd, named: script });
+    }
+
+    // No interpreter this app can vouch for. The old path, which finds an installed
+    // `common` or falls back to the name on `PATH` — the last case is a machine
+    // where the wrapper, and whatever interpreter it can find for itself, is the
+    // only thing that can work.
+    let path = common_bin();
+    Ok(Cli {
+        cmd: silent(&path),
+        named: path,
+    })
+}
+
+/// What [`cli`] would run, for the diagnostics report.
+///
+/// The script and not the interpreter, because "which `common` is this app using"
+/// is the question the report answers, and `python3` is not an answer to it.
+pub(crate) fn cli_path() -> String {
+    match cli() {
+        Ok(resolved) => resolved.named.to_string_lossy().to_string(),
+        Err(_) => common_bin().to_string_lossy().to_string(),
+    }
+}
+
+/// The environment a `common` invocation needs, which is not always the one this
+/// process was handed.
+///
+/// `PATH` is the whole of it, and it earns its place as a first act rather than a last
+/// resort. `join.py` looks `cloudflared` up by name before it will serve anything and
+/// gives up when it does not find it, so a join spawned without that directory on its
+/// `PATH` dies before it has reached the network — and the app then spends its whole
+/// four-minute budget reporting a gateway that was never asked.
+///
+/// A `PATH` is read once, at process start, and this app is routinely started from a
+/// shell — or an Explorer — that was already running when the directory was written, so
+/// what is on this process's `PATH` is not necessarily what is on the disk. Appended and
+/// not prepended: a `cloudflared` the user installed somewhere of their own choosing
+/// still wins the lookup, and this supplies the directory only when nothing else has.
+///
+/// There used to be a second directory — Ollama's, on Windows — added because the
+/// `join.py` of that time asked `shutil.which("ollama")` before it did anything at all
+/// and exited on the answer no. Both halves of that are gone: the join no longer looks
+/// for a daemon, and neither does anything here.
 pub(crate) fn cli_env(cmd: &mut Command) {
+    // Belt and braces beside `--no-color`: the CLI also honours NO_COLOR, and a
+    // stray escape sequence inside JSON is a parse error with a baffling cause.
     cmd.env("NO_COLOR", "1");
+
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Ok(home) = home_dir() {
+        let bin = cli_home(&home).join("bin");
+        if bin.is_dir() {
+            dirs.push(bin);
+        }
+    }
+    if dirs.is_empty() {
+        return;
+    }
+
+    let mut paths: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|existing| std::env::split_paths(&existing).collect())
+        .unwrap_or_default();
+    paths.extend(dirs);
+    if let Ok(joined) = std::env::join_paths(paths) {
+        cmd.env("PATH", joined);
+    }
 }
 
 /// A failed launch of the CLI, in the one form the interface can act on.
@@ -729,12 +1025,8 @@ pub(crate) fn tail_lines(text: &str, lines: usize) -> String {
 /// installed. `--no-update` keeps the call from reaching GitHub — this is the one
 /// process this module starts that is allowed to be slow, and it is still local.
 pub(crate) fn cli_version() -> Option<String> {
-    let bin = common_bin();
-    let out = silent(&bin)
-        .arg("--no-update")
-        .arg("--version")
-        .output()
-        .ok()?;
+    let Cli { mut cmd, .. } = cli().ok()?;
+    let out = cmd.arg("--no-update").arg("--version").output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -829,3 +1121,64 @@ fn safe_stem(name: &str) -> String {
     }
 }
 
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+
+    fn write_cli(dir: &Path, version: &str, files: &[&str]) {
+        std::fs::create_dir_all(dir).unwrap();
+        for name in files {
+            let body = if *name == "common.py" {
+                format!("VERSION = \"{version}\"\n")
+            } else {
+                format!("# {name} {version}\n")
+            };
+            std::fs::write(dir.join(name), body).unwrap();
+        }
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("seed-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn a_dev_suffix_is_still_a_version() {
+        assert_eq!(declared_version("VERSION = \"0.2.0-dev\"\n"), Some((0, 2, 0)));
+        assert_eq!(declared_version("VERSION = \"0.1.13\"\n"), Some((0, 1, 13)));
+        assert_eq!(declared_version("nothing here"), None);
+    }
+
+    #[test]
+    fn the_seed_carries_layers_py_and_no_group_py() {
+        assert!(CLI_FILES.contains(&"layers.py"));
+        assert!(!CLI_FILES.contains(&"group.py"));
+    }
+
+    #[test]
+    fn a_newer_seed_replaces_an_older_install_and_brings_layers_py() {
+        let root = scratch("replace");
+        let (seed, installed) = (root.join("seed"), root.join("home"));
+        write_cli(&seed, "0.2.0-dev", &CLI_FILES);
+        write_cli(&installed, "0.1.13", &["common.py", "join.py", "worker.py", "runtime.py", "chat.py"]);
+        seed_cli(&seed, &installed).unwrap();
+        assert!(installed.join("layers.py").is_file());
+        assert!(std::fs::read_to_string(installed.join("join.py")).unwrap().contains("0.2.0-dev"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_equal_or_newer_install_is_left_alone_but_a_missing_module_is_still_added() {
+        let root = scratch("keep");
+        let (seed, installed) = (root.join("seed"), root.join("home"));
+        write_cli(&seed, "0.2.0-dev", &CLI_FILES);
+        write_cli(&installed, "0.2.0-dev", &["common.py", "join.py", "worker.py", "runtime.py", "chat.py"]);
+        std::fs::write(installed.join("join.py"), "# customised\n").unwrap();
+        seed_cli(&seed, &installed).unwrap();
+        assert_eq!(std::fs::read_to_string(installed.join("join.py")).unwrap(), "# customised\n");
+        assert!(installed.join("layers.py").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

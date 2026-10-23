@@ -26,6 +26,7 @@ import {
   type UpdateOffer,
 } from "./updates";
 import { readSeenVersion, rememberSeenVersion, whatsNewFor } from "./whats-new";
+import { recordUsage } from "./usage";
 
 /**
  * What the flow hands over to.
@@ -354,6 +355,7 @@ export default function Chat() {
       if (answering.current) return false;
       if (!chatReady(latestView.current)) return false;
       answering.current = true;
+      recordUsage("questionsSent");
       const mine = generation.current;
       const id = active.id;
       // Real turns, not a flattened string: the peer's API takes a conversation.
@@ -388,7 +390,9 @@ export default function Chat() {
           if (answerId === null) {
             // The stream ended without a word: the network answered with nothing.
             append(id, { role: "assistant", text: NO_ANSWER, failed: true });
+            recordUsage("answersFailed");
           } else {
+            recordUsage("answersReceived");
             const status = latestView.current?.status;
             const covered = stagesCovered(status);
             const online = otherPeers(status).length + 1;
@@ -406,6 +410,7 @@ export default function Chat() {
           // yet"); it is shown as the line under the question, and anything that
           // had arrived before it stays above.
           append(id, { role: "assistant", text: message || NO_ANSWER, failed: true });
+          recordUsage("answersFailed");
           done();
         },
       });
@@ -464,6 +469,7 @@ export default function Chat() {
   /** `Stop waiting`, whose number comes from the clock the user was watching. */
   const stopWaiting = useCallback(
     (waitedMs: number) => {
+      recordUsage("questionsStopped");
       release(active.id, waitedMs);
     },
     [active.id, release],
@@ -489,6 +495,7 @@ export default function Chat() {
    *  difference from the single-chat version of this: the chat you were in is
    *  still there when you come back. */
   const newChat = useCallback(() => {
+    recordUsage("conversationsStarted");
     release(chats.activeId);
     const chat = newConversation();
     setChats((current) => ({ list: [chat, ...current.list], activeId: chat.id }));

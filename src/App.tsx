@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Chat from "./chat/Chat";
 import Onboarding from "./onboarding/Onboarding";
 import { preview } from "./preview";
+import { startProvisioning } from "./provision";
 import Wordmark from "./Wordmark";
 import "./App.css";
 
@@ -54,6 +55,13 @@ export default function App() {
     if (jump.step !== null) return "onboarding";
     return seen(LIVE_SEEN) ? "chat" : seen(INTRO_SEEN) ? "onboarding" : "intro";
   });
+
+  // The one install (Python, the tunnel), started at launch and never awaited here: the screen that
+  // needs it subscribes, and `startProvisioning` is idempotent, so a StrictMode remount joins the first
+  // call rather than starting a second fetch. See `provision.ts`.
+  useEffect(() => {
+    void startProvisioning();
+  }, []);
 
   const begin = () => {
     if (phase !== "intro") return;
