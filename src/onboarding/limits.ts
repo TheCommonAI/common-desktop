@@ -1,5 +1,3 @@
-import type { ResourceLimits } from "./service";
-
 /**
  * The vocabulary of resource limits, in one place.
  *
@@ -10,22 +8,15 @@ import type { ResourceLimits } from "./service";
  * with the flow that set it is worse than no settings screen. So there is one
  * copy, and both read it.
  *
- * `CAP_CHOICES` is a table of names rather than a pair of sliders on purpose:
- * a percentage is a figure the user has to translate into a consequence, and
- * "Most" is the consequence. The numbers travel with the name so the caption can
- * disclose them, which is what makes the shorthand honest rather than vague.
+ * There is no "how much" here. A peer in the layer network offers the slice of the
+ * model that fits in its memory and either serves or does not, so there is nothing
+ * to throttle and a percentage would be a promise nothing keeps. What the app can
+ * truly hold itself to is *when*, because it decides whether the peer runs.
  */
 
 export const CONTRIBUTE_CHOICES = [
   { value: "always" as const, label: "Always" },
   { value: "plugged-in" as const, label: "Only when plugged in" },
-  { value: "idle" as const, label: "Only when idle" },
-];
-
-export const CAP_CHOICES = [
-  { value: "little" as const, label: "A little", cpuPercent: 25, gpuPercent: 20 },
-  { value: "some" as const, label: "Some", cpuPercent: 50, gpuPercent: 40 },
-  { value: "most" as const, label: "Most", cpuPercent: 75, gpuPercent: 60 },
 ];
 
 export const QUIET_CHOICES = [
@@ -34,14 +25,3 @@ export const QUIET_CHOICES = [
 ];
 
 export const DEFAULT_QUIET = { start: "22:00", end: "07:00" };
-
-/** The named cap a stored pair of percentages corresponds to, or `null` for a
- *  pair that matches none of them — which a clamping implementation can
- *  legitimately return, and which the card must not pretend to have chosen. */
-export function capChoiceOf(cap: ResourceLimits["cap"]): (typeof CAP_CHOICES)[number] | null {
-  return (
-    CAP_CHOICES.find(
-      (choice) => choice.cpuPercent === cap.cpuPercent && choice.gpuPercent === cap.gpuPercent,
-    ) ?? null
-  );
-}

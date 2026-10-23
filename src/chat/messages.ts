@@ -30,13 +30,14 @@ export interface ChatMessage {
    */
   stopped?: boolean;
   /**
-   * Which machine answered — "served by alder-7", "composed by 3 machines".
+   * Who answered — "answered across 4 parts of the model · 6 machines online".
    *
    * Set on the answers and not on the questions or the greeting, because it is
    * a fact about a reply. It is here rather than in a log because on this
    * network it is not an implementation detail: the machines are people's
-   * laptops, the routing is the product, and a chat that hides which one
-   * answered is exactly the opacity this network was built against.
+   * laptops, and a chat that hides that is the opacity this network was built
+   * against. It is read from the peer's own view of the network at the moment
+   * the answer finished, and left off when that view is not known.
    */
   servedBy?: string;
 }
@@ -50,46 +51,28 @@ export function formatTime(at: Date): string {
 /**
  * What the assistant opens with.
  *
- * The mock this screen follows opens on a greeting, and a chat that opens on an
- * empty field asks the user to invent the first move. But the greeting is also
- * the only chance to say the one thing that is true of *this* product and not of
- * a chat app: the question does not go to a data centre, it goes to the network,
- * and a person's machine answers it. A generic "How can I help?" would be the
- * same sentence a hundred other products open with, and it would leave the
- * interesting fact unsaid.
- *
- * It used to say the opposite — that the model ran here and nothing left the
- * machine. That was true of `common ask --local`, and it was the wrong product:
- * a machine that contributes one specialist cannot answer everything, and this
- * one answered "hey" with mathematics. The question does leave now. Saying so is
- * the price of the routing, and it is the more interesting sentence anyway.
+ * A chat that opens on an empty field asks the user to invent the first move. But
+ * the greeting is also the only chance to say the one thing that is true of *this*
+ * product and not of a chat app: no single machine holds the model. Each holds a
+ * slice, the activations pass from one to the next, and the answer is the whole
+ * network's.
  */
-export const GREETING = "Hello. Your question goes out to the network, and a machine answers it.";
+export const GREETING = "Hello. Your question is answered by the network, a piece at a time, by machines like yours.";
 
 /** And what the assistant says when it could not answer. One clause, no hue:
  *  the register withdraws the ink and names the thing, and leaves the fixing to
- *  the screen that can do it. It is deliberately the same sentence the CLI fails
- *  with, so that the app and the terminal are describing one event. */
+ *  the screen that can do it. */
 export const NO_ANSWER = "The network didn't answer.";
 
 /**
  * What is left behind when the user lets go of a question before the network
  * answers it — and how long they held on.
  *
- * Not `failed`, and the difference is the whole of the sentence: nothing went
- * wrong, the node was simply taking a long time and the user stopped waiting for
- * it. A transcript that ends on a bare question would read, later, as a bug —
- * every other question in it has a line under it.
- *
- * The seconds are the point of the line. They are the one measurement of this
- * network's slowness that exists anywhere: the gateway already times every
- * request it routes and reports `routing_ms`, `ttft_ms` and `total_ms` back, so a
- * slow answer is not news to it. A user giving up is. That number is currently
- * written down nowhere the network can read, which is why it is written here,
- * where at least the person who waited can see it.
- *
- * Rounded the way the waiting clock rounds, so the number on this line and the
- * number the user was staring at agree.
+ * Not `failed`: nothing went wrong, the answer was slow and the user stopped
+ * waiting for it. A transcript that ends on a bare question would read, later, as
+ * a bug — every other question in it has a line under it. The seconds are the
+ * point of the line, rounded the way the waiting clock rounds, so the number here
+ * and the number the user was watching agree.
  */
 export function stoppedAfter(waitedMs: number): string {
   return `Stopped waiting after ${Math.round(waitedMs / 1000)}s.`;

@@ -1,164 +1,73 @@
 import { useEffect, useState, type ReactNode } from "react";
-import {
-  captionText,
-  formatBytes,
-  formatEta,
-  formatTransfer,
-} from "../copy";
-import { findModel } from "../models";
+import { formatBytes, formatTransfer } from "../copy";
 import Control from "../parts/Control";
 import Rule from "../parts/Rule";
 import Statement from "../parts/Statement";
-import {
-  onboardingService,
-  type DownloadProgress,
-  type DownloadResult,
-  type HardwareReport,
-} from "../service";
 import type { ScreenProps } from "../steps";
-import { refused, useTask } from "../use-task";
+import { captionText } from "../copy";
+import { layersLabel, phaseOf, startPeer, stopPeer, usePeer, writeEnabled } from "../../peer/peer";
+import ShareLog from "../../chat/ShareLog";
 
 /**
- * The long one, and the screen with the most ways to be in the middle of
- * something.
+ * Getting this machine's share of the model.
  *
- * Nothing starts until the user says so: this is the only step whose work costs
+ * Not "the model": the network splits one large model by layers, and this machine
+ * downloads only the layers it will serve. The layers are not chosen here. The
+ * network says which are least covered right now and the peer takes those, so the
+ * first thing this screen can say about the share is how big it is, and that only
+ * once the peer has worked it out.
+ *
+ * Nothing starts until the user says so, as before: this is the step that costs
  * real time and real disk, and beginning it on arrival would be a decision made
- * for them. Before it begins, it says what the download will cost and whether
- * there is room — the disk warning is this state, not a dialog over it.
- *
- * The gauge is a hairline. The numbers are the type.
+ * for them. The progress is the peer's own, read from its status file: real bytes,
+ * not an estimate. There is no pause. The peer resumes a download it was stopped
+ * in, so stopping is cheap, and a pause button for a process that keeps no partial
+ * state of its own would be a button that lies.
  */
 
-/** What a transfer needs beyond the weights themselves: room for the partial
- *  file beside the finished one while the checksum is checked. */
-const HEADROOM = 1.15;
-
-/** Rounded up to the nearest tenth of a gigabyte, and up rather than to
- *  nearest: this is a requirement, and a requirement that rounds down is one
- *  the check it describes can fail. */
-function requirement(bytes: number): number {
-  return Math.ceil((bytes * HEADROOM) / 1e8) * 1e8;
-}
-
-export default function DownloadModel({ flow, update, next, back }: ScreenProps) {
-  const model = flow.modelId === null ? null : findModel(flow.modelId);
-  const free = flow.hardware?.disk?.freeBytes ?? null;
-  const required = model === null ? 0 : requirement(model.bytes);
-  const blocked = free !== null && free < required;
-
-  const { state, run, cancel, pause, resume } = useTask<DownloadResult, DownloadProgress>(
-    (opts) =>
-      model === null
-        ? refused<DownloadResult>("No model chosen.")
-        : onboardingService.downloadModel({ modelId: model.id }, opts),
-  );
-
-  // Re-reading the disk, for the other fix to a full disk: the user frees space
-  // elsewhere and comes back. Its own task, so leaving the screen cancels it
-  // like everything else.
-  const recheck = useTask<HardwareReport, never>(() => onboardingService.scanHardware());
-  useEffect(() => {
-    if (recheck.state.status === "done") update({ hardware: recheck.state.value });
-  }, [recheck.state, update]);
-
-  /** The last two controls are about to be replaced by two different ones. */
+export default function DownloadModel({ next, back }: ScreenProps) {
+  const view = usePeer();
+  const phase = phaseOf(view);
+  const status = view?.status ?? null;
+  const [asked, setAsked] = useState(false);
+  const [refused, setRefused] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
 
-  const progress = state.status === "running" || state.status === "error" ? state.progress : null;
-  const total = progress?.totalBytes ?? null;
-  const fraction =
-    progress !== null && total !== null && total > 0 ? progress.receivedBytes / total : null;
+  // Something already running (a previous run of the app, or this one before a
+  // restart) is the peer's progress to show, not a reason to ask again.
+  const started = asked || phase === "starting" || phase === "downloading" || phase === "loading" || phase === "up" || phase === "moving";
 
-  const label = model?.label ?? "the model";
+  useEffect(() => {
+    if (!asked) return;
+    writeEnabled(true);
+  }, [asked]);
 
-  /** The caption as a plain line, for the gauge to read out. */
-  let parts: readonly (string | null)[];
-  /** Whether the caption is beside a gauge that is on screen. */
-  let gauged = false;
+  const begin = () => {
+    setRefused(null);
+    setAsked(true);
+    startPeer().catch((error: unknown) => {
+      setAsked(false);
+      setRefused(typeof error === "string" ? error : "I couldn't start it.");
+    });
+  };
+
+  const download = status?.download ?? null;
+  const fraction = download !== null && download.total > 0 ? download.bytes / download.total : null;
+  const share = layersLabel(status);
 
   let statement: ReactNode;
-  /** `undefined`, not `null`, for a state with nothing to offer — an empty
-   *  control line would still be a line. */
-  let controls: ReactNode | undefined;
+  let caption: ReactNode | readonly ReactNode[];
+  let controls: ReactNode;
   let focusKey: string;
+  let gauge: ReactNode | undefined;
 
   if (confirming) {
     focusKey = "confirm";
-    statement = "Stop the download?";
-    parts = [
-      total === null ? null : `${formatBytes(progress?.receivedBytes ?? 0)} stays on disk`,
+    statement = "Stop getting your share?";
+    caption = [
+      download === null ? null : `${formatBytes(download.bytes)} stays on disk`,
       "you can pick it up again later",
     ];
-  } else if (state.status === "done") {
-    focusKey = "done";
-    statement = "That's the model.";
-    parts = [label, "ready"];
-  } else if (state.status === "error") {
-    // What went wrong, in the words of the layer that failed. This used to be
-    // the fixed sentence "The download stopped.", which is wrong for the one
-    // failure that is not a stopped transfer — ollama not being up at all, where
-    // nothing ever started and so nothing stopped.
-    const moved = progress?.receivedBytes ?? 0;
-    focusKey = "error";
-    statement = state.error.message;
-    parts = [
-      // Both of these are claims about a partial file, so both are withheld when
-      // there is no partial file. "Resuming will be quick" is a promise about a
-      // retry that would begin at zero, which is the one thing it cannot be.
-      moved > 0 && total !== null ? `${formatTransfer(moved, total)} is on disk` : null,
-      moved > 0 ? "resuming will be quick" : null,
-      state.error.detail ?? null,
-    ];
-    gauged = true;
-  } else if (state.status === "running") {
-    const current = state.progress;
-    focusKey =
-      current?.state === "waiting"
-        ? "waiting"
-        : current?.state === "paused"
-          ? "paused"
-          : current?.state === "verifying"
-            ? "verifying"
-            : "running";
-    statement = current?.state === "waiting" ? "Waiting for Ollama." : `Downloading ${label}.`;
-    if (current === null) {
-      parts = ["Starting…"];
-    } else if (current.state === "waiting") {
-      // Seconds so far, and they move, which is the whole of their job: this is
-      // the state a cold first run spends its first half-minute in.
-      parts = [`starting it — ${current.waitedSeconds ?? 0}s`];
-    } else if (current.state === "verifying") {
-      parts = ["Checking the file…"];
-    } else if (current.state === "paused") {
-      parts = [`Paused at ${formatBytes(current.receivedBytes)}`];
-    } else if (current.totalBytes === null) {
-      parts = [`${formatBytes(current.receivedBytes)} downloaded`, formatEta(current.etaSeconds)];
-    } else {
-      parts = [
-        formatTransfer(current.receivedBytes, current.totalBytes),
-        formatEta(current.etaSeconds),
-      ];
-    }
-    gauged = true;
-  } else if (blocked) {
-    focusKey = "blocked";
-    statement = "There isn't room for this one.";
-    parts = [
-      `Needs ${formatBytes(required)}`,
-      free === null ? null : `you have ${formatBytes(free)} free`,
-    ];
-  } else {
-    focusKey = "ready";
-    statement = "Ready when you are.";
-    parts = [
-      label,
-      model === null ? null : formatBytes(model.bytes),
-      free === null ? null : `${formatBytes(free)} free`,
-    ];
-  }
-
-  if (confirming) {
     controls = (
       <>
         <Control onClick={() => setConfirming(false)} arrow>
@@ -167,7 +76,9 @@ export default function DownloadModel({ flow, update, next, back }: ScreenProps)
         <Control
           onClick={() => {
             setConfirming(false);
-            cancel();
+            setAsked(false);
+            writeEnabled(false);
+            stopPeer().catch(() => {});
           }}
           quiet
         >
@@ -175,67 +86,76 @@ export default function DownloadModel({ flow, update, next, back }: ScreenProps)
         </Control>
       </>
     );
-  } else if (state.status === "done") {
+  } else if (refused !== null) {
+    focusKey = "refused";
+    statement = "I couldn't start it.";
+    caption = [refused];
     controls = (
       <>
-        <Control onClick={next} arrow>
-          Continue
+        <Control onClick={begin} arrow>
+          Try again
         </Control>
         <Control onClick={back} quiet>
           Back
         </Control>
       </>
     );
-  } else if (state.status === "error") {
+  } else if (phase === "problem" || phase === "error" || phase === "crashed") {
+    focusKey = "trouble";
+    statement =
+      phase === "crashed" ? "It stopped on its own." : phase === "problem" ? "It can't start." : "It hit a problem.";
+    caption = [
+      phase === "problem" ? view?.problem ?? null : status?.error ?? "Trying again often helps",
+      view?.lastExit ?? null,
+    ];
     controls = (
       <>
-        <Control onClick={run} arrow>
-          Resume
+        <Control onClick={begin} arrow>
+          Try again
         </Control>
-        <Control onClick={() => setConfirming(true)} quiet>
-          Cancel
+        <Control onClick={back} quiet>
+          Back
         </Control>
+        <ShareLog />
       </>
     );
-  } else if (state.status === "running") {
-    const mode = state.progress?.state;
-    // A wait has nothing to hold. There is no transfer to pause, only a daemon
-    // coming up, so Cancel is the whole of what it can be told.
-    const middle =
-      mode === "waiting" ? null : mode === "paused" ? (
-        <Control onClick={resume}>Resume</Control>
-      ) : (
-        <Control onClick={pause}>Pause</Control>
-      );
-    controls =
-      mode === "verifying" ? undefined : (
-        <>
-          {middle}
-          <Control onClick={() => setConfirming(true)} quiet>
-            Cancel
-          </Control>
-        </>
-      );
-  } else if (blocked) {
+  } else if (started && (phase === "loading" || phase === "up" || phase === "moving")) {
+    focusKey = "done";
+    statement = "That's your share.";
+    caption = [share, status?.model ?? null];
     controls = (
-      <>
-        <Control onClick={back} arrow>
-          Choose another lane
-        </Control>
-        <Control
-          onClick={recheck.run}
-          quiet
-          disabled={recheck.state.status === "running"}
-        >
-          Check again
-        </Control>
-      </>
+      <Control onClick={next} arrow>
+        Continue
+      </Control>
+    );
+  } else if (started) {
+    // Starting, or downloading. Both are "working"; the caption says which part.
+    focusKey = phase === "downloading" ? "downloading" : "starting";
+    statement = phase === "downloading" ? "Getting your share." : "Getting ready.";
+    if (phase === "downloading" && download !== null && download.total > 0) {
+      caption = [share, formatTransfer(download.bytes, download.total)];
+    } else if (phase === "downloading") {
+      caption = [share, "starting the download"];
+    } else {
+      caption = ["Setting up the runtime", "the first time takes a few minutes"];
+    }
+    gauge = <Rule fraction={fraction} label={captionText(...(Array.isArray(caption) ? caption : [caption as string]))} />;
+    controls = (
+      <Control onClick={() => setConfirming(true)} quiet>
+        Cancel
+      </Control>
     );
   } else {
+    focusKey = "ready";
+    statement = "Ready when you are.";
+    caption = [
+      "Downloads only the layers you'll serve",
+      "a few gigabytes, once",
+    ];
     controls = (
       <>
-        <Control onClick={run} arrow>
-          Download
+        <Control onClick={begin} arrow>
+          Get my share
         </Control>
         <Control onClick={back} quiet>
           Back
@@ -245,12 +165,6 @@ export default function DownloadModel({ flow, update, next, back }: ScreenProps)
   }
 
   return (
-    <Statement
-      statement={statement}
-      caption={parts}
-      controls={controls}
-      focusKey={focusKey}
-      gauge={gauged ? <Rule fraction={fraction} label={captionText(...parts)} /> : undefined}
-    />
+    <Statement statement={statement} caption={caption} controls={controls} focusKey={focusKey} gauge={gauge} />
   );
 }

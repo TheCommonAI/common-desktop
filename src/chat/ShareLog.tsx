@@ -1,19 +1,21 @@
 import { useState } from "react";
 import Control from "../onboarding/parts/Control";
-import { diagnostics, saveDiagnostics, type Diagnostics } from "./backend";
+import { peer } from "../peer/peer";
+import type { PeerDiagnostics } from "../peer/types";
+import { saveDiagnostics } from "./backend";
 
 /**
  * How to hand somebody the evidence, for when it will not connect.
  *
  * The report is built here rather than in Rust for one reason: only this side
- * knows the reader's clock. `joined_at` and the log's mtime arrive as Unix
- * seconds and become dates in the local timezone, which is the form a person
- * comparing them to their own memory of "it was about half past two" can use.
+ * knows the reader's clock, and a person comparing it to their own memory of "it
+ * was about half past two" needs local time.
  *
  * ── What is deliberately absent ───────────────────────────────────────────────
  *
- * No node token, and no key of any kind — not filtered out here, but never read
- * in the first place; see `IdentitySummary` in `backend.rs`. That matters because
+ * No token and no key of any kind. The peer's status file never holds one, and
+ * Rust removes anything credential-shaped from it anyway (`scrub` in `peer.rs`)
+ * before it reaches the page. That matters because
  * of where this text goes: a diagnostics report is pasted into a chat window, or
  * attached to an email, and it is the one artifact this app produces that is
  * meant to leave the machine. It says so in its own first line, because an absent
@@ -44,52 +46,57 @@ function when(seconds: number | null): string | null {
  * that could be missing prints an em dash instead of nothing, so the columns
  * stay aligned and an absent fact is visibly absent rather than invisible.
  */
-export function reportText(d: Diagnostics): string {
+export function reportText(d: PeerDiagnostics): string {
   const out: string[] = [];
-  const row = (label: string, value: string | null | undefined) => {
-    const shown = value === null || value === undefined || value === "" ? "—" : value;
-    out.push(`${label.padEnd(12)}${shown}`);
+  const row = (label: string, value: string | number | boolean | null | undefined) => {
+    const shown = value === null || value === undefined || value === "" ? "—" : String(value);
+    out.push(`${label.padEnd(14)}${shown}`);
   };
+  const status = d.view.status;
 
   out.push("Common. — a report from this machine");
   out.push("");
-  out.push("This report carries no key or token for this machine.");
+  out.push("This report carries no key or token. Anything credential-shaped is removed before it is built.");
   out.push("");
 
   row("Reported", when(Math.floor(Date.now() / 1000)));
-  row("App", `${d.appVersion} (${d.appIdentifier})`);
-  row("System", d.osVersion === "" ? d.osPlatform : `${d.osPlatform} ${d.osVersion}`);
+  row("App", d.appVersion);
+  row("System", d.os);
   row("CLI", d.cliVersion);
   row("CLI path", d.cliPath);
-  row("Gateway", d.gateway);
+  row("Knows --network", d.cliKnowsLayerNetwork === null ? null : d.cliKnowsLayerNetwork ? "yes" : "no — it needs updating");
 
   out.push("");
-  out.push("Identity");
-  row("  file", d.identityPath);
-  if (d.identityError !== null) {
-    // A read that failed, which is not the same fact as never having joined —
-    // and is the one a report is usually being asked about.
-    row("  state", `could not be read — ${d.identityError}`);
-  } else if (d.joined === null) {
-    row("  state", "not registered; this machine has never joined");
+  out.push("The peer");
+  row("  switched on", d.view.wantRunning ? "yes" : "no");
+  row("  running", d.view.running ? "yes" : "no");
+  row("  crashed", d.view.crashed ? "yes — its status stopped updating" : "no");
+  row("  restarts", d.view.restarts);
+  row("  last exit", d.view.lastExit);
+  row("  problem", d.view.problem);
+  row("  status file", d.view.statusPath);
+  row("  status age", d.view.statusAge === null ? null : `${Math.round(d.view.statusAge)} s`);
+  if (status === null) {
+    row("  state", "no status file yet");
   } else {
-    row("  name", d.joined.name);
-    row("  node", d.joined.nodeId);
-    row("  catalogue", d.joined.catalogueId);
-    row("  tags", d.joined.domainTags.join(", "));
-    row("  joined", when(d.joined.joinedAt));
-    row("  gateway", d.joined.gateway);
+    row("  state", status.state);
+    row("  network", status.network);
+    row("  model", status.model);
+    row("  peer id", status.peer);
+    row("  layers", status.window ? `${status.window[0]} to ${status.window[1]}` : null);
+    row("  backend", status.backend);
+    row("  memory offered", status.gib === undefined ? null : `${status.gib} GiB`);
+    row("  address", status.url);
+    row("  chat", status.api ? `port ${status.api.port}, ${status.api.ready ? "ready" : "loading"}` : null);
+    row("  coverage", status.coverage ? status.coverage.join(" ") : null);
+    row("  others online", (status.peers ?? []).filter((p) => !p.me && p.state === "up").length);
+    row("  error", status.error);
   }
 
   out.push("");
-  out.push("Join log");
-  row("  file", d.logPath);
-  row("  size", d.logBytes === null ? null : `${d.logBytes} bytes`);
-  row("  modified", when(d.logModified));
-  if (d.logError !== null) {
-    row("  state", `could not be read — ${d.logError}`);
-  }
-  if (d.logTail !== null && d.logTail.trim() !== "") {
+  out.push("Peer log");
+  row("  file", d.view.logPath);
+  if (d.logTail.trim() !== "") {
     out.push("");
     out.push("End of the log");
     out.push("");
@@ -160,10 +167,11 @@ export default function ShareLog() {
    * it is already looking at something that went wrong and does not need a second
    * thing phrased like a stack trace.
    */
-  const run = (act: (d: Diagnostics) => Promise<string>) => {
+  const run = (act: (d: PeerDiagnostics) => Promise<string>) => {
     setBusy(true);
     setNote(null);
-    diagnostics()
+    peer
+      .diagnostics()
       .then(act)
       .then(setNote, (why: unknown) => setNote(String(why)))
       .finally(() => setBusy(false));

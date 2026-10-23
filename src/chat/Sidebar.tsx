@@ -1,4 +1,5 @@
 import { titleFor, type Conversation } from "./conversations";
+import { otherPeers, phaseOf, usePeer, type Phase } from "../peer/peer";
 import { askFor, type UpdateOffer } from "./updates";
 
 /**
@@ -56,10 +57,8 @@ const GEAR_MARK = (
 );
 
 export interface SidebarProps {
-  /** `null` while the check is still in flight. The line never claims a state it
-   *  has not read, which is why this is three-valued rather than defaulting to
-   *  "connected" and correcting itself a moment later. */
-  seen: boolean | null;
+  /** Why the app has paused itself (quiet hours, on battery), or `null`. */
+  paused: string | null;
   /** Every chat this machine has, newest first. Never empty — `Chat` seeds one
    *  rather than let the rail draw a list with nothing in it. */
   chats: readonly Conversation[];
@@ -99,8 +98,41 @@ function updateBar(
   };
 }
 
+/**
+ * The foot's one-line reading of the peer.
+ *
+ * Three looks, as before — checking, seen, unseen — but the words are the peer's:
+ * it never claims "on the network" until the peer has said it is up, and it names
+ * how many others it can see once it knows.
+ */
+function footOf(phase: Phase, others: number, paused: string | null): { state: "checking" | "seen" | "unseen"; label: string } {
+  if (paused !== null) return { state: "unseen", label: paused };
+  switch (phase) {
+    case "unknown":
+      return { state: "checking", label: "Checking" };
+    case "starting":
+      return { state: "checking", label: "Getting ready" };
+    case "downloading":
+      return { state: "checking", label: "Getting your share" };
+    case "loading":
+    case "moving":
+      return { state: "checking", label: "Loading" };
+    case "up":
+      return { state: "seen", label: others === 0 ? "On the network" : `On the network · ${others} more` };
+    case "leaving":
+      return { state: "checking", label: "Leaving" };
+    case "crashed":
+      return { state: "unseen", label: "Stopped" };
+    case "problem":
+    case "error":
+      return { state: "unseen", label: "Can't join" };
+    case "off":
+      return { state: "unseen", label: "Not on the network" };
+  }
+}
+
 export default function Sidebar({
-  seen,
+  paused,
   chats,
   activeId,
   onSelect,
@@ -111,7 +143,8 @@ export default function Sidebar({
   onInstall,
   onRestart,
 }: SidebarProps) {
-  const state = seen === null ? "checking" : seen ? "seen" : "unseen";
+  const view = usePeer();
+  const { state, label } = footOf(phaseOf(view), otherPeers(view?.status).length, paused);
   const bar = updateBar(offer, onInstall, onRestart);
 
   return (
@@ -231,7 +264,7 @@ export default function Sidebar({
       <div className={`chat__foot chat__foot--${state}`}>
         <span className="chat__foot-bar" aria-hidden="true" />
         <span className="chat__label" role="status">
-          {state === "checking" ? "Checking" : state === "seen" ? "Connected" : "Not seen"}
+          {label}
         </span>
         <button
           type="button"

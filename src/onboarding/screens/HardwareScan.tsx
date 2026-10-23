@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { formatBytes } from "../copy";
-import { gb } from "../models";
+import { capabilityOf, gb } from "../capability";
 import Choices from "../parts/Choices";
 import Control from "../parts/Control";
 import Statement from "../parts/Statement";
@@ -24,10 +24,9 @@ const PHASES: Record<ScanProgress["field"], string> = {
   power: "Reading power…",
 };
 
-/** Below this, free space is worth a clause on the way past. The precise check
- *  is on the download screen against the model actually chosen; this is a
- *  heads-up, and eight gigabytes is room for the largest model in the catalogue
- *  plus the partial that sits beside it until the checksum matches. */
+/** Below this, free space is worth a clause on the way past. A share of the model
+ *  is a few gigabytes, and the download lands beside a partial copy until it is
+ *  checked; this is a heads-up, not a gate. */
 const TIGHT = gb(8);
 
 const MEMORY_CHOICES = [
@@ -142,25 +141,48 @@ export default function HardwareScan({ flow, update, next, back }: ScreenProps) 
       </>
     );
   } else if (report !== null) {
-    focusKey = "done";
-    statement = "Here's what this machine has.";
-    caption = reportParts(report);
-    controls = (
-      <>
-        <Control
-          onClick={() => {
-            update({ hardware: report });
-            next();
-          }}
-          arrow
-        >
-          Continue
-        </Control>
-        <Control onClick={back} quiet>
-          Back
-        </Control>
-      </>
-    );
+    // The verdict comes before the next step, not after the download: a machine
+    // the network cannot use should hear that now, not after a wait.
+    const verdict = capabilityOf(report, flow.memoryOverrideBytes);
+    if (verdict.can) {
+      focusKey = "done";
+      statement = "This machine can serve part of the model.";
+      caption = [
+        `${verdict.how[0].toUpperCase()}${verdict.how.slice(1)}`,
+        `about ${formatBytes(verdict.offeredBytes)} to offer`,
+        ...reportParts(report).slice(1),
+      ];
+      controls = (
+        <>
+          <Control
+            onClick={() => {
+              update({ hardware: report });
+              next();
+            }}
+            arrow
+          >
+            Continue
+          </Control>
+          <Control onClick={back} quiet>
+            Back
+          </Control>
+        </>
+      );
+    } else {
+      focusKey = "cannot";
+      statement = "This machine can't serve part of the model yet.";
+      caption = [verdict.why, ...reportParts(report).slice(0, 2)];
+      controls = (
+        <>
+          <Control onClick={run} arrow>
+            Scan again
+          </Control>
+          <Control onClick={back} quiet>
+            Back
+          </Control>
+        </>
+      );
+    }
   } else {
     const field = state.status === "running" ? (state.progress?.field ?? "memory") : "memory";
     focusKey = outcomeKey(state);

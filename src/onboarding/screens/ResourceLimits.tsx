@@ -1,13 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { formatClock } from "../copy";
 import { defaultLimits } from "../flow";
-import {
-  CAP_CHOICES,
-  CONTRIBUTE_CHOICES,
-  DEFAULT_QUIET,
-  QUIET_CHOICES,
-  capChoiceOf,
-} from "../limits";
+import { CONTRIBUTE_CHOICES, DEFAULT_QUIET, QUIET_CHOICES } from "../limits";
 import Choices from "../parts/Choices";
 import Control from "../parts/Control";
 import Statement from "../parts/Statement";
@@ -17,33 +11,30 @@ import type { ScreenProps } from "../steps";
 import { useTask } from "../use-task";
 
 /**
- * The three questions that stop a student laptop from feeling hijacked.
+ * The two questions that stop a laptop from feeling hijacked: when it helps, and
+ * whether it rests overnight.
  *
- * One question at a time, in one step. The brief asks for five things here —
- * when to contribute, a processor cap, a graphics cap, and a schedule — and
- * five things on one screen is a settings page, which is exactly the register
- * this flow is not written in. Splitting them into three *steps* would make the
- * flow eight screens and contradict the brief's own count, so they are three
- * states inside step five. A state is not a step; step five stays one screen.
+ * There used to be a third, "how much may it take". The layer network has no
+ * throttle: a peer offers a slice of the model that fits in its memory and either
+ * serves or does not. A percentage would have been a promise nothing keeps, so the
+ * question is gone, and what is left is the part the app can honour — *when*, by
+ * starting and stopping the peer itself.
  *
- * The cap is the interesting one. Two sliders have no quiet editorial form, so
- * it is re-derived rather than shrunk: one named choice — A little, Some, Most
- * — whose caption discloses the percentages it really means.
+ * One question at a time, in one step: a state is not a step.
  */
 
-type Question = "contribute" | "cap" | "quiet";
+type Question = "contribute" | "quiet";
 
 export default function ResourceLimits({ flow, update, next, back }: ScreenProps) {
   const initial = defaultLimits(flow.hardware);
   const onBattery = flow.hardware?.power?.source === "battery";
 
   const [contribute, setContribute] = useState(initial.contribute);
-  const [cap, setCap] = useState(initial.cap);
   const [rest, setRest] = useState(initial.quietHours !== null);
   const [times, setTimes] = useState(initial.quietHours ?? DEFAULT_QUIET);
   const [question, setQuestion] = useState<Question>("contribute");
 
-  const limits: ResourceLimits = { contribute, cap, quietHours: rest ? times : null };
+  const limits: ResourceLimits = { contribute, quietHours: rest ? times : null };
 
   // Written once, on Finish. A half-answered form is never sent, and the flow
   // is redrawn from what the service says it stored rather than from what it
@@ -57,8 +48,6 @@ export default function ResourceLimits({ flow, update, next, back }: ScreenProps
     }
   }, [save.state, update, next]);
 
-  const capChoice = capChoiceOf(cap)?.value ?? null;
-
   const contributeParts: readonly ReactNode[] =
     contribute === "plugged-in" && onBattery
       ? // The scan deciding something the user can see: the machine is on
@@ -68,14 +57,8 @@ export default function ResourceLimits({ flow, update, next, back }: ScreenProps
           {
             always: "Runs whenever the machine is awake",
             "plugged-in": "Waits until you're plugged in",
-            idle: "Waits until you've stepped away",
           }[contribute],
         ];
-
-  const capParts: readonly ReactNode[] = [
-    `Up to ${cap.cpuPercent}% of the processor`,
-    `${cap.gpuPercent}% of the graphics`,
-  ];
 
   const quietParts: readonly ReactNode[] = rest
     ? [`Pauses at ${formatClock(times.start)}`, `picks up at ${formatClock(times.end)}`]
@@ -96,7 +79,7 @@ export default function ResourceLimits({ flow, update, next, back }: ScreenProps
     caption = [
       save.state.error.code === "permission-denied"
         ? "The system wouldn't write the settings"
-        : "The network didn't answer",
+        : "Something went wrong at this end",
       save.state.error.detail ?? null,
     ];
     choices = null;
@@ -127,37 +110,10 @@ export default function ResourceLimits({ flow, update, next, back }: ScreenProps
     fields = null;
     controls = (
       <>
-        <Control onClick={() => setQuestion("cap")} arrow disabled={saving}>
-          Next
-        </Control>
-        <Control onClick={back} quiet>
-          Back
-        </Control>
-      </>
-    );
-  } else if (question === "cap") {
-    focusKey = "cap";
-    statement = "How much may it take?";
-    caption = capParts;
-    choices = (
-      <Choices
-        label="How much it may take"
-        name="cap"
-        value={capChoice}
-        choices={CAP_CHOICES}
-        onChange={(value) => {
-          const picked = CAP_CHOICES.find((c) => c.value === value);
-          if (picked) setCap({ cpuPercent: picked.cpuPercent, gpuPercent: picked.gpuPercent });
-        }}
-      />
-    );
-    fields = null;
-    controls = (
-      <>
         <Control onClick={() => setQuestion("quiet")} arrow disabled={saving}>
           Next
         </Control>
-        <Control onClick={() => setQuestion("contribute")} quiet>
+        <Control onClick={back} quiet>
           Back
         </Control>
       </>
@@ -199,7 +155,7 @@ export default function ResourceLimits({ flow, update, next, back }: ScreenProps
         <Control onClick={save.run} arrow disabled={saving}>
           Finish
         </Control>
-        <Control onClick={() => setQuestion("cap")} quiet disabled={saving}>
+        <Control onClick={() => setQuestion("contribute")} quiet disabled={saving}>
           Back
         </Control>
       </>

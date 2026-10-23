@@ -25,6 +25,13 @@
  * The order within a version is the order the changes matter, most first.
  */
 const NOTES: Record<string, readonly string[]> = {
+  "0.3.0": [
+    "Common now runs on the new layer network. Instead of each computer running a small model on its own, the computers on the network each hold a slice of one large model and pass the work along, so a question is answered by the network as a whole.",
+    "Joining is one step and sets itself up: it fetches only your share of the model, opens its own connection and starts serving. You can see what it is doing while it works.",
+    "Answers appear word by word as they are made.",
+    "If a computer drops out in the middle of an answer, another takes its place and the answer carries on.",
+    "Settings now shows your layers, who else is online and the address friends can join through, and lets you leave or rejoin. The old model-picking and Ollama steps are gone.",
+  ],
   "0.2.6": [
     "On Windows, setup could stop at its last step. The join could not find Ollama on the machine, even with Ollama installed and running, so the machine ran the whole setup and then never joined the network. It finds it now.",
     "A join that does fail is better described: the app no longer blames the model catalogue for a problem that was somewhere else entirely.",

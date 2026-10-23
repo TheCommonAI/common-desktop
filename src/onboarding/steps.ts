@@ -1,23 +1,22 @@
 import type { FlowState } from "./flow";
 
 /**
- * The six steps, in order.
+ * The five steps, in order.
  *
  * A step is one screen. What happens *inside* a screen — the scan's four reads,
- * the download's seven states, the three limit questions, the four join phases
+ * the download's progress, the two limit questions, the join's states
  * — is a state, not a step, and does not appear here. That distinction is what
  * keeps the limit questions in step five rather than turning them into steps
  * six, seven and eight.
  */
 
-export type StepId = "welcome" | "scan" | "lane" | "download" | "limits" | "join";
+export type StepId = "welcome" | "scan" | "limits" | "download" | "join";
 
 export const STEP_ORDER: readonly StepId[] = [
   "welcome",
   "scan",
-  "lane",
-  "download",
   "limits",
+  "download",
   "join",
 ];
 

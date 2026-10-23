@@ -1,5 +1,4 @@
-import { LANES, tierFor } from "./models";
-import type { HardwareReport, Lane, ResourceLimits, Tier } from "./service";
+import type { HardwareReport, ResourceLimits } from "./service";
 import { STEP_ORDER, type StepId } from "./steps";
 
 /**
@@ -19,8 +18,6 @@ export interface FlowState {
    *  beside the report rather than written into it, so a figure typed once does
    *  not poison a later re-scan. */
   memoryOverrideBytes: number | null;
-  lane: Lane | null;
-  modelId: string | null;
   /** `null` until the limits have been written. The join request needs a value,
    *  and a default is not the same as an answer. */
   limits: ResourceLimits | null;
@@ -39,8 +36,7 @@ export interface Progress {
  *  overwrites it — this is only where the question starts. */
 export function defaultLimits(hardware: HardwareReport | null): ResourceLimits {
   return {
-    contribute: hardware?.power?.source === "battery" ? "plugged-in" : "idle",
-    cap: { cpuPercent: 50, gpuPercent: 40 },
+    contribute: hardware?.power?.source === "battery" ? "plugged-in" : "always",
     quietHours: { start: "22:00", end: "07:00" },
   };
 }
@@ -48,8 +44,6 @@ export function defaultLimits(hardware: HardwareReport | null): ResourceLimits {
 export const INITIAL_FLOW: FlowState = {
   hardware: null,
   memoryOverrideBytes: null,
-  lane: null,
-  modelId: null,
   limits: null,
 };
 
@@ -63,16 +57,9 @@ export function reportWithOverride(flow: FlowState): HardwareReport | null {
   return { ...hardware, memory: { totalBytes: flow.memoryOverrideBytes } };
 }
 
-/** Which rung of the model ladder this flow is on, or `null` if the memory is
- *  still unknown. */
-export function tierOf(flow: FlowState): Tier | null {
-  const bytes = reportWithOverride(flow)?.memory?.totalBytes;
-  return bytes === undefined ? null : tierFor(bytes);
-}
-
 /* -------------------------------- persistence ------------------------------- */
 
-const CONTRIBUTE = ["always", "plugged-in", "idle"] as const;
+const CONTRIBUTE = ["always", "plugged-in"] as const;
 
 function isClock(value: unknown): value is string {
   return typeof value === "string" && /^\d{2}:\d{2}$/.test(value);
@@ -80,20 +67,17 @@ function isClock(value: unknown): value is string {
 
 function readLimits(value: unknown): ResourceLimits | null {
   if (typeof value !== "object" || value === null) return null;
-  const limits = value as Partial<ResourceLimits>;
-  const contribute = CONTRIBUTE.find((c) => c === limits.contribute);
-  const cap = limits.cap;
+  const limits = value as { contribute?: unknown; quietHours?: ResourceLimits["quietHours"] };
+  // An older build also offered "only when idle", which the layer network cannot
+  // honour (nothing here can tell when a person has stepped away), so it is read
+  // as the nearest thing it can keep.
+  const contribute = limits.contribute === "idle" ? "always" : CONTRIBUTE.find((c) => c === limits.contribute);
   const quiet = limits.quietHours;
-  if (contribute === undefined || typeof cap !== "object" || cap === null) return null;
-  if (typeof cap.cpuPercent !== "number" || typeof cap.gpuPercent !== "number") return null;
-  if (quiet == null) return { contribute, cap: { cpuPercent: cap.cpuPercent, gpuPercent: cap.gpuPercent }, quietHours: null };
+  if (contribute === undefined) return null;
+  if (quiet == null) return { contribute, quietHours: null };
   if (typeof quiet !== "object") return null;
   if (!isClock(quiet.start) || !isClock(quiet.end)) return null;
-  return {
-    contribute,
-    cap: { cpuPercent: cap.cpuPercent, gpuPercent: cap.gpuPercent },
-    quietHours: { start: quiet.start, end: quiet.end },
-  };
+  return { contribute, quietHours: { start: quiet.start, end: quiet.end } };
 }
 
 /** Whatever was stored, rebuilt field by field. A blob from an older build is
@@ -102,13 +86,10 @@ function readLimits(value: unknown): ResourceLimits | null {
  *  than throw away the user's whole position. */
 function readFlow(value: unknown): FlowState {
   const source = (typeof value === "object" && value !== null ? value : {}) as Partial<FlowState>;
-  const lane = LANES.find((l) => l === source.lane);
   return {
     hardware: typeof source.hardware === "object" && source.hardware !== null ? source.hardware : null,
     memoryOverrideBytes:
       typeof source.memoryOverrideBytes === "number" ? source.memoryOverrideBytes : null,
-    lane: lane ?? null,
-    modelId: typeof source.modelId === "string" ? source.modelId : null,
     limits: readLimits(source.limits),
   };
 }
@@ -119,14 +100,11 @@ function canEnter(step: StepId, flow: FlowState): boolean {
     case "welcome":
     case "scan":
       return true;
-    case "lane":
+    case "limits":
       return flow.hardware !== null;
     case "download":
-      return flow.lane !== null && flow.modelId !== null;
-    case "limits":
-      return flow.modelId !== null;
     case "join":
-      return flow.lane !== null && flow.modelId !== null && flow.limits !== null;
+      return flow.limits !== null;
   }
 }
 
