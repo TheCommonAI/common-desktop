@@ -591,12 +591,19 @@ export default function Chat() {
   // Tray clicks and the OS-global shortcut reopen the same chat instance.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let unlistenFull: (() => void) | undefined;
     let mounted = true;
     void listen("common-open-quick", () => {
       setOverlayEnabled(true);
       setOverlayMode("quick");
     }).then((cleanup) => {
       if (mounted) unlisten = cleanup;
+      else cleanup();
+    }).catch(() => {});
+    void listen("common-open-full", () => {
+      setOverlayEnabled(false);
+    }).then((cleanup) => {
+      if (mounted) unlistenFull = cleanup;
       else cleanup();
     }).catch(() => {});
     const onKey = (event: KeyboardEvent) => {
@@ -612,6 +619,7 @@ export default function Chat() {
     return () => {
       mounted = false;
       unlisten?.();
+      unlistenFull?.();
       window.removeEventListener("keydown", onKey);
     };
   }, [settings, overlayEnabled]);
