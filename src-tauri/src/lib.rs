@@ -29,7 +29,7 @@ mod sha256;
 mod titlebar;
 
 use tauri::{
-    Manager, WindowEvent, LogicalSize, LogicalPosition, Emitter,
+    Emitter, LogicalPosition, LogicalSize, Manager, WindowEvent,
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
@@ -90,7 +90,10 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Quick Chat", true, None::<&str>)?;
     let full = MenuItem::with_id(app, "full", "Open Common Window", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Common.", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &full, &PredefinedMenuItem::separator(app)?, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[&open, &full, &PredefinedMenuItem::separator(app)?, &quit],
+    )?;
 
     let tray = TrayIconBuilder::new()
         .icon(Image::from_bytes(TRAY_PNG)?)
@@ -182,9 +185,14 @@ pub fn run() {
         .setup(|app| {
             build_tray(app.handle())?;
             #[cfg(target_os = "macos")]
-            if let Err(error) = app.global_shortcut().on_shortcut("CommandOrControl+Shift+Space", |app, _, event| {
-                if event.state == ShortcutState::Pressed { show_quick(app); }
-            }) {
+            if let Err(error) = app.global_shortcut().on_shortcut(
+                "CommandOrControl+Shift+Space",
+                |app, _, event| {
+                    if event.state == ShortcutState::Pressed {
+                        show_quick(app);
+                    }
+                },
+            ) {
                 eprintln!("Common quick chat shortcut unavailable: {error}");
             }
             if let Some(window) = app.get_webview_window("main") {
