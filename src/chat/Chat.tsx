@@ -1,3 +1,5 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Composer from "./Composer";
 import OverlayChat, { type OverlayMode } from "./OverlayChat";
@@ -580,18 +582,56 @@ export default function Chat() {
     if (offeredVersion !== null) setWavedAway(offeredVersion);
   }, [offeredVersion]);
 
+  // Keep the single native window sized to the selected overlay.
   useEffect(() => {
+    const nativeMode = !overlayEnabled || settings || fresh !== null || updateOpen ? "full" : overlayMode;
+    void invoke("set_chat_overlay_mode", { mode: nativeMode }).catch(() => {});
+  }, [overlayEnabled, overlayMode, settings, fresh, updateOpen]);
+
+  // Tray clicks and the OS-global shortcut reopen the same chat instance.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let unlistenFull: (() => void) | undefined;
+    let mounted = true;
+    void listen("common-open-quick", () => {
+      setOverlayEnabled(true);
+      setOverlayMode("quick");
+      requestAnimationFrame(() => {
+        document.querySelector<HTMLInputElement>(".common-overlay__quickbar input")?.focus();
+      });
+    }).then((cleanup) => {
+      if (mounted) unlisten = cleanup;
+      else cleanup();
+    }).catch(() => {});
+    void listen("common-open-full", () => {
+      setOverlayEnabled(false);
+    }).then((cleanup) => {
+      if (mounted) unlistenFull = cleanup;
+      else cleanup();
+    }).catch(() => {});
     const onKey = (event: KeyboardEvent) => {
-      if (event.altKey && event.code === "Space") {
+      if (event.metaKey && event.shiftKey && event.code === "Space") {
         event.preventDefault();
         setOverlayEnabled(true);
-        setOverlayMode((current) => current === "quick" ? "conversation" : "quick");
+        setOverlayMode("quick");
+      } else if (event.key === "Escape" && !settings && overlayEnabled) {
+        if (overlayMode === "quick") void invoke("hide_chat_overlay").catch(() => {});
+        else setOverlayMode("quick");
       }
-      if (event.key === "Escape" && !settings && overlayEnabled) setOverlayMode("quick");
+    };
+    const onBlur = () => {
+      if (overlayEnabled && !settings) void invoke("hide_chat_overlay").catch(() => {});
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [settings, overlayEnabled]);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      mounted = false;
+      unlisten?.();
+      unlistenFull?.();
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, [settings, overlayEnabled, overlayMode]);
 
   return (
     <section className={"chat" + (overlayEnabled ? " chat--overlay-active" : "")} aria-label="Chat">

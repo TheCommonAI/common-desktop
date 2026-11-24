@@ -23,6 +23,7 @@ tauri-build = { version = "2", features = [] }
 # to be named here or the tray simply will not build.
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
+tauri-plugin-global-shortcut = "2"
 # The updater. It is driven from the Rust side only — see `update.rs` — so the
 # webview never calls it and no capability has to be granted for it. There is no
 # `@tauri-apps/plugin-updater` on the npm side for the same reason: the three
