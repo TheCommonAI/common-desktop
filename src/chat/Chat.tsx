@@ -612,17 +612,23 @@ export default function Chat() {
         setOverlayEnabled(true);
         setOverlayMode("quick");
       } else if (event.key === "Escape" && !settings && overlayEnabled) {
-        setOverlayMode("quick");
+        if (overlayMode === "quick") void invoke("hide_chat_overlay").catch(() => {});
+        else setOverlayMode("quick");
       }
     };
+    const onBlur = () => {
+      if (overlayEnabled && !settings) void invoke("hide_chat_overlay").catch(() => {});
+    };
     window.addEventListener("keydown", onKey);
+    window.addEventListener("blur", onBlur);
     return () => {
       mounted = false;
       unlisten?.();
       unlistenFull?.();
       window.removeEventListener("keydown", onKey);
+      window.removeEventListener("blur", onBlur);
     };
-  }, [settings, overlayEnabled]);
+  }, [settings, overlayEnabled, overlayMode]);
 
   return (
     <section className={"chat" + (overlayEnabled ? " chat--overlay-active" : "")} aria-label="Chat">
