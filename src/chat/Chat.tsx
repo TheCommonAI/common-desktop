@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Composer from "./Composer";
+import OverlayChat, { type OverlayMode } from "./OverlayChat";
 import Settings from "./Settings";
 import Sidebar from "./Sidebar";
 import Transcript from "./Transcript";
@@ -126,6 +127,8 @@ export default function Chat() {
   // still busy but the "Thinking" mark has done its job.
   const [streaming, setStreaming] = useState(false);
   const [settings, setSettings] = useState(() => preview().settings);
+  const [overlayMode, setOverlayMode] = useState<OverlayMode>("quick");
+  const [overlayEnabled, setOverlayEnabled] = useState(true);
 
   const view = usePeer();
   const phase = phaseOf(view);
@@ -577,9 +580,47 @@ export default function Chat() {
     if (offeredVersion !== null) setWavedAway(offeredVersion);
   }, [offeredVersion]);
 
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.altKey && event.code === "Space") {
+        event.preventDefault();
+        setOverlayEnabled(true);
+        setOverlayMode((current) => current === "quick" ? "conversation" : "quick");
+      }
+      if (event.key === "Escape" && !settings && overlayEnabled) setOverlayMode("quick");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [settings, overlayEnabled]);
+
   return (
-    <section className="chat" aria-label="Chat">
-      <Sidebar
+    <section className={"chat" + (overlayEnabled ? " chat--overlay-active" : "")} aria-label="Chat">
+      {overlayEnabled && (
+        <div className="common-overlay-stage">
+          <OverlayChat
+            mode={overlayMode}
+            chats={chats.list}
+            active={active}
+            busy={thinking || streaming}
+            thinking={thinking}
+            unavailable={unavailableReason(phase, view, paused)}
+            onMode={(mode) => {
+              if (mode === "full") {
+                setOverlayEnabled(false);
+                return;
+              }
+              setOverlayMode(mode);
+            }}
+            onSend={send}
+            onSelect={selectChat}
+            onNew={newChat}
+            onDelete={deleteChat}
+            onStop={stopWaiting}
+            onSettings={() => setSettings(true)}
+          />
+        </div>
+      )}
+      {!overlayEnabled && <Sidebar
         paused={paused}
         chats={chats.list}
         activeId={chats.activeId}
@@ -590,11 +631,11 @@ export default function Chat() {
         offer={offer}
         onInstall={installUpdate}
         onRestart={restartForUpdate}
-      />
-      <div className="chat__main">
+      />}
+      {!overlayEnabled && <div className="chat__main">
         <Transcript messages={active.messages} thinking={thinking} onStop={stopWaiting} />
         <Composer onSend={send} busy={thinking || streaming} unavailable={unavailableReason(phase, view, paused)} />
-      </div>
+      </div>}
       {/* Kept mounted and driven by `open`, rather than mounted on demand. A
           `<dialog>` that is closed is `display: none` and costs nothing, and
           taking an *open* modal dialog out of the DOM is a corner of the top

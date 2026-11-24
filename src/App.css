@@ -2069,3 +2069,201 @@ body {
      The sphere is still draggable in that frame, which is motion the user is
      making rather than motion being made at them. */
 }
+
+
+/* Common's lightweight floating chat — overlays share the existing saved chats. */
+.chat--overlay-active { background: #181818; }
+.common-overlay-stage {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  overflow: hidden;
+  background: radial-gradient(ellipse at 50% 12%, #303030 0%, #1c1c1c 55%, #171717 100%);
+}
+.common-overlay {
+  color: #eee;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #252525;
+  border: 1px solid #363636;
+  border-radius: 17px;
+  box-shadow: 0 20px 60px #0008, 0 2px 12px #0005;
+}
+.common-overlay--quick {
+  position: relative;
+  width: min(440px, 100%);
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+.common-overlay__quickbar {
+  border: 1px solid #424242;
+  border-radius: 17px;
+  background: #272727;
+  box-shadow: 0 18px 40px #0007;
+  padding: 2px;
+}
+.common-overlay__quickbar .composer,
+.common-overlay__composer .composer {
+  margin: 0;
+  border-radius: 14px;
+  min-height: 47px;
+  background: transparent;
+}
+.common-overlay .composer__input {
+  font: 400 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #f2f2f2;
+}
+.common-overlay .composer__input::placeholder { color: #969696; text-transform: none; }
+.common-overlay .composer__send {
+  border-radius: 50%;
+  background: #f2f2f2;
+  color: #222;
+  width: 30px;
+  height: 30px;
+}
+.common-overlay__hint {
+  display: block;
+  margin: 9px auto 0;
+  width: fit-content;
+  padding: 4px 9px;
+  border-radius: 8px;
+  color: #aaa;
+  background: #222;
+  font-size: 10px;
+}
+.common-overlay__quiet-link {
+  display: block;
+  margin: 8px auto;
+  background: none;
+  border: none;
+  color: #a9a9a9;
+  cursor: pointer;
+  font-size: 11px;
+}
+.common-overlay--conversation,
+.common-overlay--history,
+.common-overlay--full {
+  display: flex;
+  flex-direction: column;
+  width: min(460px, 100%);
+  height: min(440px, 85vh);
+  overflow: hidden;
+}
+.common-overlay--full { width: min(760px, 100%); height: min(550px, 90vh); }
+.common-overlay--history { height: min(460px, 85vh); }
+.common-overlay__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 44px;
+  padding: 0 12px;
+  border-bottom: 1px solid #373737;
+  -webkit-app-region: drag;
+}
+.common-overlay__header button { -webkit-app-region: no-drag; }
+.common-overlay__brand {
+  background: none;
+  border: none;
+  color: #f1f1f1;
+  font-size: 11px;
+  letter-spacing: -.02em;
+  font-weight: 800;
+  cursor: pointer;
+}
+.common-overlay__actions { display: flex; gap: 4px; }
+.common-overlay__actions button {
+  color: #aaa;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 18px;
+  min-width: 27px;
+  height: 27px;
+  border-radius: 7px;
+}
+.common-overlay__actions button:hover { background: #3a3a3a; color: #fff; }
+.common-overlay__transcript { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+.common-overlay__transcript .chat__log { width: 100%; padding: 20px 18px; font-size: 12px; }
+.common-overlay__composer { padding: 7px; border-top: 1px solid #373737; }
+.common-overlay__composer .composer { background: #323232; min-height: 39px; }
+.common-overlay__history {
+  display: flex;
+  flex-direction: column;
+  padding: 14px 12px;
+  flex: 1;
+  min-height: 0;
+}
+.common-overlay__history h2 { margin: 0 0 12px; font-size: 16px; font-weight: 650; }
+.common-overlay__search {
+  width: 100%;
+  border: 0;
+  outline: none;
+  border-radius: 8px;
+  padding: 10px;
+  background: #333;
+  color: #eee;
+  font: inherit;
+  font-size: 12px;
+}
+.common-overlay__groups { flex: 1; overflow: auto; margin-top: 10px; }
+.common-overlay__group { margin-bottom: 14px; }
+.common-overlay__group h3 { margin: 9px 3px 6px; font-size: 10px; color: #aaa; font-weight: 550; }
+.common-overlay__chatrow { position: relative; border-radius: 8px; }
+.common-overlay__chatrow:hover { background: #303030; }
+.common-overlay__chatrow.is-active { background: #303449; outline: 1px solid #515c92; }
+.common-overlay__chatpick {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  width: 100%;
+  padding: 9px 26px 9px 10px;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: #eaeaea;
+  cursor: pointer;
+}
+.common-overlay__chatmark { color: #999; font-size: 18px; }
+.common-overlay__chattext { flex: 1; min-width: 0; }
+.common-overlay__chattext strong,
+.common-overlay__chattext small {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.common-overlay__chattext strong { font-size: 12px; font-weight: 550; }
+.common-overlay__chattext small { color: #999; font-size: 10px; margin-top: 3px; }
+.common-overlay__time { color: #999; font-size: 9px; white-space: nowrap; }
+.common-overlay__delete {
+  position: absolute;
+  right: 2px;
+  top: 7px;
+  display: none;
+  background: #414141;
+  color: #ddd;
+  border: 0;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.common-overlay__chatrow:hover .common-overlay__delete,
+.common-overlay__delete:focus-visible { display: block; }
+.common-overlay__empty { font-size: 12px; color: #aaa; }
+.common-overlay__settings {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  color: #aaa;
+  font-size: 11px;
+  padding: 8px 3px 0;
+  cursor: pointer;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .common-overlay { animation: common-overlay-appear .16s ease-out; }
+  @keyframes common-overlay-appear {
+    from { opacity: .6; transform: translateY(5px) scale(.99); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+}
