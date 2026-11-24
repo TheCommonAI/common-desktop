@@ -1,3 +1,5 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Composer from "./Composer";
 import OverlayChat, { type OverlayMode } from "./OverlayChat";
@@ -580,17 +582,38 @@ export default function Chat() {
     if (offeredVersion !== null) setWavedAway(offeredVersion);
   }, [offeredVersion]);
 
+  // Keep the single native window sized to the selected overlay.
   useEffect(() => {
+    const nativeMode = !overlayEnabled || settings || fresh !== null || updateOpen ? "full" : overlayMode;
+    void invoke("set_chat_overlay_mode", { mode: nativeMode }).catch(() => {});
+  }, [overlayEnabled, overlayMode, settings, fresh, updateOpen]);
+
+  // Tray clicks and the OS-global shortcut reopen the same chat instance.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let mounted = true;
+    void listen("common-open-quick", () => {
+      setOverlayEnabled(true);
+      setOverlayMode("quick");
+    }).then((cleanup) => {
+      if (mounted) unlisten = cleanup;
+      else cleanup();
+    }).catch(() => {});
     const onKey = (event: KeyboardEvent) => {
-      if (event.altKey && event.code === "Space") {
+      if (event.metaKey && event.shiftKey && event.code === "Space") {
         event.preventDefault();
         setOverlayEnabled(true);
-        setOverlayMode((current) => current === "quick" ? "conversation" : "quick");
+        setOverlayMode("quick");
+      } else if (event.key === "Escape" && !settings && overlayEnabled) {
+        setOverlayMode("quick");
       }
-      if (event.key === "Escape" && !settings && overlayEnabled) setOverlayMode("quick");
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      mounted = false;
+      unlisten?.();
+      window.removeEventListener("keydown", onKey);
+    };
   }, [settings, overlayEnabled]);
 
   return (
