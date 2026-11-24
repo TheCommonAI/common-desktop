@@ -162,6 +162,12 @@ fn show_quick(app: &tauri::AppHandle) {
     let _ = app.emit("common-open-quick", ());
 }
 #[tauri::command]
+fn hide_chat_overlay(app: tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+}
+#[tauri::command]
 fn set_chat_overlay_mode(app: tauri::AppHandle, mode: String) {
     set_chat_window(&app, &mode);
 }
@@ -229,6 +235,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             set_chat_overlay_mode,
+            hide_chat_overlay,
             // The four hardware reads, one at a time so the scan screen can say
             // which one it is waiting on and so one refusal costs one field.
             backend::read_memory,
