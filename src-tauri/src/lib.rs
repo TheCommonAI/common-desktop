@@ -40,6 +40,7 @@ use tauri::{
 // match being written to fall through on a variant that is not there to name.
 #[cfg(target_os = "macos")]
 use tauri::RunEvent;
+#[cfg(target_os = "macos")]
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
