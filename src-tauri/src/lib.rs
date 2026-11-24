@@ -29,7 +29,7 @@ mod sha256;
 mod titlebar;
 
 use tauri::{
-    Manager, WindowEvent,
+    Manager, WindowEvent, LogicalSize, LogicalPosition, Emitter,
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
@@ -40,6 +40,7 @@ use tauri::{
 // match being written to fall through on a variant that is not there to name.
 #[cfg(target_os = "macos")]
 use tauri::RunEvent;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -86,9 +87,10 @@ const TRAY_PNG: &[u8] = include_bytes!("../icons/tray.png");
 const TRAY_PNG: &[u8] = include_bytes!("../icons/32x32.png");
 
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "open", "Open Common.", true, None::<&str>)?;
+    let open = MenuItem::with_id(app, "open", "Quick Chat", true, None::<&str>)?;
+    let full = MenuItem::with_id(app, "full", "Open Common Window", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Common.", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &PredefinedMenuItem::separator(app)?, &quit])?;
+    let menu = Menu::with_items(app, &[&open, &full, &PredefinedMenuItem::separator(app)?, &quit])?;
 
     let tray = TrayIconBuilder::new()
         .icon(Image::from_bytes(TRAY_PNG)?)
@@ -97,7 +99,8 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         // left click. The window is one item down in it.
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id.as_ref() {
-            "open" => show_main(app),
+            "open" => show_quick(app),
+            "full" => show_main(app),
             // `exit` does not go through `CloseRequested`, so this quits even
             // though the window's own close button no longer does.
             "quit" => app.exit(0),
@@ -124,10 +127,41 @@ fn show_main(app: &tauri::AppHandle) {
     }
 }
 
+/// Share a single chat window so background peer streams and history stay intact.
+fn set_chat_window(app: &tauri::AppHandle, mode: &str) {
+    if let Some(window) = app.get_webview_window("main") {
+        let (width, height) = match mode {
+            "quick" => (500.0, 165.0),
+            "conversation" | "history" => (520.0, 540.0),
+            _ => (800.0, 600.0),
+        };
+        let _ = window.set_size(tauri::Size::Logical(LogicalSize::new(width, height)));
+        if let Ok(Some(monitor)) = window.current_monitor() {
+            let scale = monitor.scale_factor();
+            let monitor_size = monitor.size().to_logical::<f64>(scale);
+            let monitor_origin = monitor.position().to_logical::<f64>(scale);
+            let left = monitor_origin.x + (monitor_size.width - width) / 2.0;
+            let top = monitor_origin.y + (monitor_size.height - height) / 2.8;
+            let _ = window.set_position(tauri::Position::Logical(LogicalPosition::new(left, top)));
+        } else {
+            let _ = window.center();
+        }
+    }
+}
+fn show_quick(app: &tauri::AppHandle) {
+    set_chat_window(app, "quick");
+    show_main(app);
+    let _ = app.emit("common-open-quick", ());
+}
+#[tauri::command]
+fn set_chat_overlay_mode(app: tauri::AppHandle, mode: String) {
+    set_chat_window(&app, &mode);
+}
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         // The updater plugin, registered for the Rust side only. Nothing in the
         // webview calls it — the three commands in `update.rs` do — so this adds
         // no permission for the page and changes no capability.
@@ -142,6 +176,12 @@ pub fn run() {
         .manage(fetch::Bootstrap::default())
         .setup(|app| {
             build_tray(app.handle())?;
+            #[cfg(target_os = "macos")]
+            if let Err(error) = app.global_shortcut().on_shortcut("CommandOrControl+Shift+Space", |app, _, event| {
+                if event.state == ShortcutState::Pressed { show_quick(app); }
+            }) {
+                eprintln!("Common quick chat shortcut unavailable: {error}");
+            }
             if let Some(window) = app.get_webview_window("main") {
                 titlebar::match_ground(&window);
             }
@@ -175,6 +215,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             greet,
+            set_chat_overlay_mode,
             // The four hardware reads, one at a time so the scan screen can say
             // which one it is waiting on and so one refusal costs one field.
             backend::read_memory,
