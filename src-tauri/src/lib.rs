@@ -100,7 +100,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => show_quick(app),
-            "full" => show_main(app),
+            "full" => show_full(app),
             // `exit` does not go through `CloseRequested`, so this quits even
             // though the window's own close button no longer does.
             "quit" => app.exit(0),
@@ -147,6 +147,11 @@ fn set_chat_window(app: &tauri::AppHandle, mode: &str) {
             let _ = window.center();
         }
     }
+}
+fn show_full(app: &tauri::AppHandle) {
+    set_chat_window(app, "full");
+    show_main(app);
+    let _ = app.emit("common-open-full", ());
 }
 fn show_quick(app: &tauri::AppHandle) {
     set_chat_window(app, "quick");
