@@ -596,6 +596,9 @@ export default function Chat() {
     void listen("common-open-quick", () => {
       setOverlayEnabled(true);
       setOverlayMode("quick");
+      requestAnimationFrame(() => {
+        document.querySelector<HTMLInputElement>(".common-overlay__quickbar input")?.focus();
+      });
     }).then((cleanup) => {
       if (mounted) unlisten = cleanup;
       else cleanup();
