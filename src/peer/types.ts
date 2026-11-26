@@ -34,7 +34,7 @@ export interface PeerStatus {
   v: 1;
   state: PeerState;
   network?: string;
-  /** The model the network serves, by name. */
+  /** The model this peer reports serving; coordinator-selected routes are not reported here. */
   model?: string;
   peer?: string;
   /** The layers this machine serves, `[from, to)`. */

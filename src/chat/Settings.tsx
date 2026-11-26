@@ -227,7 +227,11 @@ export default function Settings({ open, onClose, version, offer, onCheck, onIns
         <p className="settings__fact" role="status">
           {fact}
         </p>
-        {status?.model && <p className="settings__fact">{status.model}{status.backend ? ` on ${status.backend}` : ""}</p>}
+        {status?.model && (
+          <p className="settings__fact">
+            Peer model: {status.model}{status.backend ? ` on ${status.backend}` : ""}
+          </p>
+        )}
         {problem !== null && <p className="settings__fact">{problem}</p>}
 
         <div className="settings__row">
