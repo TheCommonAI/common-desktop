@@ -83,7 +83,7 @@ export function reportText(d: PeerDiagnostics): string {
   } else {
     row("  state", status.state);
     row("  network", status.network);
-    row("  model", status.model);
+    row("  peer model", status.model);
     row("  peer id", status.peer);
     row("  layers", status.window ? `${status.window[0]} to ${status.window[1]}` : null);
     row("  backend", status.backend);

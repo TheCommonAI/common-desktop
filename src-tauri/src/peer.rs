@@ -5,7 +5,9 @@
 //! reads what that peer says about itself from a status file. Everything the
 //! screens show — what is downloading, which layers are ours, who else is on,
 //! whether chat is ready — is that file. Chat goes to the same process, on
-//! loopback, over its OpenAI-compatible API.
+//! loopback, over its OpenAI-compatible API. This is separate from the Common
+//! Network chat coordinator: coordinator-only routes such as Bonsai fallback do
+//! not change this peer's reported model.
 //!
 //! Three jobs live here:
 //!
@@ -886,6 +888,20 @@ mod tests {
             text.contains("api_key"),
             "only exactly `key` or the listed words go"
         );
+    }
+
+    #[test]
+    fn scrub_preserves_the_peer_reported_model() {
+        let mut status = json!({
+            "state": "up",
+            "model": "peer-reported-model",
+            "network": "peer-reported-network",
+            "api_token": "must-not-leak",
+        });
+        scrub(&mut status);
+        assert_eq!(status["model"], "peer-reported-model");
+        assert_eq!(status["network"], "peer-reported-network");
+        assert!(status.get("api_token").is_none());
     }
 
     #[test]
